@@ -10,17 +10,24 @@ printf "\e[0m"
 apt-get update -y && apt install curl -y && apt install sudo -y && apt install nano -y
 
 # 添加回车等待
-read -p "按回车继续执行安装kejilion工具箱脚本..."
-clear
-curl -sS -O https://raw.githubusercontent.com/kejilion/sh/main/kejilion.sh && chmod +x kejilion.sh && ./kejilion.sh
+#!/bin/bash
 
+# 按回车继续执行安装kejilion工具箱脚本
+read -p "按回车继续执行安装kejilion工具箱脚本（输入n跳过）..." input
+if [[ "$input" != "n" ]]; then
+    clear
+    curl -sS -O https://raw.githubusercontent.com/kejilion/sh/main/kejilion.sh && chmod +x kejilion.sh && ./kejilion.sh
+fi
 
-# 添加回车等待
-read -p "按回车继续执行安装hysteria2..."
-clear
-bash <(curl -fsSL https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/main/hy2-panel.sh)
+# 添加回车等待安装 hysteria2
+read -p "按回车继续执行安装hysteria2（输入n跳过）..." input
+if [[ "$input" != "n" ]]; then
+    clear
+    bash <(curl -fsSL https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/main/hy2-panel.sh)
+fi
 
-# 添加回车等待
-read -p "按回车继续执行安装sing-box..."
-
-bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/install.sh)
+# 添加回车等待安装 sing-box
+read -p "按回车继续执行安装sing-box（输入n跳过）..." input
+if [[ "$input" != "n" ]]; then
+    bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/install.sh)
+fi
