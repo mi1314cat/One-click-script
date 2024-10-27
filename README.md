@@ -26,7 +26,7 @@ bash <(curl -fsSL https://github.com/mi1314cat/xary-core/raw/refs/heads/main/acm
  ```bash
 apk add curl && apk add bash && bash <(curl -fsSL https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/acme.sh)
 ```
-## **xray-core一键脚本**  [xray](https://github.com/mi1314cat/xary-core)
+## **_[xray](https://github.com/mi1314cat/xary-core)core_**
 ### xrayS- vmess+ws和sock5
 ```bash
 bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xrayS.sh)
@@ -36,25 +36,25 @@ bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xrayS
 ```bash
 bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/reality_xray.sh)
 ```
-## **sing-box内核** [sing-box](https://github.com/mi1314cat/sing-box-core)
-## reality hysteria2二合一脚本
+## **_[sing-box](https://github.com/mi1314cat/sing-box-core)core_**
+## _reality hysteria2二合一脚本_
 
 ```bash
 bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/install.sh)
 ```
 
-## **hysteria2-core一键脚本** [hysteria2](https://github.com/mi1314cat/hysteria2-core)
-### hysteria2 带面板脚本
+## **_[hysteria2](https://github.com/mi1314cat/hysteria2-core)_**
+### _hysteria2 带面板脚本_
 ```bash
 bash <(curl -fsSL https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/main/hy2-panel.sh)
 ```
-### hysteria2 快速脚本
+### _hysteria2 快速脚本_
 ```bash
 bash <(curl -fsSL https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/main/fast-hy2.sh)
 ```
-## infinite-nodes IPv6 [infinite-nodes](https://github.com/mi1314cat/infiniteipv6)
-### Debian ubuntu ... ipv6无限节点  
-#### `ipv6后缀要小于128` Debian ubuntu ...
+## **_[infinite-nodes](https://github.com/mi1314cat/infiniteipv6) ipv6_**
+### Debian ubuntu ... _ipv6无限节点 _ 
+#### **`ipv6后缀要小于128`** Debian ubuntu ...
 ```bash
 bash <(curl -fsSL https://github.com/mi1314cat/infiniteipv6/raw/refs/heads/main/infinite-nodes.sh)
 ```
