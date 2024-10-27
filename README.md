@@ -8,11 +8,11 @@
 - 支持warp，任意门，ss解锁流媒体
 - 支持任意门中转
 - 支持端口跳跃
-## `**_Debian ubuntu ... 一键脚本_**`
+## **_`Debian ubuntu ... 一键脚本`_**
 ```bash
 bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/Ubuntu.sh)
 ```
-## `**_[Alpine](https://github.com/mi1314cat/Alpine-script)  一键脚本_**`
+## **_`[Alpine](https://github.com/mi1314cat/Alpine-script)  一键脚本`_**
 ```bash
 apk add curl && apk add bash && bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/alpine.sh)
 ```
