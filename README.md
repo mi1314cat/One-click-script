@@ -8,11 +8,11 @@
 - 支持warp，任意门，ss解锁流媒体
 - 支持任意门中转
 - 支持端口跳跃
-## Debian ubuntu ... 一键脚本
+## `**_Debian ubuntu ... 一键脚本_**`
 ```bash
 bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/Ubuntu.sh)
 ```
-## `Alpine`-script 一键脚本
+## `**_[Alpine](https://github.com/mi1314cat/Alpine-script)  一键脚本_**`
 ```bash
 apk add curl && apk add bash && bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/alpine.sh)
 ```
@@ -26,7 +26,7 @@ bash <(curl -fsSL https://github.com/mi1314cat/xary-core/raw/refs/heads/main/acm
  ```bash
 apk add curl && apk add bash && bash <(curl -fsSL https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/acme.sh)
 ```
-## **_[xray](https://github.com/mi1314cat/xary-core)core_**
+## **_[xray core](https://github.com/mi1314cat/xary-core)_**
 ### xrayS- vmess+ws和sock5
 ```bash
 bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xrayS.sh)
@@ -36,7 +36,7 @@ bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xrayS
 ```bash
 bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/reality_xray.sh)
 ```
-## **_[sing-box](https://github.com/mi1314cat/sing-box-core)core_**
+## **_[sing-box core](https://github.com/mi1314cat/sing-box-core)_**
 ## _reality hysteria2二合一脚本_
 
 ```bash
