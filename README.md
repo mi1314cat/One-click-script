@@ -12,7 +12,7 @@
 ```bash
 bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/Ubuntu.sh)
 ```
-## **_`[Alpine](https://github.com/mi1314cat/Alpine-script)  一键脚本`_**
+## **_[Alpine](https://github.com/mi1314cat/Alpine-script)  一键脚本_**
 ```bash
 apk add curl && apk add bash && bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/alpine.sh)
 ```
