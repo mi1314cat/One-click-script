@@ -10,7 +10,7 @@
 - 支持端口跳跃
 # Debian ubuntu ... 一键脚本
 ```bash
-bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/sing-box-xary-hysteria2.catmi/raw/refs/heads/main/Ubuntu.sh)
+bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/Ubuntu.sh)
 ```
 # Alpine-script 一键脚本
 ```bash
