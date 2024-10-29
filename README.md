@@ -29,12 +29,12 @@ apk add curl && apk add bash && bash <(curl -fsSL https://github.com/mi1314cat/A
 ## **_[xray core](https://github.com/mi1314cat/xary-core)_**
 ### xrayS- vmess+ws和sock5
 ```bash
-bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xrayS.sh)
+bash <(curl -fsSL https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xrayS.sh)
 ```
 ### reality一键脚本
 
 ```bash
-bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/reality_xray.sh)
+bash <(curl -fsSL https://github.com/mi1314cat/xary-core/raw/refs/heads/main/reality_xray.sh)
 ```
 ## **_[sing-box core](https://github.com/mi1314cat/sing-box-core)_**
 ## _reality hysteria2二合一脚本_
