@@ -42,6 +42,10 @@ bash <(curl -fsSL https://github.com/mi1314cat/xary-core/raw/refs/heads/main/rea
 ```bash
 bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/install.sh)
 ```
+## _`sing-box max 多协议选择`_
+```bash
+bash <(curl -fsSL https://github.com/mi1314cat/sing-box-max/raw/refs/heads/main/sing-box.sh)
+```
 
 ## **_[hysteria2](https://github.com/mi1314cat/hysteria2-core)_**
 ### _hysteria2 带面板脚本_
