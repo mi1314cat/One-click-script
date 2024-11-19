@@ -13,10 +13,10 @@ apt-get update -y && apt install sudo -y && apt install nano -y && apt install w
 #!/bin/bash
 
 # 按回车继续执行安装kejilion工具箱脚本
-read -p "按回车继续执行安装kejilion工具箱脚本（输入n跳过）..." input
+read -p "按回车继续执行安装warp（输入n跳过）..." input
 if [[ "$input" != "n" ]]; then
     clear
-    curl -sS -O https://raw.githubusercontent.com/kejilion/sh/main/kejilion.sh && chmod +x kejilion.sh && ./kejilion.sh
+    wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh; sed -i "s#WIREGUARD_GO_ENABLE=0#WIREGUARD_GO_ENABLE=1#g" menu.sh; bash menu.sh
 fi
 
 # 添加回车等待安装 hysteria2
