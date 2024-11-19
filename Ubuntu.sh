@@ -7,7 +7,7 @@ printf "       -------------(((---(((-------------------\n"
 printf "                    catmi-一键脚本 \n"
 printf "       -----------------------------------------\n"
 printf "\e[0m"
-apt-get update -y && apt install curl -y && apt install sudo -y && apt install nano -y
+apt-get update -y && apt install sudo -y && apt install nano -y && apt install wget -y
 
 # 添加回车等待
 #!/bin/bash
