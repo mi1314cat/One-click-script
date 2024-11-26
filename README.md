@@ -16,6 +16,10 @@ apt update && apt install bash  &&  apt install curl -y && bash <(curl -fsSL htt
 ```bash
 apk add curl && apk add bash && bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/alpine.sh)
 ```
+### vless+ws 域名
+```bash
+bash <(curl -fsSL https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/Avless.sh)
+```
 
 ## **申请证书**
 ### Debian ubuntu ...ac证书
@@ -27,9 +31,10 @@ bash <(curl -fsSL https://github.com/mi1314cat/xary-core/raw/refs/heads/main/acm
 apk add curl && apk add bash && bash <(curl -fsSL https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/acme.sh)
 ```
 ## **_[xray core](https://github.com/mi1314cat/xary-core)_**
-### xrayS- vmess+ws和sock5
+### vless+ws 域名
+
 ```bash
-bash <(curl -fsSL https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xrayS.sh)
+bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/vless.sh)
 ```
 ### reality一键脚本
 
