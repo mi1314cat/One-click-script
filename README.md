@@ -16,7 +16,12 @@ apt update && apt install bash  &&  apt install curl -y && bash <(curl -fsSL htt
 ```bash
 apk add curl && apk add bash && bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/alpine.sh)
 ```
-### Alpine vless+ws 域名
+### Alpine vless+ws 域名 reality 
+#### vless+ws 域名 reality 二合一
+```bash
+bash <(curl -fsSL https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/RWvless.sh)
+```
+#### vless+ws 域名
 ```bash
 bash <(curl -fsSL https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/Avless.sh)
 ```
