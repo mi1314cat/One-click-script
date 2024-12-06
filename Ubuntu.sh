@@ -104,7 +104,7 @@ install_xray() {
 }
 
 exit_program() {
-    echo "退出面板。感谢使用 Catmi Alpine 面板！"
+    echo "退出面板 Catmiup 面板！"
     exit 0
 }
 
