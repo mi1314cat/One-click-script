@@ -110,11 +110,11 @@ exit_program() {
 
 # 快捷方式设置函数
 create_shortcut() {
-    local shortcut_path="/usr/local/bin/catmiap"
+    local shortcut_path="/usr/local/bin/catmiup"
     echo "创建快捷方式：${shortcut_path}"
-    echo 'bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/alpine.sh)' > "$shortcut_path"
+    echo 'bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/Ubuntu.sh)' > "$shortcut_path"
     chmod +x "$shortcut_path"
-    echo "快捷方式创建成功！直接运行 'catmiap' 启动面板。"
+    echo "快捷方式创建成功！直接运行 'catmiup' 启动面板。"
 }
 
 # 主函数
