@@ -59,7 +59,7 @@ install_toolbox() {
 }
 
 install_hysteria() {
-    echo "开始安装 Alpine-Hysteria2..."
+    echo "开始安装 Hysteria2..."
     bash <(curl -fsSL https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/main/hy2-panel.sh) || { echo "Hysteria2 安装失败"; return; }
     read -p "安装完成，按回车返回主菜单..."
     main_menu
