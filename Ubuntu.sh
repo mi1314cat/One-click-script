@@ -89,11 +89,11 @@ install_xray() {
     case $vchoice in
         1)
             echo "安装支持 IPv4 的脚本..."
-            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/vless.sh) || { echo "IPv4 脚本安装失败"; return; }
+            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/VEVLRE.sh) || { echo "IPv4 脚本安装失败"; return; }
             ;;
         2)
             echo "安装支持 IPv6 的脚本..."
-            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/6vless.sh) || { echo "IPv6 脚本安装失败"; return; }
+            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/VEVLRE6.sh) || { echo "IPv6 脚本安装失败"; return; }
             ;;
         *)
             echo "无效的选项，返回主菜单。"
