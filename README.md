@@ -8,6 +8,10 @@
 - 支持warp，任意门，ss解锁流媒体
 - 支持任意门中转
 - 支持端口跳跃
+# serv00注册
+```bash
+bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/serv00.sh)
+```
 ## **_`Debian ubuntu ... 一键脚本`_**
 ```bash
 apt update && apt install bash  &&  apt install curl -y && bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/Ubuntu.sh)
