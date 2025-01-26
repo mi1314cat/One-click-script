@@ -2,7 +2,7 @@
 
 # 备份原始配置文件
 sudo cp /etc/network/interfaces /etc/network/interfaces.bak
-
+ip a
 # 获取用户输入
 read -p "请输入基础IPv6地址（含前缀，如2a0f:7803:fac4:c933::1/64）: " base_ip
 read -p "需要生成的地址数量: " count
