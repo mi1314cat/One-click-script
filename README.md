@@ -10,7 +10,10 @@
 - 支持端口跳跃
 # 一键脚本
 ```
-bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/APU.sh)
+apt install bash  &&  apt install curl -y && bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/APU.sh)
+```
+```bash
+apk add curl && apk add bash && bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/APU.sh)
 ```
 ## **_`Debian ubuntu ... 一键脚本`_**
 ```bash
