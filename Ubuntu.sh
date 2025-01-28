@@ -14,6 +14,8 @@ initialize_dependencies() {
     echo "检查并安装基础依赖..."
     apt-get update -y && apt install sudo -y && apt install nano -y && apt install wget -y || { echo "依赖安装失败，请检查网络环境！"; exit 1; }
     echo "基础依赖安装完成。"
+    read -p "安装完成，按回车返回主菜单..."
+    main_menu
 }
 
 # 创建面板函数
@@ -24,6 +26,7 @@ main_menu() {
     echo "                   Catmiup 面板            "
     echo "================================================="
     echo -e "\e[0m"
+    echo "00) 安装基础依赖"
     echo "1) 安装 Kejilion 工具箱"
     echo "2) 安装 Hysteria2"
     echo "3) 安装 warp"
@@ -35,6 +38,7 @@ main_menu() {
     read choice
 
     case $choice in
+        00) initialize_dependencies ;;
         1) install_toolbox ;;
         2) install_hysteria ;;
         3) install_warp ;;
@@ -102,7 +106,18 @@ install_xray() {
     read -p "安装完成，按回车返回主菜单..."
     main_menu
 }
-
+catmi-xx() {
+    cat /root/hy2/config.yaml
+    echo "*********************************"
+    cat /root/catmi/xrayls/clash-meta.yaml
+    echo "*********************************"
+    cat /root/catmi/xray.txt
+    echo "*********************************"
+    cat /root/catmi/xrayls/xhttp.json
+    read -p "安装完成，按回车返回主菜单..."
+    main_menu
+    
+}
 exit_program() {
     echo "退出面板 Catmiup 面板！"
     exit 0
@@ -119,7 +134,7 @@ create_shortcut() {
 
 # 主函数
 main() {
-    initialize_dependencies
+    
     create_shortcut
     main_menu
 }
