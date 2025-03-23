@@ -88,18 +88,23 @@ install_singbox() {
 
 install_xray() {
     echo "请选择脚本安装方式："
+    echo "0) 安装跟新xray-core"
     echo "1) 安装nginx+xray vless vmess xhttp"
     echo "2) 安装nginx+xray+argo vless vmess"
     read -p "请输入选项 (1 或 2): " vchoice
 
     case $vchoice in
+        0)
+            echo "安装跟新xray-core"
+            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/upxray.sh) || { echo "安装跟新xray-core失败"; return; }
+            ;;
         1)
             echo "安装nginx+xray vless vmess xhttp..."
-            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/VEVLRE.sh) || { echo "IPv4 脚本安装失败"; return; }
+            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/VEVLRE.sh) || { echo "脚本安装失败"; return; }
             ;;
         2)
             echo "安装nginx+xray+argo vless vmess..."
-            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xargo.sh) || { echo "IPv6 脚本安装失败"; return; }
+            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xargo.sh) || { echo "脚本安装失败"; return; }
             ;;
         *)
             echo "无效的选项，返回主菜单。"
