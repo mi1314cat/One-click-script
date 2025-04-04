@@ -106,11 +106,11 @@ xrayls_server_status_text=$(
 )
 
     echo "请选择脚本安装方式："
-    echo -e "\e[92m"
+    echo -e "\e[65m"
     echo "================================================="
     echo "         xrayls 服务状态: ${xrayls_server_status_text}                      "
     echo "================================================="
-    echo -e "\e[0m"
+    echo -e "\e[65m"
     echo "0) 安装跟新xray-core"
     echo "1) 安装nginx+xray vless vmess xhttp"
     echo "2) 安装nginx+xray+argo vless vmess"
