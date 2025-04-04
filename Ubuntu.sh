@@ -1,4 +1,10 @@
 #!/bin/bash
+# 定义颜色变量
+GREEN="\033[32m"
+RED="\033[31m"
+PLAIN="\033[0m"
+
+
 # 介绍信息
 printf "\e[92m"
 printf "                       |\\__/,|   (\\\\ \n"
@@ -9,14 +15,7 @@ printf "       -----------------------------------------\n"
 printf "\e[0m"
 
 
-# 基础依赖检查和安装
-initialize_dependencies() {
-    echo "检查并安装基础依赖..."
-    apt-get update -y && apt install sudo -y && apt install nano -y && apt install wget -y || { echo "依赖安装失败，请检查网络环境！"; exit 1; }
-    echo "基础依赖安装完成。"
-    read -p "安装完成，按回车返回主菜单..."
-    main_menu
-}
+
 
 # 创建面板函数
 main_menu() {
@@ -54,7 +53,14 @@ main_menu() {
             ;;
     esac
 }
-
+# 基础依赖检查和安装
+initialize_dependencies() {
+    echo "检查并安装基础依赖..."
+    apt-get update -y && apt install sudo -y && apt install nano -y && apt install wget -y || { echo "依赖安装失败，请检查网络环境！"; exit 1; }
+    echo "基础依赖安装完成。"
+    read -p "安装完成，按回车返回主菜单..."
+    main_menu
+}
 # 安装工具函数
 install_toolbox() {
     echo "开始安装 Kejilion 工具箱..."
@@ -87,7 +93,24 @@ install_singbox() {
 }
 
 install_xray() {
+# 获取服务状态
+xrayls_server_status=$(systemctl is-active xrayls.service)
+
+# 生成状态文本
+xrayls_server_status_text=$(
+    if [[ "$xrayls_server_status" == "active" ]]; then
+        printf "${GREEN}启动${PLAIN}"
+    else
+        printf "${RED}未启动${PLAIN}"
+    fi
+)
+
     echo "请选择脚本安装方式："
+    echo -e "\e[92m"
+    echo "================================================="
+    echo "         xrayls 服务状态: ${xrayls_server_status_text}                      "
+    echo "================================================="
+    echo -e "\e[0m"
     echo "0) 安装跟新xray-core"
     echo "1) 安装nginx+xray vless vmess xhttp"
     echo "2) 安装nginx+xray+argo vless vmess"
