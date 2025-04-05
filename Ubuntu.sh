@@ -123,7 +123,7 @@ xrayls_server_status_text=$(
             ;;
         1)
             echo "安装nginx+xray vless vmess xhttp..."
-            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/VEVLRE.sh) || { echo "脚本安装失败"; return; }
+            bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xray-panel.sh) || { echo "脚本安装失败"; return; }
             ;;
         2)
             echo "安装nginx+xray+argo vless vmess..."
