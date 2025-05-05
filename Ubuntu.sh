@@ -88,9 +88,10 @@ install_warp() {
 install_singbox() {
     echo "选择 Sing-box 安装源:"
     echo "0) 返回主菜单"
-    echo "1) 使用 catmi "
-    echo "2) 使用 sb "
-    read -p "请输入选项 [0-2]: " choice
+    echo "1) 使用 catmi 2 "
+    echo "2) 使用 catmising-box 6"
+    echo "3) 使用 sb "
+    read -p "请输入选项 [0-3]: " choice
 
     case $choice in
         0)
@@ -104,8 +105,12 @@ install_singbox() {
             ;;
         2)
             echo "开始安装 Sing-box ..."
-            bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh) || { echo "Sing-box 安装失败"; return; }
+            bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/singbox.sh) || { echo "Sing-box 安装失败"; return; }
             ;;
+        3)
+            echo "开始安装 Sing-box ..."
+            bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh) || { echo "Sing-box 安装失败"; return; }
+            ;;    
         *)
             echo "无效的选项，返回主菜单..."
             main_menu
