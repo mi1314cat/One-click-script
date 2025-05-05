@@ -87,11 +87,17 @@ install_warp() {
 
 install_singbox() {
     echo "选择 Sing-box 安装源:"
+    echo "0) 返回主菜单"
     echo "1) 使用 catmi "
     echo "2) 使用 sb "
-    read -p "请输入选项 [1-2]: " choice
+    read -p "请输入选项 [0-2]: " choice
 
     case $choice in
+        0)
+            echo "已选择返回主菜单..."
+            main_menu
+            return
+            ;;
         1)
             echo "开始安装 Sing-box ..."
             bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/install.sh) || { echo "Sing-box 安装失败"; return; }
@@ -130,15 +136,17 @@ xrayls_server_status_text=$(
     echo "         xrayls 服务状态: ${xrayls_server_status_text}                      "
     echo "================================================="
     echo -e "\e[0m"
-    echo "0) 安装跟新xray-core"
+    echo "0) 返回主菜单"
     echo "1) 安装nginx+xray vless vmess xhttp"
     echo "2) 安装nginx+xray+argo vless vmess"
+    echo "3) 安装跟新xray-core"
     read -p "请输入选项: " vchoice
 
     case $vchoice in
         0)
-            echo "安装跟新xray-core"
-            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/upxray.sh) || { echo "安装跟新xray-core失败"; return; }
+            echo "已选择返回主菜单..."
+            main_menu
+            return
             ;;
         1)
             echo "安装nginx+xray vless vmess xhttp..."
@@ -148,6 +156,10 @@ xrayls_server_status_text=$(
             echo "安装nginx+xray+argo vless vmess..."
             bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xargo.sh) || { echo "脚本安装失败"; return; }
             ;;
+        3)
+            echo "安装跟新xray-core"
+            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/upxray.sh) || { echo "安装跟新xray-core失败"; return; }
+            ;;    
         *)
             echo "无效的选项，返回主菜单。"
             ;;
