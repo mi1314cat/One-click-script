@@ -214,10 +214,10 @@ ipsl
 
 ssl
 
-PORT=$(awk -F '：' '/端口/ {print $2}' "/root/catmi/install_info.txt")
-VLESS_WS_PATH=$(awk -F '：' '/vless WS 路径/ {print $2}' "/root/catmi/install_info.txt")
-VMESS_WS_PATH=$(awk -F '：' '/vmess WS 路径/ {print $2}' "/root/catmi/install_info.txt")
 
+PORT=$(awk -F '：' '/^端口/ {print $2}' "/root/catmi/install_info.txt")
+VLESS_WS_PATH=$(awk -F '：' '/^vless WS 路径/ {print $2}' "/root/catmi/install_info.txt")
+VMESS_WS_PATH=$(awk -F '：' '/^vmess WS 路径/ {print $2}' "/root/catmi/install_info.txt")
 
 
 {
