@@ -201,14 +201,7 @@ http {
             proxy_set_header Connection "upgrade";
             proxy_set_header Host \$host;
         }
-        location ${WS_PATH2} {
-        proxy_request_buffering      off;
-        proxy_redirect off;
-        proxy_pass http://127.0.0.1:9997;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-}
+        
     }
 }
 EOF
@@ -221,6 +214,12 @@ ipsl
 
 read -p "请输入 Vless 监听端口 (默认为 443): " PORT
 PORT=${PORT:-443}
+# 提取 vmess WS 路径
+WS_PATH=$(grep "vmess WS 路径：" "$OUTPUT_DIR/install_info.txt" | cut -d '：' -f2)
+# 提取 vless WS 路径
+WS_PATH1=$(grep "vless WS 路径：" "$OUTPUT_DIR/install_info.txt" | cut -d '：' -f2)
+
+
 ssl
 nginxsl
 
