@@ -215,9 +215,9 @@ ipsl
 read -p "请输入 Vless 监听端口 (默认为 443): " PORT
 PORT=${PORT:-443}
 # 提取 vmess WS 路径
-WS_PATH=$(grep "vmess WS 路径：" "$OUTPUT_DIR/install_info.txt" | cut -d '：' -f2)
+WS_PATH=$(grep "vmess WS 路径：" "/root/catmi/install_info.txt" | cut -d '：' -f2)
 # 提取 vless WS 路径
-WS_PATH1=$(grep "vless WS 路径：" "$OUTPUT_DIR/install_info.txt" | cut -d '：' -f2)
+WS_PATH1=$(grep "vless WS 路径：" "/root/catmi/install_info.txt" | cut -d '：' -f2)
 
 
 ssl
