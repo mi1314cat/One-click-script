@@ -1,26 +1,14 @@
 ipsl() {
-# 获取公网 IP 地址
-PUBLIC_IP_V4=$(curl -s https://api.ipify.org)
-PUBLIC_IP_V6=$(curl -s https://api64.ipify.org)
-echo "公网 IPv4 地址: $PUBLIC_IP_V4"
-echo "公网 IPv6 地址: $PUBLIC_IP_V6"
-# 选择使用哪个公网 IP 地址
-echo "请选择要使用的公网 IP 地址:"
-echo "1. $PUBLIC_IP_V4"
-echo "2. $PUBLIC_IP_V6"
-read -p "请输入对应的数字选择 [默认1]: " IP_CHOICE
 
-# 如果没有输入（即回车），则默认选择1
-IP_CHOICE=${IP_CHOICE:-1}
+IP_CHOICE=$(grep '^IP_CHOICE' /root/catmi/install_info.txt | sed 's/.*[:：]//')
+
 
 # 选择公网 IP 地址
 if [ "$IP_CHOICE" -eq 1 ]; then
-    PUBLIC_IP=$PUBLIC_IP_V4
-    # 设置第二个变量为“空”
+
     VALUE=""
 elif [ "$IP_CHOICE" -eq 2 ]; then
-    PUBLIC_IP=$PUBLIC_IP_V6
-    # 设置第二个变量为 "[::]:"
+
     VALUE="[::]:"
 else
     echo "无效选择，退出脚本"
