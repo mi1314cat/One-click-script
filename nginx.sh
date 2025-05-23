@@ -185,7 +185,7 @@ http {
             proxy_set_header Accept-Language "zh-CN";
         }
 
-        location ${WS_PATH} {
+        location ${VMESS_WS_PATH} {
             proxy_redirect off;
             proxy_pass http://127.0.0.1:9999;
             proxy_http_version 1.1;
@@ -193,7 +193,7 @@ http {
             proxy_set_header Connection "upgrade";
             proxy_set_header Host \$host;
         }
-        location ${WS_PATH1} {
+        location ${VLESS_WS_PATH} {
             proxy_redirect off;
             proxy_pass http://127.0.0.1:9998;
             proxy_http_version 1.1;
