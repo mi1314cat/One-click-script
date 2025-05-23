@@ -212,13 +212,19 @@ EOF
 
 ipsl
 
+ssl
+
 PORT=$(grep "端口：" "/root/catmi/install_info.txt" | cut -d '：' -f2)
 # 提取 vmess WS 路径
 WS_PATH=$(grep "vmess WS 路径：" "/root/catmi/install_info.txt" | cut -d '：' -f2)
 # 提取 vless WS 路径
 WS_PATH1=$(grep "vless WS 路径：" "/root/catmi/install_info.txt" | cut -d '：' -f2)
 
+{
 
-ssl
+    echo "DOMAIN_LOWER：${DOMAIN_LOWER}"
+    
+} > "/root/catmi/DOMAIN_LOWER.txt"
+
 nginxsl
 
