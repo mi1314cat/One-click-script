@@ -1,14 +1,18 @@
 ipsl() {
 
-IP_CHOICE=$(grep '^IP_CHOICE' /root/catmi/install_info.txt | sed 's/.*[:：]//')
+# 提取 IP_CHOICE（支持中英文冒号）
+IP_CHOICE=$(grep '^IP_CHOICE' /root/catmi/install_info.txt | sed 's/.*[:：]//' | tr -d '[:space:]')
 
+# 检查是否是数字
+if ! [[ "$IP_CHOICE" =~ ^[0-9]+$ ]]; then
+    echo "无效的 IP_CHOICE 值：$IP_CHOICE"
+    exit 1
+fi
 
 # 选择公网 IP 地址
 if [ "$IP_CHOICE" -eq 1 ]; then
-
     VALUE=""
 elif [ "$IP_CHOICE" -eq 2 ]; then
-
     VALUE="[::]:"
 else
     echo "无效选择，退出脚本"
