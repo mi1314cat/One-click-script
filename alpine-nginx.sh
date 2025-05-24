@@ -152,7 +152,7 @@ http {
     gzip on;
 
     server {
-        listen $VALUE${VMES_PORT} ssl;
+        listen $VALUE${PORT} ssl;
         server_name ${DOMAIN_LOWER};
         http2 on;
         ssl_certificate       "${CERT_PATH}";
