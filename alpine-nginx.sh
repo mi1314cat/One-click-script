@@ -1,0 +1,229 @@
+ipsl() {
+
+# 提取 IP_CHOICE（支持中英文冒号）
+IP_CHOICE=$(grep '^IP_CHOICE' /root/catmi/install_info.txt | sed 's/.*[:：]//' | tr -d '[:space:]')
+
+# 检查是否是数字
+if ! [[ "$IP_CHOICE" =~ ^[0-9]+$ ]]; then
+    echo "无效的 IP_CHOICE 值：$IP_CHOICE"
+    exit 1
+fi
+
+# 选择公网 IP 地址
+if [ "$IP_CHOICE" -eq 1 ]; then
+    VALUE=""
+elif [ "$IP_CHOICE" -eq 2 ]; then
+    VALUE="[::]:"
+else
+    echo "无效选择，退出脚本"
+    exit 1
+fi
+
+
+}
+
+ssl() {
+   echo "请选择要执行的操作："
+echo "1) 有80和443端口"
+echo "2) 无80 443端口"
+read -p "请输入选项 (1 或 2): " choice
+
+# 提示用户输入域名和电子邮件地址
+read -p "请输入域名: " DOMAIN
+
+# 将用户输入的域名转换为小写
+DOMAIN_LOWER=$(echo "$DOMAIN" | tr '[:upper:]' '[:lower:]')
+
+read -p "请输入电子邮件地址: " EMAIL
+
+# 创建目标目录
+TARGET_DIR="/root/catmi"
+mkdir -p "$TARGET_DIR"
+
+if [ "$choice" -eq 1 ]; then
+    # 选项 1: 安装更新、克隆仓库并执行脚本
+    echo "执行安装acme证书..."
+
+    # 更新系统并安装必要的依赖项
+    echo "更新系统并安装依赖项..."
+    apk update && apk upgrade
+    apk add ufw
+    apk add --no-cache curl socat git bash openssl
+    ufw disable
+    # 安装 acme.sh
+    echo "安装 acme.sh..."
+    curl https://get.acme.sh | sh
+
+    # 设置路径
+    export PATH="$HOME/.acme.sh:$PATH"
+
+    # 注册账户
+    echo "注册账户..."
+    "$HOME/.acme.sh/acme.sh" --register-account -m "$EMAIL"
+
+    # 申请 SSL 证书
+    echo "申请 SSL 证书..."
+    if ! "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$DOMAIN_LOWER"; then
+        echo "证书申请失败，删除已生成的文件和文件夹。"
+        rm -f "$HOME/${DOMAIN_LOWER}.key" "$HOME/${DOMAIN_LOWER}.crt"
+        "$HOME/.acme.sh/acme.sh" --remove -d "$DOMAIN_LOWER"
+        exit 1
+    fi
+
+    # 安装 SSL 证书并移动到目标目录
+    echo "安装 SSL 证书..."
+    "$HOME/.acme.sh/acme.sh" --installcert -d "$DOMAIN_LOWER" \
+        --key-file       "$TARGET_DIR/${DOMAIN_LOWER}.key" \
+        --fullchain-file "$TARGET_DIR/${DOMAIN_LOWER}.crt"
+         CERT_PATH="$TARGET_DIR/${DOMAIN_LOWER}.crt"
+        KEY_PATH="$TARGET_DIR/${DOMAIN_LOWER}.key"
+    # 提示用户证书已生成
+    echo "SSL 证书和私钥已生成并移动到 $TARGET_DIR:"
+    echo "证书: $TARGET_DIR/${DOMAIN_LOWER}.crt"
+    echo "私钥: $TARGET_DIR/${DOMAIN_LOWER}.key"
+
+    # 创建自动续期的脚本
+    cat << EOF > /root/renew_cert.sh
+#!/bin/sh
+export PATH="\$HOME/.acme.sh:\$PATH"
+\$HOME/.acme.sh/acme.sh --renew -d "$DOMAIN_LOWER" --key-file "$TARGET_DIR/${DOMAIN_LOWER}.key" --fullchain-file "$TARGET_DIR/${DOMAIN_LOWER}.crt"
+EOF
+    chmod +x /root/renew_cert.sh
+
+    # 创建自动续期的 cron 任务，每天午夜执行一次
+    (crontab -l 2>/dev/null; echo "0 0 * * * /root/renew_cert.sh >> /var/log/renew_cert.log 2>&1") | crontab -
+
+    echo "完成！请确保在您的 Web 服务器配置中使用新的 SSL 证书。"
+
+elif [ "$choice" -eq 2 ]; then
+    # 选项 2: 手动获取 SSL 证书安装至/etc/letsencrypt/live/$DOMAIN_LOWER 文件夹
+    echo "将进行手动获取 SSL 证书安装至/etc/letsencrypt/live/$DOMAIN_LOWER  文件夹..."
+
+    # 安装 Certbot
+    echo "安装 Certbot..."
+    apk add certbot
+
+    # 手动获取证书
+    echo "手动获取证书..."
+    certbot certonly --manual --preferred-challenges dns -d "$DOMAIN_LOWER"
+
+    
+
+    # 创建自动续期的 cron 任务
+    (crontab -l 2>/dev/null; echo "0 0 * * * certbot renew") | crontab -
+
+    echo "SSL 证书已安装至/etc/letsencrypt/live/$DOMAIN_LOWER 目录中"
+    CERT_PATH="/etc/letsencrypt/live/$DOMAIN_LOWER/fullchain.pem"
+    KEY_PATH="/etc/letsencrypt/live/$DOMAIN_LOWER/privkey.pem"
+else
+    echo "无效选项，请输入 1 或 2."
+fi
+}
+nginxsl() {
+    # 使用 Alpine 的 apk 包管理器安装 nginx
+    apk add --no-cache nginx
+    mkdir -p /var/log/nginx
+    touch /var/log/nginx/error.log /var/log/nginx/access.log
+    chown -R nginx:nginx /var/log/nginx
+    chmod -R 755 /var/log/nginx
+
+
+    # 创建 nginx 配置文件
+    cat <<EOF > /etc/nginx/nginx.conf
+user nginx;
+worker_processes auto;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+    error_log /var/log/nginx/error.log;
+    access_log /var/log/nginx/access.log;
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    gzip on;
+
+    server {
+        listen $VALUE${VMES_PORT} ssl;
+        server_name ${DOMAIN_LOWER};
+        http2 on;
+        ssl_certificate       "${CERT_PATH}";
+        ssl_certificate_key   "${KEY_PATH}";
+        
+        ssl_session_timeout 1d;
+        ssl_session_cache shared:MozSSL:10m;
+        ssl_session_tickets off;
+        ssl_protocols    TLSv1.2 TLSv1.3;
+        ssl_prefer_server_ciphers off;
+
+        location / {
+            proxy_pass https://pan.imcxx.com; #伪装网址
+            proxy_redirect off;
+            proxy_ssl_server_name on;
+            sub_filter_once off;
+            sub_filter "pan.imcxx.com" \$server_name;
+            proxy_set_header Host "pan.imcxx.com";
+            proxy_set_header Referer \$http_referer;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header User-Agent \$http_user_agent;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header Accept-Encoding "";
+            proxy_set_header Accept-Language "zh-CN";
+        }
+
+        location ${WS_PATH} {
+            proxy_redirect off;
+            proxy_pass http://127.0.0.1:9999;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host \$host;
+        }
+        location ${WS_PATH1} {
+            proxy_redirect off;
+            proxy_pass http://127.0.0.1:9998;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host \$host;
+        }
+        location ${WS_PATH2} {
+            grpc_pass grpc://127.0.0.1:9997;
+            grpc_set_header Host \$host;
+            grpc_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+}
+    }
+}
+EOF
+
+    # 创建 nginx 所需的目录（如果不存在）
+    mkdir -p /run/nginx
+    nginx -s reload
+
+}
+
+ipsl
+
+ssl
+
+
+PORT=$(grep '^端口' /root/catmi/install_info.txt | sed 's/.*[:：]//')
+VLESS_WS_PATH=$(grep '^vless WS 路径' /root/catmi/install_info.txt | sed 's/.*[:：]//')
+VMESS_WS_PATH=$(grep '^vmess WS 路径' /root/catmi/install_info.txt | sed 's/.*[:：]//')
+
+
+{
+
+    echo "DOMAIN_LOWER：${DOMAIN_LOWER}"
+    
+} > "/root/catmi/DOMAIN_LOWER.txt"
+nginxsl
