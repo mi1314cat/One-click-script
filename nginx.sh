@@ -177,7 +177,7 @@ http {
             proxy_set_header Accept-Language "zh-CN";
         }
 
-        location ${VMESS_WS_PATH} {
+        location ${WS_PATH} {
             proxy_redirect off;
             proxy_pass http://127.0.0.1:9999;
             proxy_http_version 1.1;
@@ -185,7 +185,7 @@ http {
             proxy_set_header Connection "upgrade";
             proxy_set_header Host \$host;
         }
-        location ${VLESS_WS_PATH} {
+        location ${WS_PATH1} {
             proxy_redirect off;
             proxy_pass http://127.0.0.1:9998;
             proxy_http_version 1.1;
@@ -208,8 +208,9 @@ ssl
 
 
 PORT=$(grep '^端口' /root/catmi/install_info.txt | sed 's/.*[:：]//')
-VLESS_WS_PATH=$(grep '^vless WS 路径' /root/catmi/install_info.txt | sed 's/.*[:：]//')
-VMESS_WS_PATH=$(grep '^vmess WS 路径' /root/catmi/install_info.txt | sed 's/.*[:：]//')
+WS_PATH=$(grep '^vmess WS 路径' /root/catmi/install_info.txt | sed 's/.*[:：]//')
+WS_PATH1=$(grep '^vless WS 路径' /root/catmi/install_info.txt | sed 's/.*[:：]//')
+
 
 
 {
