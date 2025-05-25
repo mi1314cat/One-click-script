@@ -204,7 +204,7 @@ EOF
     # 创建 nginx 所需的目录（如果不存在）
     mkdir -p /run/nginx
     nginx -s reload
-
+    nginx
 }
 
 ipsl
