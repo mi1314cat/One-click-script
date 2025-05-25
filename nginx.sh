@@ -200,6 +200,7 @@ EOF
 
 
     systemctl reload nginx
+    nginx
 }
 
 ipsl
