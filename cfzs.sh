@@ -15,9 +15,16 @@ read -r DOMAIN
 # 默认文件路径
 CERT_FILE="/root/catmi/server.crt"
 KEY_FILE="/root/catmi/server.key"
+CSR_FILE="/root/catmi/server.csr"
 
 echo "🔐 正在生成私钥：$KEY_FILE"
 openssl genrsa -out "$KEY_FILE" 2048
+
+echo "📄 生成证书签名请求 (CSR)..."
+openssl req -new -key "$KEY_FILE" -subj "/CN=$DOMAIN" -out "$CSR_FILE"
+
+# 读取CSR内容
+CSR_CONTENT=$(cat "$CSR_FILE" | sed '/-----/d' | tr -d '\n')
 
 echo "📡 正在向 Cloudflare 申请 15 年 Origin CA 证书..."
 
@@ -29,7 +36,7 @@ RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID
     "hostnames": ["'"$DOMAIN"'"],
     "requested_validity": 5475,
     "type": "origin-rsa",
-    "csr": null
+    "csr": "'"$CSR_CONTENT"'"
   }')
 
 # 解析结果
@@ -43,6 +50,9 @@ fi
 # 提取证书内容并保存
 CERT=$(echo "$RESPONSE" | jq -r '.result.certificate')
 echo "$CERT" > "$CERT_FILE"
+
+# 清理临时CSR文件
+rm -f "$CSR_FILE"
 
 echo "✅ 成功申请 Cloudflare Origin CA 证书"
 echo "📄 证书路径：$CERT_FILE"
