@@ -68,7 +68,10 @@ RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID
 SUCCESS=$(echo "$RESPONSE" | jq -r '.success')
 if [[ "$SUCCESS" != "true" ]]; then
   echo "❌ 证书申请失败，Cloudflare 返回如下信息："
-  echo "$RESPONSE"
+  echo "$RESPONSE" | jq
+  echo ""
+  echo "📛 错误摘要："
+  echo "$RESPONSE" | jq -r '.errors[] | "Code: \(.code), Message: \(.message)"'
   exit 1
 fi
 
