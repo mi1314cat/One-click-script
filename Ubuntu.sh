@@ -184,9 +184,12 @@ xrayls_server_status_text=$(
 }
 catmi-xx() {
     cat /root/hy2/config.yaml
-    echo "*********************************"
     cat /root/catmi/xrayls/clash-meta.yaml
+    cat /root/catmi/mihomo/clash-meta.yaml
+    cat /root/catmi/singbox/clash-meta.yaml
     echo "*********************************"
+    cat /root/catmi/singbox/v2ray.txt
+    cat /root/catmi/mihomo/v2ray.txt
     cat /root/catmi/xray.txt
     echo "*********************************"
     cat /root/catmi/xrayls/xhttp.json
