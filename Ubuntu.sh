@@ -56,7 +56,10 @@ main_menu() {
 # 基础依赖检查和安装
 initialize_dependencies() {
     echo "检查并安装基础依赖..."
-    apt-get update -y && apt install sudo -y && apt install nano -y && apt install wget -y || { echo "依赖安装失败，请检查网络环境！"; exit 1; }
+    apt update &&  apt upgrade -y
+    apt install ufw -y
+    apt install -y curl socat git cron openssl gzip nano sudo wget
+  
     echo "基础依赖安装完成。"
     read -p "安装完成，按回车返回主菜单..."
     main_menu
