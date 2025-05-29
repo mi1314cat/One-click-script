@@ -1,4 +1,30 @@
-CERT_DIR="/root/catmi"
+local os_name="$(grep -E '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')"
+
+    case "$os_name" in
+        debian|ubuntu)
+            echo "检测到系统: $os_name"
+            auapldsh="/root/catmi"
+            ;;
+        alpine)
+            echo "检测到系统: $os_name"
+             auapldsh="/etc/catmi"
+            ;;
+        *)
+            echo "不支持的系统: $os_name。此脚本不支持当前系统，程序退出。"
+            exit 1
+            ;;
+    esac
+
+
+
+
+
+
+
+
+
+
+CERT_DIR="$auapldsh"
 CERT_PATH="${CERT_DIR}/server.crt"
 KEY_PATH="${CERT_DIR}/server.key"
 
