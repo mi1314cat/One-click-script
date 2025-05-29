@@ -1,29 +1,25 @@
-local os_name="$(grep -E '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')"
+#!/bin/bash
 
-    case "$os_name" in
-        debian|ubuntu)
-            echo "检测到系统: $os_name"
-            auapldsh="/root/catmi"
-            ;;
-        alpine)
-            echo "检测到系统: $os_name"
-             auapldsh="/etc/catmi"
-            ;;
-        *)
-            echo "不支持的系统: $os_name。此脚本不支持当前系统，程序退出。"
-            exit 1
-            ;;
-    esac
+# 获取系统名称
+os_name="$(grep -E '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')"
 
+# 根据系统设置证书目录
+case "$os_name" in
+    debian|ubuntu)
+        echo "✅ 检测到系统: $os_name"
+        auapldsh="/root/catmi"
+        ;;
+    alpine)
+        echo "✅ 检测到系统: $os_name"
+        auapldsh="/etc/catmi"
+        ;;
+    *)
+        echo "❌ 不支持的系统: $os_name。此脚本不支持当前系统，程序退出。"
+        exit 1
+        ;;
+esac
 
-
-
-
-
-
-
-
-
+# 设定证书路径
 CERT_DIR="$auapldsh"
 CERT_PATH="${CERT_DIR}/server.crt"
 KEY_PATH="${CERT_DIR}/server.key"
@@ -31,13 +27,11 @@ KEY_PATH="${CERT_DIR}/server.key"
 # 创建目录
 mkdir -p "$CERT_DIR"
 
-
-
-# 输入证书内容
+# 提示输入证书内容
 echo "📄 请粘贴你的证书内容（以 -----BEGIN CERTIFICATE----- 开头），输入完后按 Ctrl+D："
 CERT_CONTENT=$(</dev/stdin)
 
-# 检查输入为空
+# 检查是否为空
 if [[ -z "$CERT_CONTENT" ]]; then
   echo "❌ 证书内容不能为空！"
   exit 1
@@ -47,11 +41,11 @@ fi
 echo "$CERT_CONTENT" > "$CERT_PATH"
 echo "✅ 证书已保存到 $CERT_PATH"
 
-# 输入私钥内容
+# 提示输入私钥内容
 echo "🔑 请粘贴你的私钥内容（以 -----BEGIN PRIVATE KEY----- 或 RSA 开头），输入完后按 Ctrl+D："
 KEY_CONTENT=$(</dev/stdin)
 
-# 检查输入为空
+# 检查是否为空
 if [[ -z "$KEY_CONTENT" ]]; then
   echo "❌ 私钥内容不能为空！"
   exit 1
