@@ -68,7 +68,4 @@ EOF
 chmod +x /root/upload_logs.sh
 
 # === 第四步：设置自动上传定时任务 ===
-echo "⏰ 设置每小时上传定时任务..."
-(crontab -l 2>/dev/null; echo "0 * * * * /root/upload_logs.sh") | sort -u | crontab -
 
-echo "✅ 所有设置完成！你可以随时运行 /root/upload_logs.sh 手动上传日志"
