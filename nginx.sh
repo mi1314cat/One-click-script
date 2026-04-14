@@ -201,7 +201,8 @@ http {
     gzip on;
 
     server {
-        listen $VALUE${PORT} ssl http2;
+        listen $VALUE${PORT} ssl;
+        http2 on;
         server_name ${DOMAIN_LOWER};
 
         ssl_certificate       "${CERT_PATH}";
