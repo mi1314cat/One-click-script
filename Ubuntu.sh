@@ -32,6 +32,7 @@ main_menu() {
     echo "4) 安装 Sing-box"
     echo "5) 安装 xray"
     echo "6) 安装 mihomo"
+    echo "7) 申请ssl证书"
     echo "99) 节点信息"
     echo "0) 退出面板"
     echo
@@ -46,6 +47,7 @@ main_menu() {
         4) install_singbox ;;
         5) install_xray ;;
         6) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/mihomo-au.sh) ;;
+        7) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/ssl.sh) ;;
         99) catmi-xx ;;
         0) exit_program ;;
         *) 
