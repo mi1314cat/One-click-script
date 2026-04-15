@@ -93,9 +93,9 @@ install_warp() {
     echo "1) 使用 warp "
     echo "2) 使用 warp-go"
     echo "3) 使用 勇warp"
-    read -p "请输入选项 [0-3]: " choice
+    read -p "请输入选项 [0-3]: " wchoice
 
-    case $choice in
+    case $wchoice in
         0)
             echo "已选择返回主菜单..."
             main_menu
