@@ -170,28 +170,29 @@ install_singbox() {
 }
 
 install_xray() {
-# 获取服务状态
-xrayls_server_status=$(systemctl is-active xrayls.service)
+    # 获取服务状态
+    xrayls_server_status=$(systemctl is-active xrayls.service)
 
-# 生成状态文本
-xrayls_server_status_text=$(
-    if [[ "$xrayls_server_status" == "active" ]]; then
-        printf "${GREEN}启动${PLAIN}"
-    else
-        printf "${RED}未启动${PLAIN}"
-    fi
-)
+    # 生成状态文本
+    xrayls_server_status_text=$(
+        if [[ "$xrayls_server_status" == "active" ]]; then
+            printf "${GREEN}启动${PLAIN}"
+        else
+            printf "${RED}未启动${PLAIN}"
+        fi
+    )
 
-    echo "请选择脚本安装方式："
+    echo "请选择脚本操作："
     echo -e "\e[92m"
     echo "================================================="
-    echo "         xrayls 服务状态: ${xrayls_server_status_text}                      "
+    echo "         xrayls 服务状态: ${xrayls_server_status_text}"
     echo "================================================="
     echo -e "\e[0m"
     echo "0) 返回主菜单"
-    echo "1) 安装nginx+xray vless vmess xhttp"
-    echo "2) 安装nginx+xray+argo vless vmess"
-    echo "3) 安装跟新xray-core"
+    echo "1) 安装 xray（选择安装方式）"
+    echo "2) 更新 xray-core"
+    echo "3) 重启 xray 服务"
+    echo "4) 查看 xray 动态日志"
     read -p "请输入选项: " vchoice
 
     case $vchoice in
@@ -201,22 +202,44 @@ xrayls_server_status_text=$(
             return
             ;;
         1)
-            echo "安装nginx+xray vless vmess xhttp..."
-            bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xray-panel.sh) || { echo "脚本安装失败"; return; }
+            echo "请选择安装方式："
+            echo "1) nginx + xray vless vmess xhttp"
+            echo "2) nginx + xray + argo vless vmess"
+            read -p "请输入选项: " install_choice
+
+            case $install_choice in
+                1)
+                    echo "安装 nginx+xray vless vmess xhttp..."
+                    bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xray-panel.sh) || { echo "脚本安装失败"; return; }
+                    ;;
+                2)
+                    echo "安装 nginx+xray+argo vless vmess..."
+                    bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xargo.sh) || { echo "脚本安装失败"; return; }
+                    ;;
+                *)
+                    echo "无效的安装选项"
+                    ;;
+            esac
             ;;
         2)
-            echo "安装nginx+xray+argo vless vmess..."
-            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xargo.sh) || { echo "脚本安装失败"; return; }
+            echo "更新 xray-core..."
+            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/upxray.sh) || { echo "更新失败"; return; }
             ;;
         3)
-            echo "安装跟新xray-core"
-            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/upxray.sh) || { echo "安装跟新xray-core失败"; return; }
-            ;;    
+            echo "正在重启 xray 服务..."
+            systemctl restart xrayls
+            systemctl status xrayls --no-pager
+            ;;
+        4)
+            echo "实时查看 xray 日志 (Ctrl+C 退出)..."
+            tail -f /root/catmi/xray/access.log
+            ;;
         *)
             echo "无效的选项，返回主菜单。"
             ;;
     esac
-    read -p "安装完成，按回车返回主菜单..."
+
+    read -p "操作完成，按回车返回主菜单..."
     main_menu
 }
 catmi-xx() {
