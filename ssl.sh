@@ -152,4 +152,20 @@ echo "🔐 权限已设置为 644"
 
 echo "🎉 所有操作完成！"
 }
-ssl_dns
+echo "请选择要申请证书的方式:"
+echo "1. 自动 DNS验证 "
+echo "2. 手动输入 "
+read -p "请输入对应的数字选择 [默认1]: " Certificate
+
+# 如果没有输入（即回车），则默认选择1
+Certificate=${Certificate:-1}
+
+# 选择请证书的方式
+if [ "$Certificate" -eq 1 ]; then
+    ssl_dns
+elif [ "$Certificate" -eq 2 ]; then
+    ssl_sd
+else
+    echo "无效选择，退出脚本"
+    exit 1
+fi
