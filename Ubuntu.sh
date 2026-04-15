@@ -84,10 +84,45 @@ install_hysteria() {
 
 install_warp() {
     echo "开始安装 warp..."
-    wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh; sed -i "s#WIREGUARD_GO_ENABLE=0#WIREGUARD_GO_ENABLE=1#g" menu.sh; bash menu.sh
     
+    
+    echo "选择 Sing-box 安装源:"
+    echo "0) 返回主菜单"
+    echo "1) 使用 warp "
+    echo "2) 使用 warp-go"
+    echo "3) 使用 勇warp"
+    read -p "请输入选项 [0-3]: " choice
+
+    case $choice in
+        0)
+            echo "已选择返回主菜单..."
+            main_menu
+            return
+            ;;
+        1)
+            echo "开始安装 warp ..."
+            wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh; sed -i "s#WIREGUARD_GO_ENABLE=0#WIREGUARD_GO_ENABLE=1#g" menu.sh; bash menu.sh
+            ;;
+        2)
+            echo "开始安装 warp-go ..."
+            wget -N https://gitlab.com/fscarmen/warp/-/raw/main/warp-go.sh && bash warp-go.sh [option] [lisence]
+
+            ;;
+        3)
+            echo "开始安装 勇warp ..."
+            bash <(wget -qO- https://raw.githubusercontent.com/yonggekkk/warp-yg/main/CFwarp.sh)
+            ;;    
+         
+        *)
+            echo "无效的选项，返回主菜单..."
+            main_menu
+            return
+            ;;
+    esac
+
     read -p "安装完成，按回车返回主菜单..."
     main_menu
+  
 }
 
 install_singbox() {
