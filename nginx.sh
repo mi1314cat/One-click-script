@@ -125,16 +125,17 @@ else
 fi
 }
 ssl_sd(){
+# 输入域名（可以扩展做记录或校验）
+read -p "请输入申请证书的域名: " DOMAIN_LOWER
 CERT_DIR="/root/catmi"
-CERT_PATH="${CERT_DIR}/server.crt"
-KEY_PATH="${CERT_DIR}/server.key"
+CERT_PATH="${CERT_DIR}/${DOMAIN_LOWER}.crt"
+KEY_PATH="${CERT_DIR}/${DOMAIN_LOWER}.key"
 ufw disable
 
 # 创建目录
 mkdir -p "$CERT_DIR"
 
-# 输入域名（可以扩展做记录或校验）
-read -p "请输入申请证书的域名: " DOMAIN_LOWER
+
 
 # 输入证书内容
 echo "📄 请粘贴你的证书内容（以 -----BEGIN CERTIFICATE----- 开头），输入完后按 Ctrl+D："
