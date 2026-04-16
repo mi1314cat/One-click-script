@@ -1,13 +1,10 @@
 # One-click-script
 ## _**简介一键安装脚本**_
-- 建议开启bbr加速，可大幅加快节点reality和vmess节点的速度
+- 建议开启bbr加速
 - 无脑回车一键安装或者自定义安装
-- 完全无需域名，使用自签证书部署hy2，（使用argo隧道支持vmess ws优选ip（理论上比普通优选ip更快））
-- 支持修改reality端口号和域名，hysteria2端口号
-- 无脑生成sing-box，clash-meta，v2rayN，nekoray等通用链接格式
-- 支持warp，任意门，ss解锁流媒体
-- 支持任意门中转
-- 支持端口跳跃
+- 完全无需域名，使用自签证书部署hy2
+
+
 # 一键脚本
 ```
 apt update && apt install bash  &&  apt install curl -y && bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/APU.sh)
