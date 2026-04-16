@@ -247,7 +247,7 @@ catmi-xx() {
     echo "========== 配置文件 =========="
 
     for file in \
-        /root/hy2/config.yaml \
+        /root/catmi/hy2/config.yaml \
         /root/catmi/xray/clash-meta.yaml \
         /root/catmi/mihomo/clash-meta.yaml \
         /root/catmi/singbox/clash-meta.yaml
