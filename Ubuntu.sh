@@ -61,7 +61,7 @@ main_menu() {
 initialize_dependencies() {
     echo "检查并安装基础依赖..."
     apt update 
-    apt upgrade
+    apt upgrade -y
     apt install ufw -y
     apt install -y curl socat git cron openssl gzip nano sudo wget
   
