@@ -33,6 +33,7 @@ main_menu() {
     echo "5) 安装 xray"
     echo "6) 安装 mihomo"
     echo "7) 申请ssl证书"
+    echo "8) 卸载nginx"
     echo "99) 节点信息"
     echo "0) 退出面板"
     echo
@@ -48,6 +49,7 @@ main_menu() {
         5) install_xray ;;
         6) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/mihomo-au.sh) ;;
         7) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/ssl.sh) ;;
+        8) u_nginx ;;
         99) catmi-xx ;;
         0) exit_program ;;
         *) 
@@ -81,6 +83,15 @@ install_toolbox() {
 install_hysteria() {
     echo "开始安装 Hysteria2..."
     bash <(curl -fsSL https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/main/hy2-panel.sh) || { echo "Hysteria2 安装失败"; return; }
+    read -p "安装完成，按回车返回主菜单..."
+    main_menu
+}
+u_nginx() {
+   systemctl stop nginx
+   systemctl disable nginx
+   apt purge -y nginx nginx-common nginx-full
+   apt autoremove -y
+
     read -p "安装完成，按回车返回主菜单..."
     main_menu
 }
