@@ -65,7 +65,7 @@ initialize_dependencies() {
     apt update 
     apt upgrade -y
     apt install ufw -y
-    apt install -y curl socat git cron openssl gzip nano sudo wget
+    apt install -y curl socat git cron openssl gzip nano sudo wget xxd
   
     echo "基础依赖安装完成。"
     read -p "安装完成，按回车返回主菜单..."
