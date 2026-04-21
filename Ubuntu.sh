@@ -377,86 +377,85 @@ install_singbox() {
 }
 
 install_xray() {
-    # 获取服务状态
-    xrayls_server_status=$(systemctl is-active xrayls.service)
+    while true; do
+        # 获取服务状态
+        xrayls_server_status=$(systemctl is-active xrayls.service)
 
-    # 生成状态文本
-    xrayls_server_status_text=$(
-        if [[ "$xrayls_server_status" == "active" ]]; then
-            printf "${GREEN}启动${PLAIN}"
-        else
-            printf "${RED}未启动${PLAIN}"
-        fi
-    )
+        # 生成状态文本
+        xrayls_server_status_text=$(
+            if [[ "$xrayls_server_status" == "active" ]]; then
+                printf "${GREEN}启动${PLAIN}"
+            else
+                printf "${RED}未启动${PLAIN}"
+            fi
+        )
 
-    echo "请选择脚本操作："
-    echo -e "\e[92m"
-    echo "================================================="
-    echo "         xrayls 服务状态: ${xrayls_server_status_text}"
-    echo "================================================="
-    echo -e "\e[0m"
-    echo "0) 返回主菜单"
-    echo "1) 安装 xray（选择安装方式）"
-    echo "2) 更新 xray-core"
-    echo "3) 重启 xray 服务"
-    echo "4) 查看 xray 动态日志"
-    read -p "请输入选项: " vchoice
+        echo "请选择脚本操作："
+        echo -e "\e[92m"
+        echo "================================================="
+        echo "         xrayls 服务状态: ${xrayls_server_status_text}"
+        echo "================================================="
+        echo -e "\e[0m"
+        echo "0) 返回主菜单"
+        echo "1) 安装 xray"
+        echo "2) 更新 xray-core"
+        echo "3) 重启 xray 服务"
+        echo "4) 查看 xray 动态日志"
+        read -p "请输入选项: " vchoice
 
-    case $vchoice in
-        0)
-            print_info "返回主菜单..."
-            main_menu
-            return
-            ;;
+        case $vchoice in
+            0)
+                print_info "返回主菜单..."
+                return   # 退出子菜单，回到 main_menu
+                ;;
 
-        1)
-            print_info "安装 xray..."
-            bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xray-panel.sh) \
-                || { print_error "脚本安装失败"; return; }
-            ;;
+            1)
+                print_info "安装 xray..."
+                bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xray-panel.sh) \
+                    || print_error "脚本安装失败"
+                ;;
 
-        2)
-            print_info "更新 xray-core..."
-            bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/upxray.sh) \
-                || { print_error "更新失败"; return; }
-                install_xray
-            ;;
+            2)
+                print_info "更新 xray-core..."
+                bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/upxray.sh) \
+                    || print_error "更新失败"
+                ;;
 
-        3)
-            print_info "正在重启 xray 服务..."
-            systemctl restart xrayls
-            systemctl status xrayls --no-pager
-            install_xray
-            ;;
+            3)
+                print_info "正在重启 xray 服务..."
+                systemctl restart xrayls
+                systemctl status xrayls --no-pager
+                ;;
 
-        4)
-            echo -e "${GREEN}请选择要查看的日志：${PLAIN}"
-            echo "1) access.log"
-            echo "2) error.log"
-            read -rp "请输入选项: " LOG_CHOICE
+            4)
+                echo -e "${GREEN}请选择要查看的日志：${PLAIN}"
+                echo "1) access.log"
+                echo "2) error.log"
+                read -rp "请输入选项: " LOG_CHOICE
 
-            case "$LOG_CHOICE" in
-                1)
-                    print_info "实时查看 access.log (Ctrl+C 退出)..."
-                    tail -f /root/catmi/xray/log/access.log
-                    ;;
-                2)
-                    print_info "实时查看 error.log (Ctrl+C 退出)..."
-                    tail -f /root/catmi/xray/log/error.log
-                    ;;
-                *)
-                    print_error "无效选项"
-                    ;;
-            esac
-            ;;
+                case "$LOG_CHOICE" in
+                    1)
+                        print_info "实时查看 access.log (Ctrl+C 退出)..."
+                        tail -f /root/catmi/xray/log/access.log
+                        ;;
+                    2)
+                        print_info "实时查看 error.log (Ctrl+C 退出)..."
+                        tail -f /root/catmi/xray/log/error.log
+                        ;;
+                    *)
+                        print_error "无效选项"
+                        ;;
+                esac
+                ;;
 
-        *)
-            print_error "无效的选项，返回主菜单。"
-            ;;
-    esac
+            *)
+                print_error "无效的选项，请重新选择。"
+                ;;
+        esac
 
-    read -p "操作完成，按回车返回主菜单..."
-    main_menu
+        # 每次操作后暂停一下，再刷新子菜单
+        read -p "操作完成，按回车返回 xray 子菜单..."
+    done
 }
 
 catmi-xx() {
