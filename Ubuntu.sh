@@ -77,21 +77,7 @@ DISK_USED=$(df -h / | awk 'NR==2 {print $3}')
 DISK_TOTAL=$(df -h / | awk 'NR==2 {print $2}')
 DISK_PERCENT=$(df -h / | awk 'NR==2 {print $5}')
 
-# 自动检测所有网卡
-NET_IF=$(ls /sys/class/net | grep -v lo | head -n1)
-NET_RX=$(awk -v iface="$NET_IF" '$1 ~ iface":" {printf "%.2fG", $2/1024/1024/1024}' /proc/net/dev)
-NET_TX=$(awk -v iface="$NET_IF" '$1 ~ iface":" {printf "%.2fG", $10/1024/1024/1024}' /proc/net/dev)
 
-# 网络算法检测
-if lsmod | grep -q bbrplus; then
-    NET_ALGO="BBR-PLUS"
-elif lsmod | grep -q bbr; then
-    NET_ALGO="BBR"
-elif sysctl net.ipv4.tcp_congestion_control | grep -q hysteria; then
-    NET_ALGO="Hysteria"
-else
-    NET_ALGO="未知/未启用"
-fi
 
 
 
@@ -155,12 +141,7 @@ echo -e "  物理内存:      ${GREEN}${MEM_USED}/${MEM_TOTAL} (${MEM_PERCENT})$
 echo -e "  虚拟内存:      ${GREEN}${SWAP_USED}/${SWAP_TOTAL}${PLAIN}"
 echo -e "  硬盘占用:      ${GREEN}${DISK_USED}/${DISK_TOTAL} (${DISK_PERCENT})${PLAIN}"
 echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
-echo -e "  网卡:          ${GREEN}${NET_IF}${PLAIN}"
-echo -e "  总接收:        ${GREEN}${NET_RX}${PLAIN}"
-echo -e "  总发送:        ${GREEN}${NET_TX}${PLAIN}"
-echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
-echo -e "  网络算法:      ${GREEN}${NET_ALGO}${PLAIN}"
-echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
+
 
     # 菜单主体（Box-drawing 风格）
     echo -e "${CYAN}┌────────────────────────── 功能菜单 ─────────────────────────┐${PLAIN}"
