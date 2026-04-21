@@ -1,4 +1,28 @@
 # 定义函数，返回随机选择的域名
+DINSTALL_CATMI="/root/catmi"
+CATMIENV_FILE="$DINSTALL_CATMI/catmi.env"
+
+update_env() {
+    local key="$1"
+    local value="$2"
+
+    # key 必须是合法的 env 变量名
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
+        echo "Invalid key: $key"
+        return 1
+    }
+
+    # 转义 value 中的双引号
+    value="${value//\"/\\\"}"
+
+    [ -f "$CATMIENV_FILE" ] || touch "$CATMIENV_FILE"
+
+    if grep -q "^${key}=" "$CATMIENV_FILE"; then
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$CATMIENV_FILE"
+    else
+        echo "${key}=\"${value}\"" >> "$CATMIENV_FILE"
+    fi
+}
 random_website() {
    domains=(
     "zh-hk.vuejs.org"
@@ -61,10 +85,5 @@ random_website() {
 # 生成密钥
 read -rp "请输入回落域名: " dest_server
 [ -z "$dest_server" ] && dest_server=$(random_website)
-{
-
-    echo "dest_server：${dest_server}"
-    
-} > "/root/catmi/dest_server.txt"
-
+update_env dest_server "${dest_server}"
 
