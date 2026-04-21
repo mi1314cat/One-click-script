@@ -33,7 +33,7 @@ main_menu() {
     echo "5) 安装 xray"
     echo "6) 安装 mihomo"
     echo "7) 申请ssl证书"
-    echo "8) 卸载nginx"
+    echo "8) 卸载web"
     echo "99) 节点信息"
     echo "0) 退出面板"
     echo
@@ -49,7 +49,7 @@ main_menu() {
         5) install_xray ;;
         6) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/mihomo-au.sh) ;;
         7) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/ssl.sh) ;;
-        8) u_nginx ;;
+        8) uninstall_menu ;;
         99) catmi-xx ;;
         0) exit_program ;;
         *) 
@@ -87,14 +87,60 @@ install_hysteria() {
     main_menu
 }
 u_nginx() {
-   systemctl stop nginx
-   systemctl disable nginx
-   apt purge -y nginx nginx-common nginx-full
-   apt autoremove -y
+    echo "=== 停止并卸载 Nginx ==="
+    systemctl stop nginx 2>/dev/null
+    systemctl disable nginx 2>/dev/null
 
-    read -p "安装完成，按回车返回主菜单..."
+    apt purge -y nginx nginx-common nginx-full
+    apt autoremove -y
+
+    echo "Nginx 已卸载完成"
+    read -p "按回车返回主菜单..."
     main_menu
 }
+
+u_caddy() {
+    echo "=== 停止并卸载 Caddy ==="
+    systemctl stop caddy 2>/dev/null
+    systemctl disable caddy 2>/dev/null
+
+    # 卸载 Caddy 软件包
+    apt purge -y caddy
+    apt autoremove -y
+
+    echo "=== 删除 Caddy 配置与数据目录 ==="
+    rm -rf /etc/caddy
+    rm -rf /var/lib/caddy
+    rm -rf /var/www/html
+
+    echo "=== 删除 Caddy APT 仓库源 ==="
+    rm -f /etc/apt/sources.list.d/caddy-stable.list
+    rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+
+    apt update -y
+
+    echo "Caddy 已卸载完成"
+    read -p "按回车返回主菜单..."
+    main_menu
+}
+
+uninstall_menu() {
+    clear
+    echo "====== 卸载 Web 服务 ======"
+    echo "1) 卸载 Nginx"
+    echo "2) 卸载 Caddy"
+    echo "0) 返回主菜单"
+    echo "==========================="
+    read -p "请选择: " choice
+
+    case "$choice" in
+        1) u_nginx ;;
+        2) u_caddy ;;
+        0) main_menu ;;
+        *) echo "无效选择"; sleep 1; uninstall_menu ;;
+    esac
+}
+
 
 install_warp() {
     echo "开始安装 warp..."
