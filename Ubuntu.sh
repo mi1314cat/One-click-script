@@ -1,27 +1,136 @@
 #!/bin/bash
-# 定义颜色变量
-GREEN="\033[32m"
+
+# ===========================
+#   Color & Style
+# ===========================
 RED="\033[31m"
+GREEN="\033[32m"
 YELLOW="\033[33m"
+BLUE="\033[36m"
+MAGENTA="\033[35m"
+CYAN="\033[96m"
 PLAIN="\033[0m"
-# 打印带颜色的消息
-print_info() {
-    echo -e "${GREEN}[Info]${PLAIN} $1"
+BOLD="\033[1m"
+
+# 渐变色函数
+gradient() {
+    text="$1"
+    colors=("\033[38;5;45m" "\033[38;5;51m" "\033[38;5;87m" "\033[38;5;123m" "\033[38;5;159m")
+    out=""
+    i=0
+    for ((n=0; n<${#text}; n++)); do
+        out+="${colors[i]}${text:n:1}${PLAIN}"
+        ((i=(i+1)%5))
+    done
+    echo -e "$out"
 }
 
-print_error() {
-    echo -e "${RED}[Error]${PLAIN} $1"
+# 分割线
+line() {
+    echo -e "${BLUE}──────────────────────────────────────────────────────────────${PLAIN}"
 }
 
+# ===========================
+#   动态加载动画（可选）
+# ===========================
+loading() {
+    frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    for i in {1..12}; do
+        printf "\r${CYAN}加载中 ${frames[i % 10]}${PLAIN}"
+        sleep 0.08
+    done
+    printf "\r${PLAIN}"
+}
 
-# 介绍信息
-printf "\e[92m"
-printf "                       |\\__/,|   (\\\\ \n"
-printf "                     _.|o o  |_   ) )\n"
-printf "       -------------(((---(((-------------------\n"
-printf "                    catmi-一键脚本 \n"
-printf "       -----------------------------------------\n"
-printf "\e[0m"
+loading
+
+clear
+
+# ===========================
+#   ASCII LOGO
+# ===========================
+echo -e "${GREEN}"
+cat << "EOF"
+                       |\__/,|   (\\
+                     _.|o o  |_   ) )
+       -------------(((---(((-------------------
+EOF
+echo -e "${PLAIN}"
+
+gradient "                         catmi - 系统信息面板 v2"
+line
+
+# ===========================
+#   自动采集系统信息
+# ===========================
+HOSTNAME_SHOW=$(hostname)
+OS_VERSION=$(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"')
+KERNEL_VERSION=$(uname -r)
+ARCH=$(uname -m)
+
+CPU_MODEL=$(awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo | sed 's/^ //')
+CPU_CORES=$(grep -c ^processor /proc/cpuinfo)
+CPU_FREQ="$(awk -F: '/cpu MHz/ {printf "%.1f GHz", $2/1000; exit}' /proc/cpuinfo)"
+
+CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print 100-$8"%"}')
+LOAD_AVG=$(awk '{print $1", "$2", "$3}' /proc/loadavg)
+
+TCP_CONN=$(ss -tn | grep -c ESTAB)
+UDP_CONN=$(ss -un | wc -l)
+
+MEM_USED=$(free -m | awk '/Mem/ {printf "%.2fM", $3}')
+MEM_TOTAL=$(free -m | awk '/Mem/ {printf "%.2fM", $2}')
+MEM_PERCENT=$(free | awk '/Mem/ {printf "%.2f%%", $3/$2*100}')
+
+SWAP_USED=$(free -m | awk '/Swap/ {printf "%.0fM", $3}')
+SWAP_TOTAL=$(free -m | awk '/Swap/ {printf "%.0fM", $2}')
+
+DISK_USED=$(df -h / | awk 'NR==2 {print $3}')
+DISK_TOTAL=$(df -h / | awk 'NR==2 {print $2}')
+DISK_PERCENT=$(df -h / | awk 'NR==2 {print $5}')
+
+# 自动检测所有网卡
+NET_IF=$(ls /sys/class/net | grep -v lo | head -n1)
+NET_RX=$(awk -v iface="$NET_IF" '$1 ~ iface":" {printf "%.2fG", $2/1024/1024/1024}' /proc/net/dev)
+NET_TX=$(awk -v iface="$NET_IF" '$1 ~ iface":" {printf "%.2fG", $10/1024/1024/1024}' /proc/net/dev)
+
+# 网络算法检测
+if lsmod | grep -q bbrplus; then
+    NET_ALGO="BBR-PLUS"
+elif lsmod | grep -q bbr; then
+    NET_ALGO="BBR"
+elif sysctl net.ipv4.tcp_congestion_control | grep -q hysteria; then
+    NET_ALGO="Hysteria"
+else
+    NET_ALGO="未知/未启用"
+fi
+
+# ===========================
+#   输出信息（Box-drawing）
+# ===========================
+echo -e "${CYAN}┌────────────────────────── 系统信息 ─────────────────────────┐${PLAIN}"
+echo -e "  主机名:        ${GREEN}${HOSTNAME_SHOW}${PLAIN}"
+echo -e "  系统版本:      ${GREEN}${OS_VERSION}${PLAIN}"
+echo -e "  Linux版本:     ${GREEN}${KERNEL_VERSION}${PLAIN}"
+echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+echo -e "  CPU架构:       ${GREEN}${ARCH}${PLAIN}"
+echo -e "  CPU型号:       ${GREEN}${CPU_MODEL}${PLAIN}"
+echo -e "  CPU核心数:     ${GREEN}${CPU_CORES}${PLAIN}"
+echo -e "  CPU频率:       ${GREEN}${CPU_FREQ}${PLAIN}"
+echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+echo -e "  CPU占用:       ${GREEN}${CPU_USAGE}${PLAIN}"
+echo -e "  系统负载:      ${GREEN}${LOAD_AVG}${PLAIN}"
+echo -e "  TCP|UDP连接数: ${GREEN}${TCP_CONN}|${UDP_CONN}${PLAIN}"
+echo -e "  物理内存:      ${GREEN}${MEM_USED}/${MEM_TOTAL} (${MEM_PERCENT})${PLAIN}"
+echo -e "  虚拟内存:      ${GREEN}${SWAP_USED}/${SWAP_TOTAL}${PLAIN}"
+echo -e "  硬盘占用:      ${GREEN}${DISK_USED}/${DISK_TOTAL} (${DISK_PERCENT})${PLAIN}"
+echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+echo -e "  网卡:          ${GREEN}${NET_IF}${PLAIN}"
+echo -e "  总接收:        ${GREEN}${NET_RX}${PLAIN}"
+echo -e "  总发送:        ${GREEN}${NET_TX}${PLAIN}"
+echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+echo -e "  网络算法:      ${GREEN}${NET_ALGO}${PLAIN}"
+echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
 
 
 
