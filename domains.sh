@@ -5,24 +5,53 @@ update_env() {
     local key="$1"
     local value="$2"
 
-    # key 必须是合法的 env 变量名
+    # 校验 key
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
         echo "Invalid key: $key"
         return 1
     }
 
-    # 转义 value 中的双引号和反斜杠
-    value="${value//\\/\\\\}"
-    value="${value//\"/\\\"}"
-
-    # 确保文件存在
+    # 确保目录 & 文件
+    mkdir -p "$(dirname "$CATMIENV_FILE")"
     [ -f "$CATMIENV_FILE" ] || touch "$CATMIENV_FILE"
 
-    # 删除已有的（避免重复行）
-    sed -i "/^${key}=.*/d" "$CATMIENV_FILE"
+    # 获取权限 & 属主（兼容 Linux / BSD）
+    local mode owner group
+    if mode=$(stat -c "%a" "$CATMIENV_FILE" 2>/dev/null); then
+        owner=$(stat -c "%u" "$CATMIENV_FILE")
+        group=$(stat -c "%g" "$CATMIENV_FILE")
+    else
+        mode=$(stat -f "%Lp" "$CATMIENV_FILE")
+        owner=$(stat -f "%u" "$CATMIENV_FILE")
+        group=$(stat -f "%g" "$CATMIENV_FILE")
+    fi
 
-    # 追加新值
-    echo "${key}=\"${value}\"" >> "$CATMIENV_FILE"
+    # 转义 value
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//\$/\\$}"
+
+    # 加锁 + 自动释放
+    (
+        flock 200
+
+        local tmp_file
+        tmp_file=$(mktemp "$(dirname "$CATMIENV_FILE")/.env.tmp.XXXXXX")
+
+        # 先设置权限
+        chmod "$mode" "$tmp_file"
+        chown "$owner":"$group" "$tmp_file" 2>/dev/null || true
+
+        # 精确删除旧 key（严格匹配 key=）
+        awk -v k="$key" 'index($0, k"=") != 1' "$CATMIENV_FILE" > "$tmp_file"
+
+        # 写入新值
+        printf '%s="%s"\n' "$key" "$value" >> "$tmp_file"
+
+        # 原子替换
+        mv "$tmp_file" "$CATMIENV_FILE"
+
+    ) 200>"$CATMIENV_FILE.lock"
 }
 
 random_website() {
