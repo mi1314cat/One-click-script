@@ -12,18 +12,6 @@ CYAN="\033[96m"
 PLAIN="\033[0m"
 BOLD="\033[1m"
 
-# 渐变色函数
-gradient() {
-    text="$1"
-    colors=("\033[38;5;45m" "\033[38;5;51m" "\033[38;5;87m" "\033[38;5;123m" "\033[38;5;159m")
-    out=""
-    i=0
-    for ((n=0; n<${#text}; n++)); do
-        out+="${colors[i]}${text:n:1}${PLAIN}"
-        ((i=(i+1)%5))
-    done
-    echo -e "$out"
-}
 
 # 分割线
 line() {
@@ -105,32 +93,7 @@ else
     NET_ALGO="未知/未启用"
 fi
 
-# ===========================
-#   输出信息（Box-drawing）
-# ===========================
-echo -e "${CYAN}┌────────────────────────── 系统信息 ─────────────────────────┐${PLAIN}"
-echo -e "  主机名:        ${GREEN}${HOSTNAME_SHOW}${PLAIN}"
-echo -e "  系统版本:      ${GREEN}${OS_VERSION}${PLAIN}"
-echo -e "  Linux版本:     ${GREEN}${KERNEL_VERSION}${PLAIN}"
-echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
-echo -e "  CPU架构:       ${GREEN}${ARCH}${PLAIN}"
-echo -e "  CPU型号:       ${GREEN}${CPU_MODEL}${PLAIN}"
-echo -e "  CPU核心数:     ${GREEN}${CPU_CORES}${PLAIN}"
-echo -e "  CPU频率:       ${GREEN}${CPU_FREQ}${PLAIN}"
-echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
-echo -e "  CPU占用:       ${GREEN}${CPU_USAGE}${PLAIN}"
-echo -e "  系统负载:      ${GREEN}${LOAD_AVG}${PLAIN}"
-echo -e "  TCP|UDP连接数: ${GREEN}${TCP_CONN}|${UDP_CONN}${PLAIN}"
-echo -e "  物理内存:      ${GREEN}${MEM_USED}/${MEM_TOTAL} (${MEM_PERCENT})${PLAIN}"
-echo -e "  虚拟内存:      ${GREEN}${SWAP_USED}/${SWAP_TOTAL}${PLAIN}"
-echo -e "  硬盘占用:      ${GREEN}${DISK_USED}/${DISK_TOTAL} (${DISK_PERCENT})${PLAIN}"
-echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
-echo -e "  网卡:          ${GREEN}${NET_IF}${PLAIN}"
-echo -e "  总接收:        ${GREEN}${NET_RX}${PLAIN}"
-echo -e "  总发送:        ${GREEN}${NET_TX}${PLAIN}"
-echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
-echo -e "  网络算法:      ${GREEN}${NET_ALGO}${PLAIN}"
-echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
+
 
 
 
@@ -172,6 +135,32 @@ EOF
 
     gradient "                         Catmiup 面板 v2"
     echo -e "${BLUE}──────────────────────────────────────────────────────────────${PLAIN}"
+    # ===========================
+#   输出信息（Box-drawing）
+# ===========================
+echo -e "${CYAN}┌────────────────────────── 系统信息 ─────────────────────────┐${PLAIN}"
+echo -e "  主机名:        ${GREEN}${HOSTNAME_SHOW}${PLAIN}"
+echo -e "  系统版本:      ${GREEN}${OS_VERSION}${PLAIN}"
+echo -e "  Linux版本:     ${GREEN}${KERNEL_VERSION}${PLAIN}"
+echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+echo -e "  CPU架构:       ${GREEN}${ARCH}${PLAIN}"
+echo -e "  CPU型号:       ${GREEN}${CPU_MODEL}${PLAIN}"
+echo -e "  CPU核心数:     ${GREEN}${CPU_CORES}${PLAIN}"
+echo -e "  CPU频率:       ${GREEN}${CPU_FREQ}${PLAIN}"
+echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+echo -e "  CPU占用:       ${GREEN}${CPU_USAGE}${PLAIN}"
+echo -e "  系统负载:      ${GREEN}${LOAD_AVG}${PLAIN}"
+echo -e "  TCP|UDP连接数: ${GREEN}${TCP_CONN}|${UDP_CONN}${PLAIN}"
+echo -e "  物理内存:      ${GREEN}${MEM_USED}/${MEM_TOTAL} (${MEM_PERCENT})${PLAIN}"
+echo -e "  虚拟内存:      ${GREEN}${SWAP_USED}/${SWAP_TOTAL}${PLAIN}"
+echo -e "  硬盘占用:      ${GREEN}${DISK_USED}/${DISK_TOTAL} (${DISK_PERCENT})${PLAIN}"
+echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+echo -e "  网卡:          ${GREEN}${NET_IF}${PLAIN}"
+echo -e "  总接收:        ${GREEN}${NET_RX}${PLAIN}"
+echo -e "  总发送:        ${GREEN}${NET_TX}${PLAIN}"
+echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+echo -e "  网络算法:      ${GREEN}${NET_ALGO}${PLAIN}"
+echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
 
     # 菜单主体（Box-drawing 风格）
     echo -e "${CYAN}┌────────────────────────── 功能菜单 ─────────────────────────┐${PLAIN}"
