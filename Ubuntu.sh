@@ -419,12 +419,14 @@ install_xray() {
             print_info "更新 xray-core..."
             bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/upxray.sh) \
                 || { print_error "更新失败"; return; }
+                install_xray
             ;;
 
         3)
             print_info "正在重启 xray 服务..."
             systemctl restart xrayls
             systemctl status xrayls --no-pager
+            install_xray
             ;;
 
         4)
