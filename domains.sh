@@ -1,4 +1,3 @@
-# 定义函数，返回随机选择的域名
 DINSTALL_CATMI="/root/catmi"
 CATMIENV_FILE="$DINSTALL_CATMI/catmi.env"
 
@@ -12,17 +11,20 @@ update_env() {
         return 1
     }
 
-    # 转义 value 中的双引号
+    # 转义 value 中的双引号和反斜杠
+    value="${value//\\/\\\\}"
     value="${value//\"/\\\"}"
 
+    # 确保文件存在
     [ -f "$CATMIENV_FILE" ] || touch "$CATMIENV_FILE"
 
-    if grep -q "^${key}=" "$CATMIENV_FILE"; then
-        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$CATMIENV_FILE"
-    else
-        echo "${key}=\"${value}\"" >> "$CATMIENV_FILE"
-    fi
+    # 删除已有的（避免重复行）
+    sed -i "/^${key}=.*/d" "$CATMIENV_FILE"
+
+    # 追加新值
+    echo "${key}=\"${value}\"" >> "$CATMIENV_FILE"
 }
+
 random_website() {
    domains=(
     "zh-hk.vuejs.org"
