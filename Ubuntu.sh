@@ -180,7 +180,7 @@ echo -e "${CYAN}├────────────────────�
         6) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/mihomo-au.sh) ;;
         7) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/ssl.sh) ;;
         8) web_service_menu ;;
-        8) fail_menu ;;
+        9) fail_menu ;;
         99) catmi-xx ;;
         0) exit_program ;;
         *)
