@@ -1,4 +1,8 @@
 # One-click-script
+# ufw管理
+```bash
+bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/ufw.sh)
+```
 # env
 ```bash
 source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/update_env.sh")
