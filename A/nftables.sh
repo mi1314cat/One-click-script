@@ -453,7 +453,6 @@ show_logs() {
   tail -n 50 "$LOG_FILE" 2>/dev/null || print_error "暂无日志"
 }
 
-
 # =========================
 # 清空规则（保留 SSH）
 # =========================
@@ -659,8 +658,7 @@ while true; do
     8) restore_rules ;;
     9) web_service_menu ;;
     10) auto_open_used_ports ;;
-    11) 删除 nftables（卸载/清除）
-
-    *) print_error "无效选择" ;;
+    11) delete_nftables ;;
+     *) print_error "无效选择" ;;
   esac
 done
