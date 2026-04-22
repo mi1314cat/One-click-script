@@ -177,6 +177,18 @@ else
 fi
 
 
+# 渐变标题函数
+    gradient() {
+        text="$1"
+        colors=("\033[38;5;45m" "\033[38;5;51m" "\033[38;5;87m" "\033[38;5;123m" "\033[38;5;159m")
+        out=""
+        i=0
+        for ((n=0; n<${#text}; n++)); do
+            out+="${colors[i]}${text:n:1}${PLAIN}"
+            ((i=(i+1)%5))
+        done
+        echo -e "$out"
+    }
 
 
 
@@ -196,19 +208,7 @@ main_menu() {
     PLAIN="\033[0m"
     BOLD="\033[1m"
 
-    # 渐变标题函数
-    gradient() {
-        text="$1"
-        colors=("\033[38;5;45m" "\033[38;5;51m" "\033[38;5;87m" "\033[38;5;123m" "\033[38;5;159m")
-        out=""
-        i=0
-        for ((n=0; n<${#text}; n++)); do
-            out+="${colors[i]}${text:n:1}${PLAIN}"
-            ((i=(i+1)%5))
-        done
-        echo -e "$out"
-    }
-
+    
     # 顶部 ASCII LOGO
     echo -e "${GREEN}"
     cat << "EOF"
