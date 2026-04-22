@@ -181,10 +181,17 @@ refresh_services() {
     caddy_installed=$(svc_state caddy)
     caddy_running=$(svc_running caddy)
 
-    # UFW / nftables
+        # UFW
     ufw_installed=$(svc_state ufw)
-    nft_installed=$(svc_state nftables)
+    ufw_running=$(svc_running ufw)
+    ufw_enabled=$(svc_enabled ufw)
 
+    # nftables
+    nft_installed=$(svc_state nftables)
+    nft_running=$(svc_running nftables)
+    nft_enabled=$(svc_enabled nftables)
+
+    
     # Fail2ban
     fail2ban_installed=$(svc_state fail2ban)
     fail2ban_running=$(svc_running fail2ban)
@@ -266,9 +273,10 @@ echo -e "  Caddy:          ${caddy_installed}  | 状态: ${caddy_running}"
 
 echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
 
-echo -e "  UFW:            ${ufw_installed}"
-echo -e "  nftables:       ${nft_installed}"
+echo -e "  UFW:            ${ufw_installed} | 状态: ${ufw_running} | 启动: ${ufw_enabled}"
+echo -e "  nftables:       ${nft_installed} | 状态: ${nft_running} | 启动: ${nft_enabled}"
 echo -e "  Fail2ban:       ${fail2ban_installed} | 状态: ${fail2ban_running}"
+
 
 echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
 
