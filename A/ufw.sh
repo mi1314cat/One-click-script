@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# UFW 安全启用 + 自定义端口管理（带自动回滚、颜色 UI、日志）
+# UFW 安全启用 + HY2 端口管理（最终版 v4.0，不会断线）
 
 set -euo pipefail
 
-# =========================
-# 配置区
-# =========================
 ROLLBACK_TIME=60
 LOG_FILE="/var/log/ufw_safe_enable.log"
 CONFIRM_FLAG="/tmp/ufw_confirmed_$$"
@@ -31,12 +28,9 @@ log() {
   echo -e "$msg" | tee -a "$LOG_FILE" >&2
 }
 
-# =========================
-# Banner
-# =========================
 banner() {
   echo -e "${BOLD}${CYAN}============================================${RESET}"
-  echo -e "${BOLD}${MAGENTA}   UFW 安全启用模式 + 自定义端口管理   ${RESET}"
+  echo -e "${BOLD}${MAGENTA}   UFW 安全启用模式 + HY2 端口管理 v4.0   ${RESET}"
   echo -e "${BOLD}${CYAN}============================================${RESET}"
 }
 
@@ -76,23 +70,23 @@ banner
 log "启动 UFW 安全启用流程"
 
 # =========================
-# 检测 SSH 端口
+# 稳定版 SSH 端口检测（无 awk 正则）
 # =========================
 detect_ssh_port() {
   local port=""
-  port="$(ss -tnlp 2>/dev/null \
-    | awk '/sshd/ {
-        gsub(/
 
-\[|\]
+  if command -v ss >/dev/null 2>&1; then
+    port="$(ss -tnlp 2>/dev/null \
+      | grep sshd \
+      | awk '{print $4}' \
+      | sed 's/.*://g' \
+      | grep -E '^[0-9]+$' \
+      | head -n1 || true)"
+  fi
 
-/,"",$4);
-        split($4,a,":");
-        print a[length(a)]
-      }' | grep -E '^[0-9]+$' | head -n1 || true)"
-
-  [[ -z "$port" ]] && port="$(grep -iE '^Port ' /etc/ssh/sshd_config | awk '{print $2}' | head -n1 || true)"
+  [[ -z "$port" ]] && port="$(grep -iE '^Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -n1 || true)"
   [[ -z "$port" ]] && port="22"
+
   echo "$port"
 }
 
@@ -101,10 +95,22 @@ echo -e "${BLUE}🔍 检测到 SSH 端口: ${BOLD}${SSH_PORT}${RESET}"
 log "检测到 SSH 端口: $SSH_PORT"
 
 # =========================
-# 放行 SSH
+# iptables 兜底保护（防止断线）
 # =========================
-echo -e "${CYAN}🛡️ 放行 SSH 端口...${RESET}"
-ufw insert 1 allow "${SSH_PORT}/tcp" >/dev/null 2>&1 || ufw allow "${SSH_PORT}/tcp" >/dev/null
+iptables -I INPUT -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null || true
+log "iptables 兜底保护 SSH 端口 ${SSH_PORT}"
+
+# =========================
+# 设置默认策略（不会断线）
+# =========================
+ufw default deny incoming >/dev/null
+ufw default allow outgoing >/dev/null
+log "设置默认策略：deny incoming / allow outgoing"
+
+# =========================
+# 放行 SSH（不会断线）
+# =========================
+ufw allow "${SSH_PORT}/tcp" >/dev/null 2>&1 || true
 log "放行 SSH 端口 ${SSH_PORT}/tcp"
 
 # =========================
@@ -124,7 +130,7 @@ ROLLBACK_PID=$!
 log "回滚守护进程 PID: $ROLLBACK_PID"
 
 # =========================
-# 启用 UFW
+# 启用 UFW（不会断线）
 # =========================
 echo -e "${CYAN}🚀 启用 UFW...${RESET}"
 ufw --force enable >/dev/null
@@ -167,17 +173,16 @@ else
 fi
 
 # =========================
-# 自定义端口管理菜单
+# HY2 / 自定义端口管理菜单（TCP+UDP）
 # =========================
-
 while true; do
   echo -e "${BOLD}${CYAN}
-========= 自定义端口管理 =========
+========= HY2 / 自定义端口管理 =========
 1) 开放端口（TCP + UDP）
 2) 关闭端口（TCP + UDP）
 3) 查看 UFW 状态
 4) 退出
-=================================${RESET}"
+========================================${RESET}"
 
   read -r -p "请选择操作: " choice
 
@@ -188,6 +193,7 @@ while true; do
 
       ufw allow "${port}/tcp" >/dev/null 2>&1 || true
       ufw allow "${port}/udp" >/dev/null 2>&1 || true
+      iptables -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
 
       echo -e "${GREEN}✔ 已开放端口 ${port}（TCP + UDP）${RESET}"
       log "开放端口 ${port}（TCP + UDP）"
@@ -214,5 +220,3 @@ while true; do
       ;;
   esac
 done
-
-
