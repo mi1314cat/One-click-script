@@ -12,20 +12,13 @@ CYAN="\033[96m"
 PLAIN="\033[0m"
 BOLD="\033[1m"
 
-# 打印带颜色的消息
-print_info() {
-    echo -e "${GREEN}[Info]${PLAIN} $1"
-}
+print_info() { echo -e "${GREEN}[Info]${PLAIN} $1"; }
+print_error() { echo -e "${RED}[Error]${PLAIN} $1"; }
 
-print_error() {
-    echo -e "${RED}[Error]${PLAIN} $1"
-}
-# 分割线
-line() {
-    echo -e "${BLUE}──────────────────────────────────────────────────────────────${PLAIN}"
-}
+line() { echo -e "${BLUE}──────────────────────────────────────────────────────────────${PLAIN}"; }
+
 # ===========================
-#   渐变标题函数（全局）
+#   渐变标题
 # ===========================
 gradient() {
     text="$1"
@@ -40,7 +33,7 @@ gradient() {
 }
 
 # ===========================
-#   加载动画（全局）
+#   加载动画
 # ===========================
 loading() {
     frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
@@ -52,31 +45,14 @@ loading() {
         printf "\r${color}加载中 ${frame}${PLAIN}  "
         sleep 0.04
     done
-
     printf "\r\033[K"
 }
 
-
 loading
-
 clear
 
 # ===========================
-#   ASCII LOGO
-# ===========================
-echo -e "${GREEN}"
-cat << "EOF"
-                       |\__/,|   (\\
-                     _.|o o  |_   ) )
-       -------------(((---(((-------------------
-EOF
-echo -e "${PLAIN}"
-
-gradient "                         catmi - 系统信息面板 v2"
-line
-
-# ===========================
-#   自动采集系统信息
+#   系统信息（一次采集）
 # ===========================
 HOSTNAME_SHOW=$(hostname)
 OS_VERSION=$(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"')
@@ -87,11 +63,14 @@ CPU_MODEL=$(awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo | sed 's/^ //'
 CPU_CORES=$(grep -c ^processor /proc/cpuinfo)
 CPU_FREQ="$(awk -F: '/cpu MHz/ {printf "%.1f GHz", $2/1000; exit}' /proc/cpuinfo)"
 
-CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print 100-$8"%"}')
+# CPU 使用率（极速版）
+CPU_USAGE=$(awk -v FS=" " '/cpu /{printf "%.1f%%", 100 - ($5*100/($2+$3+$4+$5))}' /proc/stat)
+
 LOAD_AVG=$(awk '{print $1", "$2", "$3}' /proc/loadavg)
 
-TCP_CONN=$(ss -tn | grep -c ESTAB)
-UDP_CONN=$(ss -un | wc -l)
+# TCP/UDP（极速版）
+TCP_CONN=$(grep -c '^ *[0-9]' /proc/net/tcp)
+UDP_CONN=$(grep -c '^ *[0-9]' /proc/net/udp)
 
 MEM_USED=$(free -m | awk '/Mem/ {printf "%.2fM", $3}')
 MEM_TOTAL=$(free -m | awk '/Mem/ {printf "%.2fM", $2}')
@@ -104,17 +83,14 @@ DISK_USED=$(df -h / | awk 'NR==2 {print $3}')
 DISK_TOTAL=$(df -h / | awk 'NR==2 {print $2}')
 DISK_PERCENT=$(df -h / | awk 'NR==2 {print $5}')
 
-
-
 # ===========================
-#   服务检测（安全版）
+#   服务检测（极速版）
 # ===========================
-
 service_exists() {
-    systemctl list-unit-files | grep -q "^$1.service"
+    systemctl status "$1" >/dev/null 2>&1
 }
 
-check_service_exists() {
+svc_state() {
     if service_exists "$1"; then
         echo -e "${GREEN}已安装${PLAIN}"
     else
@@ -122,114 +98,93 @@ check_service_exists() {
     fi
 }
 
-check_service_running() {
-    if service_exists "$1"; then
-        if systemctl is-active --quiet "$1"; then
-            echo -e "${GREEN}运行中${PLAIN}"
-        else
-            echo -e "${RED}未运行${PLAIN}"
-        fi
+svc_running() {
+    if systemctl is-active --quiet "$1"; then
+        echo -e "${GREEN}运行中${PLAIN}"
     else
-        echo -e "${RED}未安装${PLAIN}"
+        echo -e "${RED}未运行${PLAIN}"
     fi
 }
 
-check_service_enabled() {
-    if service_exists "$1"; then
-        if systemctl is-enabled --quiet "$1"; then
-            echo -e "${GREEN}已启用${PLAIN}"
-        else
-            echo -e "${YELLOW}未启用${PLAIN}"
-        fi
+svc_enabled() {
+    if systemctl is-enabled --quiet "$1"; then
+        echo -e "${GREEN}已启用${PLAIN}"
     else
-        echo -e "${RED}未安装${PLAIN}"
+        echo -e "${YELLOW}未启用${PLAIN}"
     fi
 }
 
-# ===========================
-#   Xray 自动识别
-# ===========================
+# 缓存服务状态（一次性执行）
+docker_installed=$(svc_state docker)
+docker_running=$(svc_running docker)
+
+nginx_installed=$(svc_state nginx)
+nginx_running=$(svc_running nginx)
+
+caddy_installed=$(svc_state caddy)
+caddy_running=$(svc_running caddy)
+
+ufw_installed=$(svc_state ufw)
+nft_installed=$(svc_state nftables)
+
+fail2ban_installed=$(svc_state fail2ban)
+fail2ban_running=$(svc_running fail2ban)
+
+# Xray 自动识别
 detect_xray_service() {
     for svc in xrayls xray xray-core; do
-        if service_exists "$svc"; then
-            echo "$svc"
-            return
-        fi
+        if service_exists "$svc"; then echo "$svc"; return; fi
     done
     echo ""
 }
 
 xray_svc=$(detect_xray_service)
-
 if [[ -n "$xray_svc" ]]; then
     xray_installed="${GREEN}已安装${PLAIN}"
-    xray_running=$(check_service_running "$xray_svc")
-    xray_enabled=$(check_service_enabled "$xray_svc")
+    xray_running=$(svc_running "$xray_svc")
+    xray_enabled=$(svc_enabled "$xray_svc")
 else
     xray_installed="${RED}未安装${PLAIN}"
     xray_running="${RED}未运行${PLAIN}"
     xray_enabled="${YELLOW}未启用${PLAIN}"
 fi
 
-# ===========================
-#   Mihomo 自动识别
-# ===========================
+# Mihomo 自动识别
 detect_mihomo_service() {
     for svc in mihomo mihomo-core clash; do
-        if service_exists "$svc"; then
-            echo "$svc"
-            return
-        fi
+        if service_exists "$svc"; then echo "$svc"; return; fi
     done
     echo ""
 }
 
 mihomo_svc=$(detect_mihomo_service)
-
 if [[ -n "$mihomo_svc" ]]; then
     mihomo_installed="${GREEN}已安装${PLAIN}"
-    mihomo_running=$(check_service_running "$mihomo_svc")
-    mihomo_enabled=$(check_service_enabled "$mihomo_svc")
+    mihomo_running=$(svc_running "$mihomo_svc")
+    mihomo_enabled=$(svc_enabled "$mihomo_svc")
 else
     mihomo_installed="${RED}未安装${PLAIN}"
     mihomo_running="${RED}未运行${PLAIN}"
     mihomo_enabled="${YELLOW}未启用${PLAIN}"
 fi
 
-
-
-
-
-
-
-# 创建面板函数
+# ===========================
+#   主菜单（极速版）
+# ===========================
 main_menu() {
     clear
 
-    # 颜色
-    GREEN="\033[32m"
-    YELLOW="\033[33m"
-    BLUE="\033[36m"
-    CYAN="\033[96m"
-    MAGENTA="\033[35m"
-    PLAIN="\033[0m"
-    BOLD="\033[1m"
-
-    
-    # 顶部 ASCII LOGO
     echo -e "${GREEN}"
     cat << "EOF"
-                       |\__/,|   (\\
+                       |\__/,|   (\
                      _.|o o  |_   ) )
        -------------(((---(((-------------------
 EOF
     echo -e "${PLAIN}"
 
-    gradient "                         Catmiup 面板 v2"
-    echo -e "${BLUE}──────────────────────────────────────────────────────────────${PLAIN}"
-    # ===========================
-#   输出信息（Box-drawing）
-# ===========================
+    gradient "                         Catmiup 面板 v3"
+    line
+
 echo -e "${CYAN}┌────────────────────────── 系统信息 ─────────────────────────┐${PLAIN}"
 echo -e "  主机名:        ${GREEN}${HOSTNAME_SHOW}${PLAIN}"
 echo -e "  系统版本:      ${GREEN}${OS_VERSION}${PLAIN}"
@@ -248,26 +203,22 @@ echo -e "  虚拟内存:      ${GREEN}${SWAP_USED}/${SWAP_TOTAL}${PLAIN}"
 echo -e "  硬盘占用:      ${GREEN}${DISK_USED}/${DISK_TOTAL} (${DISK_PERCENT})${PLAIN}"
 echo -e "${CYAN}├────────────────────────── 服务状态 ─────────────────────────┤${PLAIN}"
 
-echo -e "  Docker:         $(check_service_exists docker) | 状态: $(check_service_running docker)"
-echo -e "  Nginx:          $(check_service_exists nginx)  | 状态: $(check_service_running nginx)"
-echo -e "  Caddy:          $(check_service_exists caddy)  | 状态: $(check_service_running caddy)"
+echo -e "  Docker:         ${docker_installed} | 状态: ${docker_running}"
+echo -e "  Nginx:          ${nginx_installed}  | 状态: ${nginx_running}"
+echo -e "  Caddy:          ${caddy_installed}  | 状态: ${caddy_running}"
 
 echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
 
-echo -e "  UFW:            $(check_service_exists ufw)"
-echo -e "  nftables:       $(check_service_exists nftables)"
-echo -e "  Fail2ban:       $(check_service_exists fail2ban) | 状态: $(check_service_running fail2ban)"
+echo -e "  UFW:            ${ufw_installed}"
+echo -e "  nftables:       ${nft_installed}"
+echo -e "  Fail2ban:       ${fail2ban_installed} | 状态: ${fail2ban_running}"
 
 echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
 
 echo -e "  Xray:           ${xray_installed} | 状态: ${xray_running} | 启动: ${xray_enabled}"
-echo -e "  Hysteria2:      $(check_service_exists hysteria-server) | 状态: $(check_service_running hysteria-server) | 启动: $(check_service_enabled hysteria-server)"
-echo -e "  Sing-box:       $(check_service_exists sing-box) | 状态: $(check_service_running sing-box) | 启动: $(check_service_enabled sing-box)"
 echo -e "  Mihomo:         ${mihomo_installed} | 状态: ${mihomo_running} | 启动: ${mihomo_enabled}"
 
 echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
-
-
 
     # 菜单主体（Box-drawing 风格）
     echo -e "${CYAN}┌────────────────────────── 功能菜单 ─────────────────────────┐${PLAIN}"
