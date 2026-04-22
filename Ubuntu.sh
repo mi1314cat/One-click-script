@@ -353,19 +353,19 @@ install_singbox() {
             ;;
         1)
             print_info "开始安装 Sing-box ..."
-            bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/install.sh) || { echo "Sing-box 安装失败"; return; }
+            bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/install.sh) || { print_error "Sing-box 安装失败"; return; }
             ;;
         2)
             print_info "开始安装 Sing-box ..."
-            bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/singbox.sh) || { echo "Sing-box 安装失败"; return; }
+            bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/singbox.sh) || { print_error "Sing-box 安装失败"; return; }
             ;;
         3)
             print_info "开始安装 Sing-box ..."
-            bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/nsb.sh) || { echo "Sing-box 安装失败"; return; }
+            bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/nsb.sh) || { print_error "Sing-box 安装失败"; return; }
             ;;    
         4)
             print_info "开始安装 Sing-box ..."
-            bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh) || { echo "Sing-box 安装失败"; return; }
+            bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh) || { print_error "Sing-box 安装失败"; return; }
             ;;    
         *)
             print_error "无效的选项，返回主菜单..."
@@ -476,16 +476,16 @@ echo "选择 Sing-box 安装源:"
             return
             ;;
         1)
-            print_info "开始安装 Sing-box ..."
-            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/ufw.sh) || { echo "ufw 安装失败"; return; }
+            print_info "开始安装 ufw..."
+            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/ufw.sh) || { print_error "ufw 安装失败"; return; }
             ;;
         2)
-            print_info "开始安装 Sing-box ..."
-            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/nftables.sh) || { echo "nftables 安装失败"; return; }
+            print_info "开始安装 nftables ..."
+            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/nftables.sh) || { print_error "nftables 安装失败"; return; }
             ;;
         3)
-            print_info "开始安装 Sing-box ..."
-            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/fail2ban.sh) || { echo "fail2ban 安装失败"; return; }
+            print_info "开始安装 fail2ban  ..."
+            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/fail2ban.sh) || { print_error "fail2ban 安装失败"; return; }
             ;;    
          
         *)
