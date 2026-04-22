@@ -55,10 +55,10 @@ loading() {
 
 banner() {
   echo -e "${BOLD}${GRAD1}╔════════════════════════════════════════════════╗"
-  echo -e "${GRAD2}║           nftables 防火墙管理面板 v8.1         ║"
+  echo -e "${GRAD2}║                      CATMI                   ║"
   echo -e "${GRAD3}╚════════════════════════════════════════════════╝${RESET}"
 
-  echo -e "                   ${CYAN}|\\__/,|   (\\\\${RESET}"
+  echo -e "                       ${CYAN}|\\__/,|   (\\\\${RESET}"
   echo -e "                     ${CYAN}_.|o o  |_   ) )${RESET}"
   echo -e "       ${CYAN}-------------(((---(((-------------------${RESET}"
 }
