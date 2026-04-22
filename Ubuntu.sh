@@ -677,12 +677,33 @@ echo "选择 Sing-box 安装源:"
 
 
 }
+cat_out_files() {
+    local dir="$1"
+
+    [[ -d "$dir" ]] || {
+        echo "[Info] 目录不存在: $dir"
+        return 0
+    }
+
+    local files
+    files=$(find "$dir" -type f \( -name "*.txt" -o -name "*.yaml" \))
+
+    [[ -z "$files" ]] && {
+        echo "[Info] 没有找到 txt/yaml 文件"
+        return 0
+    }
+
+    echo "[Info] 输出文件内容："
+    echo "----------------------"
+
+    cat $files
+}
 catmi-xx() {
     print_info "========== 配置文件 =========="
 
     for file in \
         /root/catmi/hy2/config.yaml \
-        /root/catmi/xray/clash-meta.yaml \
+        cat_out_files /root/catmi/xray/out \
         /root/catmi/mihomo/clash-meta.yaml \
         /root/catmi/singbox/clash-meta.yaml
     do
