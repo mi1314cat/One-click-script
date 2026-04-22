@@ -410,6 +410,62 @@ reload_caddy() {
     web_service_menu
 }
 
+uninstall_menu() {
+    clear
+    get_web_status
+
+    echo "====== 卸载 Web 服务 ======"
+    echo -e "Nginx 状态：$nginx_status_text"
+    echo -e "Caddy 状态：$caddy_status_text"
+    echo "---------------------------"
+    echo "1) 卸载 Nginx"
+    echo "2) 卸载 Caddy"
+    echo "0) 返回上级菜单"
+    echo "==========================="
+    read -p "请选择: " choice
+
+    case "$choice" in
+        1) u_nginx ;;
+        2) u_caddy ;;
+        0) web_service_menu ;;
+        *) echo "无效选择"; sleep 1; uninstall_menu ;;
+    esac
+}
+u_nginx() {
+    echo "=== 停止并卸载 Nginx ==="
+    systemctl stop nginx 2>/dev/null
+    systemctl disable nginx 2>/dev/null
+
+    apt purge -y nginx nginx-common nginx-full
+    apt autoremove -y
+
+    echo "Nginx 已卸载完成"
+    read -p "按回车返回..."
+    uninstall_menu
+}
+u_caddy() {
+    echo "=== 停止并卸载 Caddy ==="
+    systemctl stop caddy 2>/dev/null
+    systemctl disable caddy 2>/dev/null
+
+    apt purge -y caddy
+    apt autoremove -y
+
+    echo "=== 删除 Caddy 配置与数据目录 ==="
+    rm -rf /etc/caddy
+    rm -rf /var/lib/caddy
+    rm -rf /var/www/html
+
+    echo "=== 删除 Caddy APT 仓库源 ==="
+    rm -f /etc/apt/sources.list.d/caddy-stable.list
+    rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+
+    apt update -y
+
+    echo "Caddy 已卸载完成"
+    read -p "按回车返回..."
+    uninstall_menu
+}
 
 
 install_warp() {
