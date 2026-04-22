@@ -453,6 +453,7 @@ show_logs() {
   tail -n 50 "$LOG_FILE" 2>/dev/null || print_error "暂无日志"
 }
 
+
 # =========================
 # 清空规则（保留 SSH）
 # =========================
@@ -510,6 +511,65 @@ restore_rules() {
   print_info "规则已从备份恢复"
   log "从备份恢复规则：$file"
 }
+# =========================
+# 删除 nftables（卸载 / 清除 / 禁用）
+# =========================
+delete_nftables() {
+  echo -e "${CYAN}╔══════════════════════════════════════════════╗"
+  echo -e "║                删除 nftables 防火墙           ║"
+  echo -e "╠══════════════════════════════════════════════╣${RESET}"
+  echo -e "此操作将："
+  echo -e " - 停止 nftables 服务"
+  echo -e " - 禁用 nftables 服务"
+  echo -e " - 删除规则文件：/etc/nftables.d/ufw-panel.nft"
+  echo -e " - 删除初始化标记：/etc/nftables.d/.nft_panel_initialized"
+  echo -e " - 删除 systemd 服务：nftables-ufw-panel.service"
+  echo -e " - 可选：卸载 nftables 包"
+  echo -e "${CYAN}╚══════════════════════════════════════════════╝${RESET}"
+
+  read -r -p "确认删除 nftables？输入 YES 执行：" confirm || return
+  [[ "${confirm^^}" != "YES" ]] && { print_info "取消操作"; return; }
+
+  print_info "停止 nftables 服务..."
+  systemctl stop nftables 2>/dev/null || true
+  systemctl stop nftables-ufw-panel.service 2>/dev/null || true
+
+  print_info "禁用 nftables 服务..."
+  systemctl disable nftables 2>/dev/null || true
+  systemctl disable nftables-ufw-panel.service 2>/dev/null || true
+
+  print_info "删除规则文件..."
+  rm -f /etc/nftables.d/ufw-panel.nft 2>/dev/null || true
+  rm -f /etc/nftables.d/.nft_panel_initialized 2>/dev/null || true
+
+  print_info "删除 systemd 服务..."
+  rm -f /etc/systemd/system/nftables-ufw-panel.service 2>/dev/null || true
+  systemctl daemon-reload || true
+
+  echo
+  echo -e "${YELLOW}是否卸载 nftables 包？${RESET}"
+  echo -e "1) 卸载"
+  echo -e "2) 保留"
+  read -r -p "选择：" uninstall || true
+
+  case "$uninstall" in
+    1)
+      print_info "正在卸载 nftables 包..."
+      if command -v apt >/dev/null 2>&1; then
+        apt remove -y nftables 2>/dev/null || true
+      elif command -v yum >/dev/null 2>&1; then
+        yum remove -y nftables 2>/dev/null || true
+      elif command -v dnf >/dev/null 2>&1; then
+        dnf remove -y nftables 2>/dev/null || true
+      fi
+      ;;
+    *)
+      print_info "保留 nftables 包"
+      ;;
+  esac
+
+  print_info "nftables 已彻底删除"
+}
 
 # =========================
 # 主菜单
@@ -550,6 +610,7 @@ while true; do
   echo -e "║ ${BLUE}8)${RESET} 恢复规则"
   echo -e "║ ${BLUE}9)${RESET} Web 服务管理（Nginx/Caddy）"
   echo -e "║ ${BLUE}10)${RESET} 自动开放所有被程序占用的端口"
+  echo -e "║ ${BLUE}11)${RESET} 删除 nftables（卸载/清除）"
   echo "╚════════════════════════════════════════════════╝"
 
   print_info "请选择操作："
@@ -598,6 +659,8 @@ while true; do
     8) restore_rules ;;
     9) web_service_menu ;;
     10) auto_open_used_ports ;;
+    11) 删除 nftables（卸载/清除）
+
     *) print_error "无效选择" ;;
   esac
 done
