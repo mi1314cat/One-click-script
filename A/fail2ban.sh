@@ -422,13 +422,13 @@ set_fail2ban_backend() {
     systemctl restart fail2ban >/dev/null 2>&1 || print_warn "Fail2ban 重启失败，请手动检查。"
 }
 banneer() {
-  echo -e "${BOLD}${GRAD1}╔════════════════════════════════════════════════╗"
-  echo -e "${GRAD2}║                      CATMI                   ║"
-  echo -e "${GRAD3}╚════════════════════════════════════════════════╝${RESET}"
+  echo -e "${COLOR_YELLOW}${COLOR_GREEN}╔════════════════════════════════════════════════╗"
+  echo -e "${COLOR_GREEN}║                      CATMI                   ║"
+  echo -e "${COLOR_GREEN}╚════════════════════════════════════════════════╝${COLOR_CYAN}"
 
-  echo -e "                       ${CYAN}|\\__/,|   (\\\\${RESET}"
-  echo -e "                     ${CYAN}_.|o o  |_   ) )${RESET}"
-  echo -e "       ${CYAN}-------------(((---(((-------------------${RESET}"
+  echo -e "                       ${COLOR_GREEN}|\\__/,|   (\\\\${COLOR_CYAN}"
+  echo -e "                     ${COLOR_GREEN}_.|o o  |_   ) )${COLOR_CYAN}"
+  echo -e "       ${COLOR_GREEN}-------------(((---(((-------------------${COLOR_CYAN}"
 }
 #######################################
 # 主菜单
