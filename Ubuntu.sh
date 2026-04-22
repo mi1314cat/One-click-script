@@ -30,11 +30,16 @@ line() {
 # ===========================
 loading() {
     frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-    for i in {1..12}; do
-        printf "\r${CYAN}加载中 ${frames[i % 10]}${PLAIN}"
-        sleep 0.08
+    colors=("\033[38;5;45m" "\033[38;5;51m" "\033[38;5;87m" "\033[38;5;123m" "\033[38;5;159m")
+
+    for i in {1..40}; do
+        frame=${frames[i % 10]}
+        color=${colors[i % 5]}
+        printf "\r${color}加载中 ${frame}${PLAIN}  "
+        sleep 0.04
     done
-    printf "\r${PLAIN}"
+
+    printf "\r\033[K"   # 清除整行，避免残留
 }
 
 loading
