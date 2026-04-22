@@ -88,32 +88,28 @@ DISK_PERCENT=$(df -h / | awk 'NR==2 {print $5}')
 #   服务检测（带颜色）
 # ===========================
 
-# 检测是否安装（命令是否存在）
-check_service_installed() {
-    if command -v "$1" >/dev/null 2>&1; then
+check_service_exists() {
+    if systemctl list-unit-files | grep -q "$1.service"; then
         echo -e "${GREEN}已安装${PLAIN}"
     else
         echo -e "${RED}未安装${PLAIN}"
     fi
 }
-
-# 检测 systemd 服务是否运行
-check_systemd_status() {
+check_service_running() {
     if systemctl is-active --quiet "$1"; then
         echo -e "${GREEN}运行中${PLAIN}"
     else
         echo -e "${RED}未运行${PLAIN}"
     fi
 }
-
-# 检测 systemd 是否启用开机启动
-check_systemd_enabled() {
+check_service_enabled() {
     if systemctl is-enabled --quiet "$1"; then
         echo -e "${GREEN}已启用${PLAIN}"
     else
         echo -e "${YELLOW}未启用${PLAIN}"
     fi
 }
+
 
 
 
@@ -177,24 +173,23 @@ echo -e "  TCP|UDP连接数: ${GREEN}${TCP_CONN}|${UDP_CONN}${PLAIN}"
 echo -e "  物理内存:      ${GREEN}${MEM_USED}/${MEM_TOTAL} (${MEM_PERCENT})${PLAIN}"
 echo -e "  虚拟内存:      ${GREEN}${SWAP_USED}/${SWAP_TOTAL}${PLAIN}"
 echo -e "  硬盘占用:      ${GREEN}${DISK_USED}/${DISK_TOTAL} (${DISK_PERCENT})${PLAIN}"
-echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
 echo -e "${CYAN}├────────────────────────── 服务状态 ─────────────────────────┤${PLAIN}"
 
-echo -e "  Docker:         $(check_service_installed docker) | 状态: $(check_systemd_status docker)"
-echo -e "  Nginx:          $(check_service_installed nginx)  | 状态: $(check_systemd_status nginx)"
-echo -e "  Caddy:          $(check_service_installed caddy)  | 状态: $(check_systemd_status caddy)"
+echo -e "  Docker:         $(check_service_exists docker) | 状态: $(check_service_running docker)"
+echo -e "  Nginx:          $(check_service_exists nginx)  | 状态: $(check_service_running nginx)"
+echo -e "  Caddy:          $(check_service_exists caddy)  | 状态: $(check_service_running caddy)"
 
 echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
 
-echo -e "  UFW:            $(check_service_installed ufw)"
-echo -e "  nftables:       $(check_service_installed nft)"
-echo -e "  Fail2ban:       $(check_service_installed fail2ban) | 状态: $(check_systemd_status fail2ban)"
+echo -e "  UFW:            $(check_service_exists ufw)"
+echo -e "  nftables:       $(check_service_exists nftables)"
+echo -e "  Fail2ban:       $(check_service_exists fail2ban) | 状态: $(check_service_running fail2ban)"
 
 echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
 
-echo -e "  Xray:           $(check_service_installed xray) | 状态: $(check_systemd_status xrayls) | 启动: $(check_systemd_enabled xrayls)"
-echo -e "  Hysteria2:      $(check_service_installed hysteria-server) | 状态: $(check_systemd_status hysteria-server) | 启动: $(check_systemd_enabled hysteria-server)"
-echo -e "  Sing-box:       $(check_service_installed sing-box) | 状态: $(check_systemd_status sing-box) | 启动: $(check_systemd_enabled sing-box)"
+echo -e "  Xray:           $(check_service_exists xrayls) | 状态: $(check_service_running xrayls) | 启动: $(check_service_enabled xrayls)"
+echo -e "  Hysteria2:      $(check_service_exists hysteria-server) | 状态: $(check_service_running hysteria-server) | 启动: $(check_service_enabled hysteria-server)"
+echo -e "  Sing-box:       $(check_service_exists sing-box) | 状态: $(check_service_running sing-box) | 启动: $(check_service_enabled sing-box)"
 
 echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
 
