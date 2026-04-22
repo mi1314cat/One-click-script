@@ -748,7 +748,6 @@ catmi-xx() {
     read -p "安装完成，按回车返回主菜单..."
     main_menu
 }
-
 exit_program() {
     print_info "退出面板 Catmiup 面板！"
     clear
