@@ -80,6 +80,37 @@ touch "$LOG_FILE" 2>/dev/null || {
 chmod 600 "$LOG_FILE" 2>/dev/null || true
 
 banner
+# =========================
+# 自动安装 nftables（跨发行版）
+# =========================
+install_nftables_if_missing() {
+  if command -v nft >/dev/null 2>&1; then
+    return
+  fi
+
+  echo -e "${YELLOW}检测到系统未安装 nftables，正在自动安装...${RESET}"
+
+  if command -v apt >/dev/null 2>&1; then
+    apt update -y
+    apt install -y nftables
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y nftables
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y nftables
+  else
+    print_error "无法自动安装 nftables，请手动安装后重试"
+    exit 1
+  fi
+
+  if ! command -v nft >/dev/null 2>&1; then
+    print_error "nftables 安装失败，请检查系统包管理器"
+    exit 1
+  fi
+
+  print_info "nftables 安装成功"
+}
+
+install_nftables_if_missing
 
 # =========================
 # 命令存在性检查
@@ -91,7 +122,7 @@ need_cmd() {
   }
 }
 
-need_cmd nft
+
 need_cmd ss
 need_cmd systemctl
 
