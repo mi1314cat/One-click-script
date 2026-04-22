@@ -457,6 +457,7 @@ while true; do
   echo -e "║ ${BLUE}8)${RESET} 恢复规则"
   echo -e "║ ${BLUE}9)${RESET} Web 服务管理（Nginx/Caddy）"
   echo -e "║ ${BLUE}10)${RESET} 自动开放所有被程序占用的端口"
+  echo -e "║ ${BLUE}11)${RESET} 删除 UFW（卸载防火墙）"
   echo "╚════════════════════════════════════════════════╝"
 
   print_info "请选择操作："
@@ -550,6 +551,25 @@ while true; do
       auto_open_used_ports
       ;;
   
+    11)
+      print_error "⚠ 你确定要卸载 UFW 吗？（YES 确认）"
+      read -r confirm
+      if [[ "${confirm^^}" == "YES" ]]; then
+        loading "正在卸载 UFW..."
+
+        systemctl stop ufw >/dev/null 2>&1 || true
+        systemctl disable ufw >/dev/null 2>&1 || true
+
+        apt remove -y ufw >/dev/null 2>&1 || true
+        rm -rf /etc/ufw >/dev/null 2>&1 || true
+
+        print_info "UFW 已成功卸载（SSH 不受影响）"
+        print_info "脚本即将退出"
+        exit 0
+      else
+        print_info "取消操作"
+      fi
+      ;;
 
     *)
       print_error "无效选择"
