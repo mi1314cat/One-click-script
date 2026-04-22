@@ -84,38 +84,79 @@ DISK_USED=$(df -h / | awk 'NR==2 {print $3}')
 DISK_TOTAL=$(df -h / | awk 'NR==2 {print $2}')
 DISK_PERCENT=$(df -h / | awk 'NR==2 {print $5}')
 
+
+
 # ===========================
-#   服务检测（带颜色）
+#   服务检测（安全版）
 # ===========================
 
+service_exists() {
+    systemctl list-unit-files | grep -q "^$1.service"
+}
+
 check_service_exists() {
-    if systemctl list-unit-files | grep -q "$1.service"; then
+    if service_exists "$1"; then
         echo -e "${GREEN}已安装${PLAIN}"
     else
         echo -e "${RED}未安装${PLAIN}"
     fi
 }
+
 check_service_running() {
-    if systemctl is-active --quiet "$1"; then
-        echo -e "${GREEN}运行中${PLAIN}"
+    if service_exists "$1"; then
+        if systemctl is-active --quiet "$1"; then
+            echo -e "${GREEN}运行中${PLAIN}"
+        else
+            echo -e "${RED}未运行${PLAIN}"
+        fi
     else
-        echo -e "${RED}未运行${PLAIN}"
+        echo -e "${RED}未安装${PLAIN}"
     fi
 }
+
 check_service_enabled() {
-    if systemctl is-enabled --quiet "$1"; then
-        echo -e "${GREEN}已启用${PLAIN}"
+    if service_exists "$1"; then
+        if systemctl is-enabled --quiet "$1"; then
+            echo -e "${GREEN}已启用${PLAIN}"
+        else
+            echo -e "${YELLOW}未启用${PLAIN}"
+        fi
     else
-        echo -e "${YELLOW}未启用${PLAIN}"
+        echo -e "${RED}未安装${PLAIN}"
     fi
 }
 
 # ===========================
-#   mihomo 检测（兼容多版本）
+#   Xray 自动识别
+# ===========================
+detect_xray_service() {
+    for svc in xrayls xray xray-core; do
+        if service_exists "$svc"; then
+            echo "$svc"
+            return
+        fi
+    done
+    echo ""
+}
+
+xray_svc=$(detect_xray_service)
+
+if [[ -n "$xray_svc" ]]; then
+    xray_installed="${GREEN}已安装${PLAIN}"
+    xray_running=$(check_service_running "$xray_svc")
+    xray_enabled=$(check_service_enabled "$xray_svc")
+else
+    xray_installed="${RED}未安装${PLAIN}"
+    xray_running="${RED}未运行${PLAIN}"
+    xray_enabled="${YELLOW}未启用${PLAIN}"
+fi
+
+# ===========================
+#   Mihomo 自动识别
 # ===========================
 detect_mihomo_service() {
     for svc in mihomo mihomo-core clash; do
-        if systemctl list-unit-files | grep -q "${svc}.service"; then
+        if service_exists "$svc"; then
             echo "$svc"
             return
         fi
@@ -134,6 +175,7 @@ else
     mihomo_running="${RED}未运行${PLAIN}"
     mihomo_enabled="${YELLOW}未启用${PLAIN}"
 fi
+
 
 
 
@@ -211,12 +253,13 @@ echo -e "  Fail2ban:       $(check_service_exists fail2ban) | 状态: $(check_se
 
 echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
 
-echo -e "  Xray:           $(check_service_exists xrayls) | 状态: $(check_service_running xrayls) | 启动: $(check_service_enabled xrayls)"
+echo -e "  Xray:           ${xray_installed} | 状态: ${xray_running} | 启动: ${xray_enabled}"
 echo -e "  Hysteria2:      $(check_service_exists hysteria-server) | 状态: $(check_service_running hysteria-server) | 启动: $(check_service_enabled hysteria-server)"
 echo -e "  Sing-box:       $(check_service_exists sing-box) | 状态: $(check_service_running sing-box) | 启动: $(check_service_enabled sing-box)"
 echo -e "  Mihomo:         ${mihomo_installed} | 状态: ${mihomo_running} | 启动: ${mihomo_enabled}"
 
 echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
+
 
 
     # 菜单主体（Box-drawing 风格）
