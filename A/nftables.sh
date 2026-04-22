@@ -57,10 +57,17 @@ banner() {
   echo -e "${BOLD}${GRAD1}╔════════════════════════════════════════════════╗"
   echo -e "${GRAD2}║           nftables 防火墙管理面板 v8.1         ║"
   echo -e "${GRAD3}╚════════════════════════════════════════════════╝${RESET}"
-  echo -e "${CYAN}                   |\\__/,|   (\\\\"
-  echo -e "                     _.|o o  |_   ) )"
-  echo -e "       -------------(((---(((-------------------${RESET}"
+
+  # 自动居中小猫
+  local cat1="|\\__/,|   (\\\\"
+  local cat2="   _.|o o  |_   ) )"
+  local cat3="-------------(((---(((-------------------"
+
+  printf "%*s%s\n" $(( (COLUMNS - ${#cat1}) / 2 )) "" "${CYAN}${cat1}${RESET}"
+  printf "%*s%s\n" $(( (COLUMNS - ${#cat2}) / 2 )) "" "${CYAN}${cat2}${RESET}"
+  printf "%*s%s\n" $(( (COLUMNS - ${#cat3}) / 2 )) "" "${CYAN}${cat3}${RESET}"
 }
+
 
 # =========================
 # Root 检查
