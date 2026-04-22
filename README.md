@@ -1,4 +1,11 @@
 # One-click-script
+# env
+```bash
+source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/update_env.sh")
+```
+```bash
+source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/load_env.sh")
+```
 ## _**简介一键安装脚本**_
 - 建议开启bbr加速
 - 无脑回车一键安装或者自定义安装
@@ -47,11 +54,7 @@ bash <(curl -fsSL https://github.com/mi1314cat/xary-core/raw/refs/heads/main/acm
 apk add curl && apk add bash && bash <(curl -fsSL https://github.com/mi1314cat/Alpine-script/raw/refs/heads/main/acme.sh)
 ```
 ## **_[xray core](https://github.com/mi1314cat/xary-core)_**
-### vless+ws 域名
 
-```bash
-bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/vless.sh)
-```
 ### reality一键脚本
 
 ```bash
