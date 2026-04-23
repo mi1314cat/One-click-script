@@ -602,6 +602,7 @@ install_xray() {
         case $vchoice in
             0)
                 print_info "返回主菜单..."
+                main_menu
                 return   # 退出子菜单，回到 main_menu
                 ;;
 
