@@ -315,7 +315,7 @@ echo -e "${CYAN}└────────────────────�
         3) install_warp ;;
         4) install_singbox ;;
         5) install_xray ;;
-        6) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/mihomo-au.sh) ;;
+        6) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/ts.sh) ;;
         7) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/ssl.sh) ;;
         8) web_service_menu ;;
         9) fail_menu ;;
