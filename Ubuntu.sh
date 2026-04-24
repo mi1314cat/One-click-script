@@ -705,19 +705,38 @@ cat_out_files() {
         return 0
     }
 
-    local files
-    files=$(find "$dir" -type f \( -name "*.txt" -o -name "*.yaml" \))
+    echo "====== TXT 文件内容 ======"
+    echo
 
-    [[ -z "$files" ]] && {
-        echo "[Info] 没有找到 txt/yaml 文件"
-        return 0
-    }
+    local txt_files=("$dir"/*.txt)
+    if ls "$dir"/*.txt >/dev/null 2>&1; then
+        for f in "${txt_files[@]}"; do
+            echo ">>> 文件：$(basename "$f")"
+            echo "----------------------------------------"
+            cat "$f"
+            echo -e "\n"
+        done
+    else
+        echo "无 TXT 文件"
+    fi
 
-    echo "[Info] 输出文件内容："
-    echo "----------------------"
+    echo
+    echo "====== YAML 文件内容 ======"
+    echo
 
-    cat $files
+    local yaml_files=("$dir"/*.yaml)
+    if ls "$dir"/*.yaml >/dev/null 2>&1; then
+        for f in "${yaml_files[@]}"; do
+            echo ">>> 文件：$(basename "$f")"
+            echo "----------------------------------------"
+            cat "$f"
+            echo -e "\n"
+        done
+    else
+        echo "无 YAML 文件"
+    fi
 }
+
 catmi-xx() {
     print_info "========== 配置文件 =========="
 
