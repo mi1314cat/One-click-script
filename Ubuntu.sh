@@ -617,8 +617,15 @@ install_xray() {
 
             2)
                 print_info "更新 xray-core..."
-                bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/upxray.sh) \
-                    || print_error "更新失败"
+                bash <(curl -Ls https://github.com/mi1314cat/xary-core/raw/refs/heads/main/unused/xray_install.sh)
+                systemctl daemon-reload
+                systemctl enable xrayls
+               if ! systemctl restart xrayls; then
+               print_error "重启 xrayls 服务失败，请运行 'journalctl -u xrayls -b --no-pager' 获取详情"
+               systemctl status xrayls --no-pager || true
+               exit 1
+               fi
+
                 ;;
 
             3)
