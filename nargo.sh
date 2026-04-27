@@ -1,116 +1,138 @@
-# 定义安装函数
-install_package() {
-    local package_name="$1"
-    if ! dpkg -s "$package_name" >/dev/null 2>&1; then
-        apt-get update -y
-        apt-get install -y "$package_name"
-    fi
-}
+#!/usr/bin/env bash
+set -e
 
-# 定义检查 Cloudflared 安装状态函数
-check_cloudflared_status() {
-    if cloudflared --version >/dev/null 2>&1; then
-        return 0  # 已安装
-    else
-        return 1  # 未安装
-    fi
-}
+# ============================
+# 基础路径
+# ============================
+CLOUDFLARED="/root/argo/cloudflared"
+CF_DIR="/root/.cloudflared"
 
-# 定义安装 Cloudflared 函数
-install_cloudflared() {
-    local last_version
-    last_version=$(curl -Ls "https://api.github.com/repos/cloudflare/cloudflared/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+mkdir -p /root/argo
+mkdir -p "$CF_DIR"
 
-    if [[ -z "$last_version" ]]; then
-        print_error "检测 Cloudflared 版本失败，可能是超出 Github API 限制，请稍后再试"
-        exit 1
-    fi
+# ============================
+# 清理旧 config.yml（关键）
+# ============================
+if [[ -f "$CF_DIR/config.yml" ]]; then
+    rm -f "$CF_DIR/config.yml"
+fi
 
-    local arch="$CORE_ARCH"
-    if [[ "$arch" == "aarch64" ]]; then
-        arch="arm64"
-    fi
+# ============================
+# 下载 cloudflared（如不存在）
+# ============================
+if [[ ! -f "$CLOUDFLARED" ]]; then
+    echo "正在下载 cloudflared..."
+    wget -qO "$CLOUDFLARED" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+    chmod +x "$CLOUDFLARED"
+fi
 
-    wget -N --no-check-certificate "https://github.com/cloudflare/cloudflared/releases/download/$last_version/cloudflared-linux-$arch" -O /usr/local/bin/cloudflared
-    chmod +x /usr/local/bin/cloudflared
+# ============================
+# Cloudflare 登录
+# ============================
+echo "=============================="
+echo " 点击授权 Cloudflare 账号"
+echo "=============================="
+read -p "按回车继续（或 Ctrl+C 退出）"
 
-    print_info "Cloudflared 安装成功！"
-}
+if [[ -f "$CF_DIR/cert.pem" ]]; then
+    echo "检测到已有 cert.pem，跳过 cloudflared login"
+else
+    $CLOUDFLARED login
+fi
 
-# 定义登录 Cloudflared 函数
-login_cloudflared() {
-    cloudflared tunnel login
-    if [[ $? -eq 0 ]]; then
-        print_info "Cloudflared 登录成功！"
-    else
-        print_error "Cloudflared 登录失败！"
-        exit 1
-    fi
-}
+# ============================
+# 生成 Tunnel 名称
+# ============================
+TUNNEL_NAME=$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)
+echo "Tunnel 名称：$TUNNEL_NAME"
 
-# 定义创建隧道函数
-create_tunnel() {
-    local tunnel_name="$1"
-    local tunnel_domain="$2"
-    local tunnel_uuid
+# ============================
+# 创建 Tunnel
+# ============================
+OUTPUT=$($CLOUDFLARED tunnel create "$TUNNEL_NAME" 2>&1)
+echo "$OUTPUT"
 
-    read -p "请设置隧道名称：" tunnel_name
-    read -p "请设置隧道域名：" tunnel_domain
+TUNNEL_ID=$(echo "$OUTPUT" | grep -oE "[a-f0-9-]{36}" | head -n 1)
 
-    cloudflared tunnel create "$tunnel_name"
-    cloudflared tunnel route dns "$tunnel_name" "$tunnel_domain"
-    DOMAIN_LOWER=$tunnel_domain
-    tunnel_uuid=$(cloudflared tunnel list | grep "$tunnel_name" | awk -F ' ' '{print $1}')
-    read -p "请输入隧道 UUID（复制 ID 里面的内容）：" tunnel_uuid
+if [[ -z "$TUNNEL_ID" ]]; then
+    echo "❌ 创建 Tunnel 失败，请检查上方输出"
+    exit 1
+fi
 
-    local tunnel_file_name="CloudFlare"
-    local config_file="/root/catmi/$tunnel_file_name.yml"
-    tunnelPort=${PORT}
-    mkdir -p /root/catmi
+echo "Tunnel ID：$TUNNEL_ID"
 
-    cat <<EOF > "$config_file"
-tunnel: $tunnel_name
-credentials-file: /root/.cloudflared/$tunnel_uuid.json
-originRequest:
-  connectTimeout: 30s
-  noTLSVerify: true
+# ============================
+# 输入授权域名
+# ============================
+read -p "请输入授权根域名（例如 catmicos.dpdns.org）: " AUTHORIZED_DOMAIN
+if [[ -z "$AUTHORIZED_DOMAIN" ]]; then
+    echo "授权域名不能为空"
+    exit 1
+fi
+
+# ============================
+# 输入端口（默认 8080）
+# ============================
+read -p "请输入本地反代端口（默认 8080）: " PORT
+PORT=${PORT:-8080}
+
+# ============================
+# 自动生成完整域名
+# ============================
+DOMAIN="${TUNNEL_NAME}.${AUTHORIZED_DOMAIN}"
+echo "绑定域名：$DOMAIN"
+
+# ============================
+# 写入 config.yml（绝对干净）
+# ============================
+cat > "$CF_DIR/config.yml" <<EOF
+tunnel: $TUNNEL_ID
+credentials-file: $CF_DIR/$TUNNEL_ID.json
+
 ingress:
-  - hostname: $tunnel_domain
-    service: https://localhost:$tunnelPort
+  - hostname: $DOMAIN
+    service: http://localhost:$PORT
   - service: http_status:404
 EOF
 
-    print_info "配置文件已保存至 $config_file"
-}
+echo "config.yml 已生成：$CF_DIR/config.yml"
 
-# 定义运行隧道函数
-run_tunnel() {
-    install_package screen
-    screen -dmS CloudFlare cloudflared tunnel --config /root/catmi/CloudFlare.yml run
-    print_info "隧道已运行成功，请等待1-3分钟启动并解析完毕"
-}
+# ============================
+# systemd 服务
+# ============================
+SERVICE="/etc/systemd/system/argo-file.service"
 
-# 定义提取 Argo 证书函数
-extract_argo_cert() {
-    sed -n '1,5p' /root/.cloudflared/cert.pem > /root/catmi/private.key
-    sed -n '6,24p' /root/.cloudflared/cert.pem > /root/catmi/cert.crt
-    print_info "Argo 证书提取成功！"
-    print_info "证书路径：/root/catmi/cert.crt"
-    print_info "私钥路径：/root/catmi/private.key"
-}
+cat > "$SERVICE" <<EOF
+[Unit]
+Description=Argo Tunnel (File Mode)
+After=network.target
 
+[Service]
+ExecStart=$CLOUDFLARED tunnel --config $CF_DIR/config.yml run
+Restart=always
+RestartSec=5
 
-# 提示输入监听端口号
-read -p "请输入cf 监听端口 (默认为 443): " PORT
-PORT=${PORT:-6666}
+[Install]
+WantedBy=multi-user.target
+EOF
 
+systemctl daemon-reload
+systemctl enable argo-file
+systemctl restart argo-file
 
-
-mkdir -p /root/catmi
-install_package
-check_cloudflared_status
-install_cloudflared
-login_cloudflared
-create_tunnel
-run_tunnel
-extract_argo_cert
+# ============================
+# 完成
+# ============================
+echo
+echo "=============================="
+echo " 文件方式固定隧道已启动（最终版）"
+echo "=============================="
+echo "Tunnel 名称：$TUNNEL_NAME"
+echo "Tunnel ID：$TUNNEL_ID"
+echo "绑定域名：$DOMAIN"
+echo "反代端口：$PORT"
+echo
+echo "⚠ 请到 Cloudflare DNS 手动添加 CNAME："
+echo "   ${DOMAIN}  →  ${TUNNEL_ID}.cfargotunnel.com"
+echo
+echo "systemctl status argo-file 查看状态"
