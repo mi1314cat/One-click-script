@@ -66,3 +66,10 @@ echo "临时隧道已创建"
 echo "URL: $URL"
 echo "SD_domain: $SD_domain"
 echo "----------------------------------------"
+
+source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/update_env.sh")
+source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/load_env.sh")
+DINSTALL_CATMI="/root/catmi"
+CATMIENV_FILE="$DINSTALL_CATMI/catmi.env"
+
+update_env $CATMIENV_FILE SD_domain $SD_domain
