@@ -84,6 +84,9 @@ echo "请到 Cloudflare DNS 添加："
 echo "$DOMAIN  CNAME  $TID.cfargotunnel.com"
 echo
 }
+DINSTALL_CATMI="/root/catmi"
+CATMIENV_FILE="$DINSTALL_CATMI/catmi.env"
+
 source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/update_env.sh")
 source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/load_env.sh")
 load_env $CATMIENV_FILE
@@ -108,7 +111,6 @@ echo "xpr=$xpr"
 
 create_file_tunnel
 
-DINSTALL_CATMI="/root/catmi"
-CATMIENV_FILE="$DINSTALL_CATMI/catmi.env"
+
 uargo_domain=$(awk '{print $2}' "$FILE_INFO")
 update_env $CATMIENV_FILE uargo_domain $uargo_domain
