@@ -9,8 +9,6 @@ BIN="$WORKDIR/cloudflared"
 CF_DIR="/root/.cloudflared"
 TEMP_LOG="$WORKDIR/temp.log"
 TEMP_SAVE="$WORKDIR/temp_url.txt"
-FIXED_INFO="$WORKDIR/fixed_info.txt"
-SERVICE_FILE="/etc/systemd/system/argo-file.service"
 
 mkdir -p "$WORKDIR"
 mkdir -p "$CF_DIR"
@@ -45,9 +43,6 @@ download_cloudflared() {
 }
 
 # ============================
-# 临时隧道（后台运行）
-# ============================
-# ============================
 # 临时隧道（后台运行 + 错误捕获）
 # ============================
 create_temp_tunnel() {
@@ -55,13 +50,11 @@ create_temp_tunnel() {
 
     rm -f "$TEMP_LOG"
 
-    # 后台运行，不阻塞脚本，不受 Ctrl+C 影响
     nohup $BIN tunnel --url http://localhost:8080 --no-autoupdate \
         > "$TEMP_LOG" 2>&1 &
 
     sleep 2
 
-    # 检查 cloudflared 是否真的启动
     if ! pgrep -f "cloudflared tunnel --url" >/dev/null; then
         echo -e "${RED}临时隧道启动失败！${NC}"
         echo "错误日志："
@@ -69,7 +62,6 @@ create_temp_tunnel() {
         return
     fi
 
-    # 捕获 URL
     for i in {1..20}; do
         URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" "$TEMP_LOG" | head -n 1)
         [[ -n "$URL" ]] && break
@@ -110,12 +102,31 @@ delete_temp() {
     echo "临时隧道文件已删除"
 }
 
-
+menu_temp() {
+    while true; do
+        title "临时隧道管理"
+        echo -n "状态："; status_temp
+        [[ -f "$TEMP_SAVE" ]] && echo "域名：$(cat $TEMP_SAVE)"
+        echo
+        echo "1) 创建临时隧道"
+        echo "2) 重启临时隧道"
+        echo "3) 关闭临时隧道"
+        echo "4) 删除临时隧道"
+        echo "0) 返回"
+        read -p "选择: " CH
+        case $CH in
+            1) download_cloudflared; create_temp_tunnel ;;
+            2) restart_temp ;;
+            3) stop_temp ;;
+            4) delete_temp ;;
+            0) return ;;
+        esac
+    done
+}
 # ============================
 # 固定隧道（文件模式）
 # ============================
 create_fixed_tunnel_file() {
-
     title "文件模式固定隧道创建"
 
     rm -f "$CF_DIR/config.yml"
@@ -151,7 +162,7 @@ ingress:
   - service: http_status:404
 EOF
 
-cat > "$SERVICE_FILE" <<EOF
+cat > /etc/systemd/system/argo-file.service <<EOF
 [Unit]
 Description=Argo Tunnel (File Mode)
 After=network.target
@@ -165,7 +176,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-    echo "$TUNNEL_ID $DOMAIN $PORT file" > "$FIXED_INFO"
+    echo "$TUNNEL_ID $DOMAIN $PORT file" > "$WORKDIR/fixed_file.txt"
 
     systemctl daemon-reload
     systemctl enable argo-file
@@ -184,13 +195,12 @@ EOF
 # 固定隧道（Token 模式）
 # ============================
 create_fixed_tunnel_token() {
-
     title "Token 模式固定隧道创建"
 
     read -p "请输入 Cloudflare Argo Token: " TOKEN
     [[ -z "$TOKEN" ]] && echo "Token 不能为空" && return
 
-cat > "$SERVICE_FILE" <<EOF
+cat > /etc/systemd/system/argo-token.service <<EOF
 [Unit]
 Description=Argo Tunnel (Token Mode)
 After=network.target
@@ -204,115 +214,172 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-    echo "token-mode" > "$FIXED_INFO"
+    echo "$TOKEN" > "$WORKDIR/fixed_token.txt"
 
     systemctl daemon-reload
-    systemctl enable argo-file
-    systemctl restart argo-file
+    systemctl enable argo-token
+    systemctl restart argo-token
 
     echo -e "${GREEN}固定隧道（Token 模式）已启动${NC}"
 }
 
 # ============================
-# 固定隧道操作
+# 删除逻辑（独立）
 # ============================
-status_fixed() {
-    if systemctl is-active --quiet argo-file; then
-        echo -e "${GREEN}运行中${NC}"
-    else
-        echo -e "${RED}未运行${NC}"
-    fi
-}
+delete_fixed_file() {
+    echo -e "${YELLOW}确认删除文件模式隧道？(y/n)${NC}"
+    read -p "> " CONFIRM
+    [[ "$CONFIRM" != "y" ]] && echo "已取消" && return
 
-restart_fixed() {
-    systemctl restart argo-file
-    echo "固定隧道已重启"
-}
-
-stop_fixed() {
     systemctl stop argo-file 2>/dev/null
-    echo "固定隧道已关闭"
-}
-
-delete_fixed() {
-    stop_fixed
     systemctl disable argo-file 2>/dev/null
-    rm -f "$SERVICE_FILE"
-    rm -f "$FIXED_INFO"
+    rm -f /etc/systemd/system/argo-file.service
+    rm -f "$WORKDIR/fixed_file.txt"
     rm -f "$CF_DIR/config.yml"
-    echo "固定隧道已删除"
+
+    echo -e "${GREEN}文件模式隧道已删除${NC}"
+}
+
+delete_fixed_token() {
+    echo -e "${YELLOW}确认删除 Token 模式隧道？(y/n)${NC}"
+    read -p "> " CONFIRM
+    [[ "$CONFIRM" != "y" ]] && echo "已取消" && return
+
+    systemctl stop argo-token 2>/dev/null
+    systemctl disable argo-token 2>/dev/null
+    rm -f /etc/systemd/system/argo-token.service
+    rm -f "$WORKDIR/fixed_token.txt"
+
+    echo -e "${GREEN}Token 模式隧道已删除${NC}"
+}
+
+delete_all() {
+    echo -e "${RED}⚠⚠⚠ 危险操作：删除所有 Argo 隧道配置与文件 ⚠⚠⚠${NC}"
+    echo -e "${YELLOW}确认继续？(输入 YES 删除)：${NC}"
+    read -p "> " CONFIRM
+
+    [[ "$CONFIRM" != "YES" ]] && echo "已取消" && return
+
+    systemctl stop argo-file 2>/dev/null
+    systemctl stop argo-token 2>/dev/null
+    systemctl disable argo-file 2>/dev/null
+    systemctl disable argo-token 2>/dev/null
+
+    rm -f /etc/systemd/system/argo-file.service
+    rm -f /etc/systemd/system/argo-token.service
+
+    rm -rf "$WORKDIR"
+    rm -rf "$CF_DIR"
+
+    echo -e "${GREEN}所有 Argo 隧道文件与服务已删除${NC}"
 }
 
 # ============================
-# 临时隧道菜单
+# 固定隧道子菜单
 # ============================
-menu_temp() {
-    while true; do
-        title "临时隧道管理"
-        echo -n "状态："; status_temp
-        [[ -f "$TEMP_SAVE" ]] && echo "域名：$(cat $TEMP_SAVE)"
+menu_fixed_file() {
+    title "文件模式隧道管理"
+
+    if [[ -f "$WORKDIR/fixed_file.txt" ]]; then
+        read FID FDOMAIN FPORT FMODE < "$WORKDIR/fixed_file.txt"
+        echo -e "文件模式隧道：${GREEN}运行中${NC}"
+        echo "域名：$FDOMAIN"
+        echo "Tunnel ID：$FID"
+    else
+        echo -e "${RED}文件模式隧道未创建${NC}"
+    fi
+
+    echo
+    echo "1) 创建文件模式隧道"
+    echo "2) 重启文件模式隧道"
+    echo "3) 关闭文件模式隧道"
+    echo "4) 删除文件模式隧道"
+    echo "0) 返回"
+    read -p "选择: " CH
+
+    case $CH in
+        1) download_cloudflared; create_fixed_tunnel_file ;;
+        2) systemctl restart argo-file ;;
+        3) systemctl stop argo-file ;;
+        4) delete_fixed_file ;;
+        0) return ;;
+    esac
+}
+
+menu_fixed_token() {
+    title "Token 模式隧道管理"
+
+    if [[ -f "$WORKDIR/fixed_file.txt" ]]; then
+        read FID FDOMAIN FPORT FMODE < "$WORKDIR/fixed_file.txt"
+        echo -e "文件模式隧道：${GREEN}运行中${NC}"
+        echo "域名：$FDOMAIN"
+        echo "Tunnel ID：$FID"
         echo
-        echo "1) 创建临时隧道"
-        echo "2) 重启临时隧道"
-        echo "3) 关闭临时隧道"
-        echo "4) 删除临时隧道"
-        echo "0) 返回"
-        read -p "选择: " CH
-        case $CH in
-            1) download_cloudflared; create_temp_tunnel ;;
-            2) restart_temp ;;
-            3) stop_temp ;;
-            4) delete_temp ;;
-            0) return ;;
-        esac
-    done
+    fi
+
+    if [[ -f "$WORKDIR/fixed_token.txt" ]]; then
+        read TOKEN < "$WORKDIR/fixed_token.txt"
+        echo -e "Token 模式隧道：${GREEN}运行中${NC}"
+        echo "Token：$TOKEN"
+    else
+        echo -e "${RED}Token 模式隧道未创建${NC}"
+    fi
+
+    echo
+    echo "1) 创建 Token 模式隧道"
+    echo "2) 重启 Token 模式隧道"
+    echo "3) 关闭 Token 模式隧道"
+    echo "4) 删除 Token 模式隧道"
+    echo "0) 返回"
+    read -p "选择: " CH
+
+    case $CH in
+        1) download_cloudflared; create_fixed_tunnel_token ;;
+        2) systemctl restart argo-token ;;
+        3) systemctl stop argo-token ;;
+        4) delete_fixed_token ;;
+        0) return ;;
+    esac
 }
 
-# ============================
-# 固定隧道菜单（双模式）
-# ============================
 menu_fixed() {
     while true; do
         title "固定隧道管理"
 
-        echo -n "状态："; status_fixed
-
-        if [[ -f "$FIXED_INFO" ]]; then
-            read TID DOMAIN PORT MODE < "$FIXED_INFO"
-
-            if [[ "$MODE" == "file" ]]; then
-                echo -e "模式：${GREEN}文件模式${NC}"
-                echo "域名：$DOMAIN"
-                echo "Tunnel ID：$TID"
-            elif [[ "$MODE" == "token-mode" ]]; then
-                echo -e "模式：${YELLOW}Token 模式${NC}"
-                echo "（Token 模式无域名与 TunnelID 显示）"
-            fi
+        if [[ -f "$WORKDIR/fixed_file.txt" ]]; then
+            read FID FDOMAIN FPORT FMODE < "$WORKDIR/fixed_file.txt"
+            echo -e "文件模式隧道：${GREEN}运行中${NC}"
+            echo "域名：$FDOMAIN"
+            echo "Tunnel ID：$FID"
         else
-            echo -e "${RED}未创建固定隧道（无 fixed_info.txt）${NC}"
+            echo -e "文件模式隧道：${RED}未创建${NC}"
         fi
 
         echo
-        echo "1) 创建固定隧道（文件模式）"
-        echo "2) 创建固定隧道（Token 模式）"
-        echo "3) 重启固定隧道"
-        echo "4) 关闭固定隧道"
-        echo "5) 删除固定隧道"
+
+        if [[ -f "$WORKDIR/fixed_token.txt" ]]; then
+            read TOKEN < "$WORKDIR/fixed_token.txt"
+            echo -e "Token 模式隧道：${GREEN}运行中${NC}"
+            echo "Token：$TOKEN"
+        else
+            echo -e "Token 模式隧道：${RED}未创建${NC}"
+        fi
+
+        echo
+        echo "1) 文件模式隧道管理"
+        echo "2) Token 模式隧道管理"
+        echo "3) 删除所有隧道（危险）"
         echo "0) 返回"
         read -p "选择: " CH
+
         case $CH in
-            1) download_cloudflared; create_fixed_tunnel_file ;;
-            2) download_cloudflared; create_fixed_tunnel_token ;;
-            3) restart_fixed ;;
-            4) stop_fixed ;;
-            5) delete_fixed ;;
+            1) menu_fixed_file ;;
+            2) menu_fixed_token ;;
+            3) delete_all ;;
             0) return ;;
         esac
     done
 }
-
-
-
 # ============================
 # 主菜单
 # ============================
@@ -323,11 +390,23 @@ menu_main() {
         echo -n "临时隧道："; status_temp
         [[ -f "$TEMP_SAVE" ]] && echo "临时域名：$(cat $TEMP_SAVE)"
 
-        echo -n "固定隧道："; status_fixed
-        if [[ -f "$FIXED_INFO" ]]; then
-            read TID DOMAIN PORT MODE < "$FIXED_INFO"
-            [[ "$MODE" == "file" ]] && echo "固定域名：$DOMAIN"
-            [[ "$MODE" == "token-mode" ]] && echo "固定隧道模式：Token 模式"
+        echo
+
+        if [[ -f "$WORKDIR/fixed_file.txt" ]]; then
+            read FID FDOMAIN FPORT FMODE < "$WORKDIR/fixed_file.txt"
+            echo -e "文件模式隧道：${GREEN}存在${NC}（不代表一定在运行）"
+            echo "域名：$FDOMAIN"
+            echo "Tunnel ID：$FID"
+        else
+            echo -e "文件模式隧道：${RED}未创建${NC}"
+        fi
+
+        if [[ -f "$WORKDIR/fixed_token.txt" ]]; then
+            read TOKEN < "$WORKDIR/fixed_token.txt"
+            echo -e "Token 模式隧道：${GREEN}存在${NC}（不代表一定在运行）"
+            echo "Token：$TOKEN"
+        else
+            echo -e "Token 模式隧道：${RED}未创建${NC}"
         fi
 
         echo
