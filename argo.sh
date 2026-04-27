@@ -1,177 +1,250 @@
-#!/bin/bash
-# Argo 隧道一键脚本（模块化核心）
-# 功能：
-#  - 自动识别隧道 UUID
-#  - 自动生成 CloudFlare.yml
-#  - 自动运行隧道
-#  - 自动提取证书
-# 默认目录：/root/catmi/xray/argo
+#!/usr/bin/env bash
+set -e
 
-BASE_DIR="/root/catmi/xray"
-ARGO_DIR="$BASE_DIR/argo"
+WORKDIR="/root/argo"
+BIN="$WORKDIR/cloudflared"
+LOG="$WORKDIR/temp.log"
+SAVE="$WORKDIR/tunnel_url.txt"
+SERVICE="/etc/systemd/system/argo.service"
 
-mkdir -p "$ARGO_DIR"
+mkdir -p "$WORKDIR"
 
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-PLAIN='\033[0m'
+GREEN="\033[32m"
+RED="\033[31m"
+NC="\033[0m"
 
-info(){ echo -e "${GREEN}[Argo]${PLAIN} $1"; }
-err(){ echo -e "${RED}[Argo]${PLAIN} $1"; }
+download_cloudflared() {
+    if [[ ! -f "$BIN" ]]; then
+        echo "正在下载 cloudflared..."
+        wget -qO "$BIN" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+        chmod +x "$BIN"
+    fi
+}
 
-[[ $EUID -ne 0 ]] && { err "必须使用 root 用户运行"; exit 1; }
+# -------------------------
+# 临时隧道
+# -------------------------
+create_temp_tunnel() {
+    echo "正在创建临时 Argo 隧道..."
+    rm -f "$LOG"
+    $BIN tunnel --url http://localhost:8080 --no-autoupdate 2>&1 | tee "$LOG" &
+    sleep 2
 
-# -------------------------------
-# 端口输入 + 随机 + 占用检测
-# -------------------------------
-ask_port(){
-    local name="$1"
+    echo "等待隧道 URL 输出..."
+
+    for i in {1..20}; do
+        URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" "$LOG" | head -n 1)
+        [[ -n "$URL" ]] && break
+        sleep 1
+    done
+
+    if [[ -z "$URL" ]]; then
+        echo "未能捕获到临时隧道 URL"
+        exit 1
+    fi
+
+    echo "$URL" > "$SAVE"
+    echo "临时隧道地址：$URL"
+    echo "已保存到：$SAVE"
+}
+
+status_temp_tunnel_color() {
+    if pgrep -f "cloudflared tunnel --url" >/dev/null; then
+        echo -e "${GREEN}运行中${NC}"
+    else
+        echo -e "${RED}未运行${NC}"
+    fi
+}
+
+restart_temp_tunnel() {
+    stop_temp_tunnel
+    create_temp_tunnel
+}
+
+stop_temp_tunnel() {
+    pkill -f "cloudflared tunnel --url" 2>/dev/null && echo "临时隧道已关闭" || echo "未找到临时隧道进程"
+}
+
+# -------------------------
+# 固定隧道
+# -------------------------
+create_fixed_tunnel() {
+
+    echo "=============================="
+    echo "固定隧道创建说明"
+    echo "=============================="
+    echo
+    echo "1. 登录 Cloudflare Zero Trust 后台："
+    echo "   https://one.dash.cloudflare.com/"
+    echo
+    echo "2. 进入：Access → Tunnels → Create Tunnel"
+    echo
+    echo "3. 创建一个新的 Tunnel，并复制生成的 Token"
+    echo
+    echo "4. 将 Token 粘贴到下面（输入 0 返回）"
+    echo
+
+    read -p "请输入 Argo Token: " TOKEN
+
+    [[ "$TOKEN" == "0" ]] && return
+    [[ -z "$TOKEN" ]] && echo "Token 不能为空" && return
+
+cat > "$SERVICE" <<EOF
+[Unit]
+Description=Argo 隧道
+After=network.target
+
+[Service]
+ExecStart=$BIN tunnel --no-autoupdate run --token $TOKEN
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable argo
+    systemctl restart argo
+
+    echo "固定隧道已启动"
+}
+
+status_fixed_tunnel_color() {
+    if systemctl is-active --quiet argo; then
+        echo -e "${GREEN}运行中${NC}"
+    else
+        echo -e "${RED}未运行${NC}"
+    fi
+}
+
+restart_fixed_tunnel() {
+    systemctl restart argo && echo "固定隧道已重启"
+}
+
+stop_fixed_tunnel() {
+    systemctl stop argo 2>/dev/null && echo "固定隧道已关闭" || echo "未找到固定隧道服务"
+}
+
+# -------------------------
+# 删除逻辑
+# -------------------------
+delete_temp() {
+    stop_temp_tunnel
+    rm -f "$LOG" "$SAVE"
+    echo "临时隧道文件已删除"
+}
+
+delete_fixed() {
+    stop_fixed_tunnel
+    systemctl disable argo 2>/dev/null || true
+    rm -f "$SERVICE"
+    systemctl daemon-reload
+    echo "固定隧道已删除"
+}
+
+delete_all() {
+    delete_temp
+    delete_fixed
+    rm -rf "$WORKDIR"
+    echo "所有脚本文件已删除"
+}
+
+# -------------------------
+# 子菜单（循环）
+# -------------------------
+menu_temp() {
     while true; do
-        local random_port=$((RANDOM % 10000 + 10000))
-        read -p "请输入 ${name} 监听端口（回车随机）: " port
-        port=${port:-$random_port}
-
-        if ss -tuln | grep -q ":$port\b"; then
-            err "端口 $port 已被占用，请重新输入"
-        else
-            echo "$port"
-            return
-        fi
+        echo "------ 临时隧道管理 ------"
+        echo -n "状态："; status_temp_tunnel_color
+        [[ -f "$SAVE" ]] && echo "隧道地址：$(cat $SAVE)"
+        echo
+        echo "1) 创建临时隧道"
+        echo "2) 查看状态"
+        echo "3) 重启临时隧道"
+        echo "4) 关闭临时隧道"
+        echo "0) 返回主菜单"
+        read -p "请选择: " CH
+        case $CH in
+            1) download_cloudflared; create_temp_tunnel ;;
+            2) echo -n "状态："; status_temp_tunnel_color; [[ -f "$SAVE" ]] && echo "隧道地址：$(cat $SAVE)" ;;
+            3) restart_temp_tunnel ;;
+            4) stop_temp_tunnel ;;
+            0) return ;;
+            *) echo "无效选项" ;;
+        esac
     done
 }
 
-# -------------------------------
-# 安装 Cloudflared（如未安装）
-# -------------------------------
-install_cloudflared(){
-    if command -v cloudflared >/dev/null 2>&1; then
-        info "已检测到 cloudflared"
-        return
-    fi
-
-    info "未检测到 cloudflared，开始安装..."
-    arch=$(uname -m)
-    [[ "$arch" == "aarch64" ]] && arch="arm64"
-
-    ver=$(curl -s https://api.github.com/repos/cloudflare/cloudflared/releases/latest \
-        | grep tag_name | sed -E 's/.*"([^"]+)".*/\1/')
-
-    if [[ -z "$ver" ]]; then
-        err "获取 cloudflared 最新版本失败"
-        exit 1
-    fi
-
-    wget -q -O /usr/local/bin/cloudflared \
-        "https://github.com/cloudflare/cloudflared/releases/download/$ver/cloudflared-linux-$arch"
-
-    chmod +x /usr/local/bin/cloudflared
-    info "cloudflared 安装完成"
+menu_fixed() {
+    while true; do
+        echo "------ 固定隧道管理 ------"
+        echo -n "状态："; status_fixed_tunnel_color
+        echo
+        echo "1) 创建固定隧道"
+        echo "2) 查看状态"
+        echo "3) 重启固定隧道"
+        echo "4) 关闭固定隧道"
+        echo "0) 返回主菜单"
+        read -p "请选择: " CH
+        case $CH in
+            1) download_cloudflared; create_fixed_tunnel ;;
+            2) echo -n "状态："; status_fixed_tunnel_color ;;
+            3) restart_fixed_tunnel ;;
+            4) stop_fixed_tunnel ;;
+            0) return ;;
+            *) echo "无效选项" ;;
+        esac
+    done
 }
 
-# -------------------------------
-# 登录 Cloudflare（只需一次）
-# -------------------------------
-login_cloudflare(){
-    if [[ -f /root/.cloudflared/cert.pem ]]; then
-        info "已检测到 /root/.cloudflared/cert.pem，跳过登录"
-        return
-    fi
-
-    info "开始 cloudflared tunnel login（浏览器授权一次）"
-    cloudflared tunnel login
-    if [[ $? -ne 0 ]]; then
-        err "cloudflared 登录失败"
-        exit 1
-    fi
-    info "cloudflared 登录成功"
+menu_delete() {
+    while true; do
+        echo "------ 删除管理 ------"
+        echo "1) 删除临时隧道"
+        echo "2) 删除固定隧道"
+        echo "3) 删除所有脚本文件"
+        echo "0) 返回主菜单"
+        read -p "请选择: " CH
+        case $CH in
+            1) delete_temp ;;
+            2) delete_fixed ;;
+            3) delete_all ;;
+            0) return ;;
+            *) echo "无效选项" ;;
+        esac
+    done
 }
 
-# -------------------------------
-# 创建 Argo 隧道 + 自动识别 UUID
-# -------------------------------
-create_argo_tunnel(){
-    local argo_port="$1"
+# -------------------------
+# 主菜单（循环 + 状态显示）
+# -------------------------
+menu() {
+    while true; do
+        echo "=============================="
+        echo "      Argo 隧道管理工具"
+        echo "=============================="
 
-    read -p "请输入隧道名称: " TUNNEL_NAME
-    read -p "请输入隧道域名: " TUNNEL_DOMAIN
+        echo -n "临时隧道："; status_temp_tunnel_color
+        [[ -f "$SAVE" ]] && echo "临时域名：$(cat $SAVE)"
 
-    if [[ -z "$TUNNEL_NAME" || -z "$TUNNEL_DOMAIN" ]]; then
-        err "隧道名称和域名不能为空"
-        exit 1
-    fi
+        echo -n "固定隧道："; status_fixed_tunnel_color
+        echo
 
-    info "创建隧道：$TUNNEL_NAME"
-    cloudflared tunnel create "$TUNNEL_NAME"
+        echo "1) 临时隧道管理"
+        echo "2) 固定隧道管理"
+        echo "3) 删除管理"
+        echo "0) 退出"
+        read -p "请选择: " CH
 
-    # 自动识别 UUID
-    TUNNEL_UUID=$(cloudflared tunnel list | awk -v name="$TUNNEL_NAME" '$2==name {print $1}' | head -n1)
-
-    if [[ -z "$TUNNEL_UUID" ]]; then
-        err "未能自动识别隧道 UUID，请检查 cloudflared tunnel list"
-        exit 1
-    fi
-
-    info "自动识别隧道 UUID：$TUNNEL_UUID"
-
-cat <<EOF > "$ARGO_DIR/CloudFlare.yml"
-tunnel: $TUNNEL_UUID
-credentials-file: /root/.cloudflared/$TUNNEL_UUID.json
-ingress:
-  - hostname: $TUNNEL_DOMAIN
-    service: https://localhost:$argo_port
-  - service: http_status:404
-EOF
-
-    echo "$TUNNEL_DOMAIN" > "$ARGO_DIR/domain.txt"
-    echo "$TUNNEL_UUID" > "$ARGO_DIR/uuid.txt"
-    echo "$argo_port" > "$ARGO_DIR/argo_port.txt"
-
-    info "CloudFlare.yml 已生成：$ARGO_DIR/CloudFlare.yml"
-
-    # 绑定 DNS
-    info "为隧道绑定 DNS 记录：$TUNNEL_DOMAIN"
-    cloudflared tunnel route dns "$TUNNEL_NAME" "$TUNNEL_DOMAIN"
+        case $CH in
+            1) menu_temp ;;
+            2) menu_fixed ;;
+            3) menu_delete ;;
+            0) exit 0 ;;
+            *) echo "无效选项" ;;
+        esac
+    done
 }
 
-# -------------------------------
-# 运行 Argo 隧道
-# -------------------------------
-run_argo_tunnel(){
-    info "启动 Argo 隧道..."
-    pkill -f "cloudflared tunnel" >/dev/null 2>&1 || true
-    screen -dmS argo cloudflared tunnel --config "$ARGO_DIR/CloudFlare.yml" run
-    info "Argo 隧道已在 screen 会话 argo 中运行"
-}
-
-# -------------------------------
-# 提取 Argo 证书
-# -------------------------------
-extract_argo_cert(){
-    local cert_file="/root/.cloudflared/cert.pem"
-
-    if [[ ! -f "$cert_file" ]]; then
-        err "未找到 $cert_file，无法提取证书"
-        return
-    fi
-
-    sed -n '1,5p' "$cert_file" > "$ARGO_DIR/private.key"
-    sed -n '6,24p' "$cert_file" > "$ARGO_DIR/cert.crt"
-
-    info "Argo 证书已提取："
-    echo "  私钥：$ARGO_DIR/private.key"
-    echo "  证书：$ARGO_DIR/cert.crt"
-}
-
-# -------------------------------
-# 主流程
-# -------------------------------
-install_cloudflared
-login_cloudflare
-
-argo_port=$(ask_port "Argo 回源端口")
-
-create_argo_tunnel "$argo_port"
-run_argo_tunnel
-extract_argo_cert
-
-info "Argo 隧道全部流程完成"
+menu
