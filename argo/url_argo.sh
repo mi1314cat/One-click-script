@@ -86,3 +86,9 @@ echo
 }
 
 create_file_tunnel
+source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/update_env.sh")
+source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/load_env.sh")
+DINSTALL_CATMI="/root/catmi"
+CATMIENV_FILE="$DINSTALL_CATMI/catmi.env"
+uargo_domain=$DOMAIN
+update_env $CATMIENV_FILE uargo_domain $argo_domain
