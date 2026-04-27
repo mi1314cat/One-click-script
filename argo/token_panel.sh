@@ -49,6 +49,15 @@ create_token_tunnel(){
     check_cloudflared
     title "创建 Token 模式固定隧道"
 
+    echo -e "${YELLOW}如何获取 Cloudflare Argo Token：${NC}"
+    echo -e "1. 登录 Cloudflare Dashboard"
+    echo -e "2. 进入 Zero Trust 面板： https://one.dash.cloudflare.com/"
+    echo -e "3. 左侧菜单：Access → Tunnels"
+    echo -e "4. 找到你创建的隧道 → 右侧复制 Token"
+    echo -e "5. Token 格式类似："
+    echo -e "   ${GREEN}eyJhIjoiY2YtYWNjb3VudC0xMjMiLCJ0IjoiYWJjZGVmZ2hpamtsbW5vcHFyIn0...${NC}"
+    echo
+
     read -p "请输入 Cloudflare Argo Token: " TOKEN
     [[ -z "$TOKEN" ]] && echo -e "${RED}Token 不能为空${NC}" && return
 
@@ -224,7 +233,13 @@ menu(){
 
         case $CH in
             1) create_token_tunnel ;;
-            2) systemctl restart argo-token ;;
+            2)
+                if [[ ! -f "$TOKEN_INFO" ]]; then
+                    echo -e "${RED}未创建 Token 隧道，无法重启${NC}"
+                else
+                    systemctl restart argo-token
+                fi
+                ;;
             3) systemctl stop argo-token ;;
             4) delete_token_tunnel ;;
             5) heal_token_manual ;;
