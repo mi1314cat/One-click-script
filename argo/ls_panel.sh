@@ -2,7 +2,7 @@
 set -e
 
 # ============================
-# 基础路径
+# 基础路径（完全隔离）
 # ============================
 WORKDIR="/root/argo_temp"
 BIN="$WORKDIR/cloudflared"
@@ -48,7 +48,7 @@ check_cloudflared() {
 }
 
 # ============================
-# 创建临时隧道
+# 创建临时隧道（核心修复版）
 # ============================
 create_temp_tunnel() {
     check_cloudflared
@@ -56,7 +56,8 @@ create_temp_tunnel() {
 
     rm -f "$TEMP_LOG"
 
-    nohup $BIN tunnel --url http://localhost:8080 --no-autoupdate \
+    # 关键修复：强制不加载任何配置
+    nohup $BIN tunnel --url http://localhost:8080 --no-autoupdate --config /dev/null \
         > "$TEMP_LOG" 2>&1 &
 
     sleep 2
@@ -120,7 +121,7 @@ delete_temp() {
 }
 
 # ============================
-# 手动诊断 + 自动修复
+# 手动诊断 + 自动修复（无 systemd）
 # ============================
 heal_temp_manual() {
     if [[ ! -f "$TEMP_SAVE" ]]; then
@@ -144,98 +145,12 @@ heal_temp_manual() {
 }
 
 # ============================
-# systemd 自动健康检查
-# ============================
-generate_health_script() {
-cat > "$WORKDIR/health.sh" <<'EOF'
-#!/usr/bin/env bash
-TEMP_SAVE="/root/argo_temp/temp_url.txt"
-TEMP_LOG="/root/argo_temp/temp.log"
-BIN="/root/argo_temp/cloudflared"
-
-if [[ ! -f "$TEMP_SAVE" ]]; then
-    exit 0
-fi
-
-URL=$(cat "$TEMP_SAVE")
-HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}" --max-time 5 "$URL" || echo "000")
-
-if [[ "$HTTP_CODE" =~ ^(200|301|302)$ ]]; then
-    exit 0
-fi
-
-pkill -f "cloudflared tunnel --url" 2>/dev/null
-sleep 1
-
-nohup $BIN tunnel --url http://localhost:8080 --no-autoupdate \
-    > "$TEMP_LOG" 2>&1 &
-EOF
-
-chmod +x "$WORKDIR/health.sh"
-}
-
-install_health_timer() {
-cat > /etc/systemd/system/argo-temp-health.service <<EOF
-[Unit]
-Description=临时隧道自动健康检查
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash $WORKDIR/health.sh
-EOF
-
-cat > /etc/systemd/system/argo-temp-health.timer <<EOF
-[Unit]
-Description=每 5 分钟自动修复临时隧道
-
-[Timer]
-OnBootSec=30
-OnUnitActiveSec=300
-
-[Install]
-WantedBy=timers.target
-EOF
-
-systemctl daemon-reload
-systemctl enable argo-temp-health.timer
-systemctl start argo-temp-health.timer
-}
-
-# ============================
 # 删除所有临时隧道文件（彻底清理）
 # ============================
 delete_all_temp() {
     title "删除所有临时隧道文件（彻底清理）"
 
-    echo -e "${YELLOW}此操作将删除：${NC}"
-    echo "- /root/argo_temp/ 目录"
-    echo "- cloudflared 二进制文件"
-    echo "- 临时隧道日志、URL 文件"
-    echo "- health.sh 健康检查脚本"
-    echo "- systemd 定时器：argo-temp-health.timer"
-    echo "- systemd 服务：argo-temp-health.service"
-    echo
-    read -p "确认删除？输入 YES 执行: " CONFIRM
-
-    if [[ "$CONFIRM" != "YES" ]]; then
-        echo -e "${RED}已取消${NC}"
-        return
-    fi
-
-    echo -e "${YELLOW}停止 cloudflared 进程...${NC}"
-    pkill -f "cloudflared tunnel --url" 2>/dev/null || true
-
-    echo -e "${YELLOW}删除 systemd 定时器与服务...${NC}"
-    systemctl stop argo-temp-health.timer 2>/dev/null || true
-    systemctl disable argo-temp-health.timer 2>/dev/null || true
-    rm -f /etc/systemd/system/argo-temp-health.timer
-
-    systemctl stop argo-temp-health.service 2>/dev/null || true
-    rm -f /etc/systemd/system/argo-temp-health.service
-
-    systemctl daemon-reload
-
-    echo -e "${YELLOW}删除临时隧道目录...${NC}"
+    stop_temp
     rm -rf /root/argo_temp
 
     echo -e "${GREEN}临时隧道所有文件已彻底删除${NC}"
@@ -258,7 +173,7 @@ view_temp_log() {
 # ============================
 menu() {
     while true; do
-        title "临时隧道管理（独立版）"
+        title "临时隧道管理（优化稳定版）"
 
         echo -n "状态："; status_temp
         [[ -f "$TEMP_SAVE" ]] && echo "域名：$(cat $TEMP_SAVE)"
@@ -271,7 +186,6 @@ menu() {
         echo "5) 手动诊断并自动修复"
         echo "6) 查看临时隧道日志"
         echo "7) 删除所有临时隧道文件（彻底清理）"
-
         echo "0) 退出"
 
         read -p "选择: " CH
@@ -284,15 +198,9 @@ menu() {
             5) heal_temp_manual ;;
             6) view_temp_log ;;
             7) delete_all_temp ;;
-
             0) exit 0 ;;
         esac
     done
 }
 
-# ============================
-# 启动入口
-# ============================
-generate_health_script
-install_health_timer
 menu
