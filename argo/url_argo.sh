@@ -41,7 +41,7 @@ create_file_tunnel(){
 
     read -p "根域名: " ROOT_DOMAIN
     read -p "本地端口(默认8080): " PORT
-    PORT=${PORT:-8080}
+    PORT=${PORT:-$xpr}
 
     DOMAIN="$TUNNEL_NAME.$ROOT_DOMAIN"
 
@@ -84,10 +84,30 @@ echo "请到 Cloudflare DNS 添加："
 echo "$DOMAIN  CNAME  $TID.cfargotunnel.com"
 echo
 }
-
-create_file_tunnel
 source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/update_env.sh")
 source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/load_env.sh")
+load_env $CATMIENV_FILE
+case "$mode" in
+    xray)
+        xpr=9970
+        ;;
+    mihomo)
+        xpr=9971
+        ;;
+    singbox)
+        xpr=9972
+        ;;
+    *)
+        echo "mode 值无效: $mode"
+        exit 1
+        ;;
+esac
+
+echo "mode=$mode"
+echo "xpr=$xpr"
+
+create_file_tunnel
+
 DINSTALL_CATMI="/root/catmi"
 CATMIENV_FILE="$DINSTALL_CATMI/catmi.env"
 uargo_domain=$(awk '{print $2}' "$FILE_INFO")
