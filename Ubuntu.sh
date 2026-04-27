@@ -335,6 +335,9 @@ initialize_dependencies() {
     apt update 
     apt upgrade -y
     apt install ufw -y
+    
+    apt install uuid-runtime -y
+
     apt install -y curl socat git cron openssl gzip nano sudo wget xxd
   
     print_info "基础依赖安装完成。"
