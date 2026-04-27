@@ -91,4 +91,4 @@ source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/head
 DINSTALL_CATMI="/root/catmi"
 CATMIENV_FILE="$DINSTALL_CATMI/catmi.env"
 uargo_domain=$DOMAIN
-update_env $CATMIENV_FILE uargo_domain $argo_domain
+update_env $CATMIENV_FILE uargo_domain $uargo_domain
