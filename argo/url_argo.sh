@@ -40,7 +40,7 @@ create_file_tunnel(){
     [[ -z "$TID" ]] && { err "无法解析 Tunnel ID"; exit 1; }
 
     read -p "根域名: " ROOT_DOMAIN
-    read -p "本地端口(默认8080): " PORT
+    read -p "本地端口(默认$xpr): " PORT
     PORT=${PORT:-$xpr}
 
     DOMAIN="$TUNNEL_NAME.$ROOT_DOMAIN"
