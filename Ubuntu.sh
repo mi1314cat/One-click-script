@@ -180,25 +180,34 @@ refresh_services() {
     SYSTEMCTL_ACTIVE=$(systemctl list-units --type=service --no-pager)
     SYSTEMCTL_ENABLED=$(systemctl list-unit-files --type=service --no-pager)
 
+    # 将服务名转换为合法变量名（把 - 替换成 _）
+    normalize() {
+        echo "$1" | sed 's/-/_/g'
+    }
+
     check_svc_fast() {
         local svc="$1"
+        local var=$(normalize "$svc")
 
+        # 安装状态
         if echo "$SYSTEMCTL_ENABLED" | grep -qw "${svc}.service"; then
-            eval "${svc}_installed=\"${GREEN}已安装${PLAIN}\""
+            eval "${var}_installed=\"${GREEN}已安装${PLAIN}\""
         else
-            eval "${svc}_installed=\"${RED}未安装${PLAIN}\""
+            eval "${var}_installed=\"${RED}未安装${PLAIN}\""
         fi
 
+        # 运行状态
         if echo "$SYSTEMCTL_ACTIVE" | grep -qw "${svc}.service"; then
-            eval "${svc}_running=\"${GREEN}运行中${PLAIN}\""
+            eval "${var}_running=\"${GREEN}运行中${PLAIN}\""
         else
-            eval "${svc}_running=\"${RED}未运行${PLAIN}\""
+            eval "${var}_running=\"${RED}未运行${PLAIN}\""
         fi
 
+        # 启动状态
         if echo "$SYSTEMCTL_ENABLED" | grep -qw "${svc}.service"; then
-            eval "${svc}_enabled=\"${GREEN}已启用${PLAIN}\""
+            eval "${var}_enabled=\"${GREEN}已启用${PLAIN}\""
         else
-            eval "${svc}_enabled=\"${YELLOW}未启用${PLAIN}\""
+            eval "${var}_enabled=\"${YELLOW}未启用${PLAIN}\""
         fi
     }
 
@@ -219,6 +228,7 @@ refresh_services() {
     # Xray 自动识别
     xray_svc=$(detect_xray_service)
     if [[ -n "$xray_svc" ]]; then
+        xray_var=$(normalize "$xray_svc")
         xray_installed="${GREEN}已安装${PLAIN}"
         xray_running=$(echo "$SYSTEMCTL_ACTIVE" | grep -qw "${xray_svc}.service" && echo -e "${GREEN}运行中${PLAIN}" || echo -e "${RED}未运行${PLAIN}")
         xray_enabled=$(echo "$SYSTEMCTL_ENABLED" | grep -qw "${xray_svc}.service" && echo -e "${GREEN}已启用${PLAIN}" || echo -e "${YELLOW}未启用${PLAIN}")
@@ -231,6 +241,7 @@ refresh_services() {
     # Mihomo 自动识别
     mihomo_svc=$(detect_mihomo_service)
     if [[ -n "$mihomo_svc" ]]; then
+        mihomo_var=$(normalize "$mihomo_svc")
         mihomo_installed="${GREEN}已安装${PLAIN}"
         mihomo_running=$(echo "$SYSTEMCTL_ACTIVE" | grep -qw "${mihomo_svc}.service" && echo -e "${GREEN}运行中${PLAIN}" || echo -e "${RED}未运行${PLAIN}")
         mihomo_enabled=$(echo "$SYSTEMCTL_ENABLED" | grep -qw "${mihomo_svc}.service" && echo -e "${GREEN}已启用${PLAIN}" || echo -e "${YELLOW}未启用${PLAIN}")
