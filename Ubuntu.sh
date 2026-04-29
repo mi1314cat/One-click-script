@@ -83,11 +83,13 @@ DISK_USED=$(df -h / | awk 'NR==2 {print $3}')
 DISK_TOTAL=$(df -h / | awk 'NR==2 {print $2}')
 DISK_PERCENT=$(df -h / | awk 'NR==2 {print $5}')
 
+
 # ===========================
-#   服务检测（极速版）
+#   服务检测（精准版）
 # ===========================
+
 service_exists() {
-    systemctl status "$1" >/dev/null 2>&1
+    systemctl list-unit-files | grep -qw "$1.service"
 }
 
 svc_state() {
@@ -114,59 +116,72 @@ svc_enabled() {
     fi
 }
 
-# 缓存服务状态（一次性执行）
-docker_installed=$(svc_state docker)
-docker_running=$(svc_running docker)
+# ===========================
+#   UFW（特殊处理）
+# ===========================
+check_ufw() {
+    if command -v ufw >/dev/null 2>&1; then
+        ufw_installed="${GREEN}已安装${PLAIN}"
 
-nginx_installed=$(svc_state nginx)
-nginx_running=$(svc_running nginx)
+        # 运行状态
+        if ufw status | grep -q "Status: active"; then
+            ufw_running="${GREEN}运行中${PLAIN}"
+        else
+            ufw_running="${RED}未运行${PLAIN}"
+        fi
 
-caddy_installed=$(svc_state caddy)
-caddy_running=$(svc_running caddy)
+        # 启动状态（UFW 特殊：systemd 永远 enabled）
+        if systemctl is-enabled --quiet ufw; then
+            ufw_enabled="${GREEN}已启用${PLAIN}"
+        else
+            ufw_enabled="${YELLOW}未启用${PLAIN}"
+        fi
+    else
+        ufw_installed="${RED}未安装${PLAIN}"
+        ufw_running="${RED}未运行${PLAIN}"
+        ufw_enabled="${YELLOW}未启用${PLAIN}"
+    fi
+}
 
-ufw_installed=$(svc_state ufw)
-nft_installed=$(svc_state nftables)
-
-fail2ban_installed=$(svc_state fail2ban)
-fail2ban_running=$(svc_running fail2ban)
-
+# ===========================
+#   nftables（精准）
+# ===========================
+check_nft() {
+    if command -v nft >/dev/null 2>&1; then
+        nft_installed="${GREEN}已安装${PLAIN}"
+        nft_running=$(svc_running nftables)
+        nft_enabled=$(svc_enabled nftables)
+    else
+        nft_installed="${RED}未安装${PLAIN}"
+        nft_running="${RED}未运行${PLAIN}"
+        nft_enabled="${YELLOW}未启用${PLAIN}"
+    fi
+}
 # Xray 自动识别
 detect_xray_service() {
     for svc in xrayls xray xray-core; do
-        if service_exists "$svc"; then echo "$svc"; return; fi
+        if systemctl list-unit-files | grep -qw "$svc.service"; then
+            echo "$svc"
+            return
+        fi
     done
     echo ""
 }
-
-xray_svc=$(detect_xray_service)
-if [[ -n "$xray_svc" ]]; then
-    xray_installed="${GREEN}已安装${PLAIN}"
-    xray_running=$(svc_running "$xray_svc")
-    xray_enabled=$(svc_enabled "$xray_svc")
-else
-    xray_installed="${RED}未安装${PLAIN}"
-    xray_running="${RED}未运行${PLAIN}"
-    xray_enabled="${YELLOW}未启用${PLAIN}"
-fi
 
 # Mihomo 自动识别
 detect_mihomo_service() {
     for svc in mihomo mihomo-core clash; do
-        if service_exists "$svc"; then echo "$svc"; return; fi
+        if systemctl list-unit-files | grep -qw "$svc.service"; then
+            echo "$svc"
+            return
+        fi
     done
     echo ""
 }
 
-mihomo_svc=$(detect_mihomo_service)
-if [[ -n "$mihomo_svc" ]]; then
-    mihomo_installed="${GREEN}已安装${PLAIN}"
-    mihomo_running=$(svc_running "$mihomo_svc")
-    mihomo_enabled=$(svc_enabled "$mihomo_svc")
-else
-    mihomo_installed="${RED}未安装${PLAIN}"
-    mihomo_running="${RED}未运行${PLAIN}"
-    mihomo_enabled="${YELLOW}未启用${PLAIN}"
-fi
+# ===========================
+#   刷新服务状态（调用新版检测）
+# ===========================
 refresh_services() {
 
     # Docker
@@ -181,17 +196,12 @@ refresh_services() {
     caddy_installed=$(svc_state caddy)
     caddy_running=$(svc_running caddy)
 
-        # UFW
-    ufw_installed=$(svc_state ufw)
-    ufw_running=$(svc_running ufw)
-    ufw_enabled=$(svc_enabled ufw)
+    # UFW（特殊）
+    check_ufw
 
-    # nftables
-    nft_installed=$(svc_state nftables)
-    nft_running=$(svc_running nftables)
-    nft_enabled=$(svc_enabled nftables)
+    # nftables（精准）
+    check_nft
 
-    
     # Fail2ban
     fail2ban_installed=$(svc_state fail2ban)
     fail2ban_running=$(svc_running fail2ban)
@@ -230,6 +240,7 @@ refresh_services() {
     hysteria_running=$(svc_running hysteria-server)
     hysteria_enabled=$(svc_enabled hysteria-server)
 }
+
 
 # ===========================
 #   主菜单（极速版）
