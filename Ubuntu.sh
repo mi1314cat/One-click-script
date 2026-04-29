@@ -12,13 +12,10 @@ CYAN="\033[96m"
 PLAIN="\033[0m"
 BOLD="\033[1m"
 
-print_info() { echo -e "${GREEN}[Info]${PLAIN} $1"; }
-print_error() { echo -e "${RED}[Error]${PLAIN} $1"; }
-
 line() { echo -e "${BLUE}──────────────────────────────────────────────────────────────${PLAIN}"; }
 
 # ===========================
-#   渐变标题
+#   渐变标题（轻量不卡顿）
 # ===========================
 gradient() {
     text="$1"
@@ -33,17 +30,17 @@ gradient() {
 }
 
 # ===========================
-#   加载动画
+#   加载动画（优化版 0.2 秒）
 # ===========================
 loading() {
     frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     colors=("\033[38;5;45m" "\033[38;5;51m" "\033[38;5;87m" "\033[38;5;123m" "\033[38;5;159m")
 
-    for i in {1..40}; do
+    for i in {1..10}; do
         frame=${frames[i % 10]}
         color=${colors[i % 5]}
         printf "\r${color}加载中 ${frame}${PLAIN}  "
-        sleep 0.04
+        sleep 0.02
     done
     printf "\r\033[K"
 }
@@ -63,12 +60,9 @@ CPU_MODEL=$(awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo | sed 's/^ //'
 CPU_CORES=$(grep -c ^processor /proc/cpuinfo)
 CPU_FREQ="$(awk -F: '/cpu MHz/ {printf "%.1f GHz", $2/1000; exit}' /proc/cpuinfo)"
 
-# CPU 使用率（极速版）
 CPU_USAGE=$(awk -v FS=" " '/cpu /{printf "%.1f%%", 100 - ($5*100/($2+$3+$4+$5))}' /proc/stat)
-
 LOAD_AVG=$(awk '{print $1", "$2", "$3}' /proc/loadavg)
 
-# TCP/UDP（极速版）
 TCP_CONN=$(grep -c '^ *[0-9]' /proc/net/tcp)
 UDP_CONN=$(grep -c '^ *[0-9]' /proc/net/udp)
 
@@ -83,11 +77,9 @@ DISK_USED=$(df -h / | awk 'NR==2 {print $3}')
 DISK_TOTAL=$(df -h / | awk 'NR==2 {print $2}')
 DISK_PERCENT=$(df -h / | awk 'NR==2 {print $5}')
 
-
 # ===========================
 #   服务检测（精准版）
 # ===========================
-
 service_exists() {
     systemctl list-unit-files | grep -qw "$1.service"
 }
@@ -123,14 +115,12 @@ check_ufw() {
     if command -v ufw >/dev/null 2>&1; then
         ufw_installed="${GREEN}已安装${PLAIN}"
 
-        # 运行状态
         if ufw status | grep -q "Status: active"; then
             ufw_running="${GREEN}运行中${PLAIN}"
         else
             ufw_running="${RED}未运行${PLAIN}"
         fi
 
-        # 启动状态（UFW 特殊：systemd 永远 enabled）
         if systemctl is-enabled --quiet ufw; then
             ufw_enabled="${GREEN}已启用${PLAIN}"
         else
@@ -157,7 +147,10 @@ check_nft() {
         nft_enabled="${YELLOW}未启用${PLAIN}"
     fi
 }
-# Xray 自动识别
+
+# ===========================
+#   Xray / Mihomo 自动识别
+# ===========================
 detect_xray_service() {
     for svc in xrayls xray xray-core; do
         if systemctl list-unit-files | grep -qw "$svc.service"; then
@@ -168,7 +161,6 @@ detect_xray_service() {
     echo ""
 }
 
-# Mihomo 自动识别
 detect_mihomo_service() {
     for svc in mihomo mihomo-core clash; do
         if systemctl list-unit-files | grep -qw "$svc.service"; then
@@ -180,33 +172,25 @@ detect_mihomo_service() {
 }
 
 # ===========================
-#   刷新服务状态（调用新版检测）
+#   刷新服务状态
 # ===========================
 refresh_services() {
 
-    # Docker
     docker_installed=$(svc_state docker)
     docker_running=$(svc_running docker)
 
-    # Nginx
     nginx_installed=$(svc_state nginx)
     nginx_running=$(svc_running nginx)
 
-    # Caddy
     caddy_installed=$(svc_state caddy)
     caddy_running=$(svc_running caddy)
 
-    # UFW（特殊）
     check_ufw
-
-    # nftables（精准）
     check_nft
 
-    # Fail2ban
     fail2ban_installed=$(svc_state fail2ban)
     fail2ban_running=$(svc_running fail2ban)
 
-    # Xray 自动识别
     xray_svc=$(detect_xray_service)
     if [[ -n "$xray_svc" ]]; then
         xray_installed="${GREEN}已安装${PLAIN}"
@@ -218,7 +202,6 @@ refresh_services() {
         xray_enabled="${YELLOW}未启用${PLAIN}"
     fi
 
-    # Mihomo 自动识别
     mihomo_svc=$(detect_mihomo_service)
     if [[ -n "$mihomo_svc" ]]; then
         mihomo_installed="${GREEN}已安装${PLAIN}"
@@ -230,12 +213,10 @@ refresh_services() {
         mihomo_enabled="${YELLOW}未启用${PLAIN}"
     fi
 
-    # Sing-box
     sing_installed=$(svc_state sing-box)
     sing_running=$(svc_running sing-box)
     sing_enabled=$(svc_enabled sing-box)
 
-    # Hysteria2
     hysteria_installed=$(svc_state hysteria-server)
     hysteria_running=$(svc_running hysteria-server)
     hysteria_enabled=$(svc_enabled hysteria-server)
