@@ -43,8 +43,6 @@ loading() {
 }
 
 
-loading
-clear
 
 # ===========================
 #   系统信息（一次采集）
@@ -255,7 +253,7 @@ refresh_services() {
 #   主菜单（极速版）
 # ===========================
 main_menu() {
-   refresh_services  
+     
     clear
 
     echo -e "${GREEN}"
@@ -840,7 +838,9 @@ create_shortcut() {
 
 # 主函数
 main() {
-    
+    loading
+    clear
+    refresh_services
     create_shortcut
     main_menu
 }
