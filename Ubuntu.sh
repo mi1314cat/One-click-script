@@ -250,12 +250,12 @@ refresh_services() {
     fi
 }
 
-refresh_services  
+
 # ===========================
 #   主菜单（极速版）
 # ===========================
 main_menu() {
-   
+   refresh_services  
     clear
 
     echo -e "${GREEN}"
