@@ -715,78 +715,38 @@ cat_out_files() {
         return 0
     }
 
-    echo "====== TXT 文件内容 ======"
-    echo
+    local found=0
+    local ext file
 
-    local txt_files=("$dir"/*.txt)
-    if ls "$dir"/*.txt >/dev/null 2>&1; then
-        for f in "${txt_files[@]}"; do
-            echo ">>> 文件：$(basename "$f")"
-            echo "----------------------------------------"
-            cat "$f"
-            echo -e "\n"
-        done
-    else
-        echo "无 TXT 文件"
-    fi
+    for ext in txt yaml yml json conf; do
+        local files=("$dir"/*."$ext")
 
-    echo
-    echo "====== YAML 文件内容 ======"
-    echo
+        if ls "$dir"/*."$ext" >/dev/null 2>&1; then
+            echo
+            echo "====== ${ext^^} 文件内容 ======"
+            echo
 
-    local yaml_files=("$dir"/*.yaml)
-    if ls "$dir"/*.yaml >/dev/null 2>&1; then
-        for f in "${yaml_files[@]}"; do
-            echo ">>> 文件：$(basename "$f")"
-            echo "----------------------------------------"
-            cat "$f"
-            echo -e "\n"
-        done
-    else
-        echo "无 YAML 文件"
-    fi
+            for file in "${files[@]}"; do
+                [ -f "$file" ] || continue
+
+                echo ">>> 文件：$(basename "$file")"
+                echo "----------------------------------------"
+                cat "$file"
+                echo
+                echo
+                found=1
+            done
+        fi
+    done
+
+    [ "$found" = 0 ] && echo "[Info] 目录内无可显示文件"
 }
 
-catmi-xx() {
-    print_info "========== 配置文件 =========="
+show_file() {
+    local file="$1"
 
-    for file in \
-        /root/catmi/hy2/config.yaml \
-        cat_out_files /root/catmi/xray/out \
-        /root/catmi/mihomo/clash-meta.yaml \
-        /root/catmi/singbox/clash-meta.yaml
-    do
-        echo "------ $file ------"
-        if [ -f "$file" ]; then
-            cat "$file"
-        else
-            echo "[未找到] $file"
-        fi
-        echo
-    done
-
-    echo "*********************************"
-    print_info "========== V2Ray 文件 =========="
-
-    for file in \
-        /root/catmi/singbox/v2ray.txt \
-        /root/catmi/mihomo/v2ray.txt \
-        /root/catmi/xray/v2ray.txt
-    do
-        echo "------ $file ------"
-        if [ -f "$file" ]; then
-            cat "$file"
-        else
-            echo "[未找到] $file"
-        fi
-        echo
-    done
-
-    echo "*********************************"
-    print_info "========== xhttp.json =========="
-
-    file=/root/catmi/xray/xhttp.json
     echo "------ $file ------"
+
     if [ -f "$file" ]; then
         cat "$file"
     else
@@ -794,7 +754,53 @@ catmi-xx() {
     fi
 
     echo
-    read -p "安装完成，按回车返回主菜单..."
+}
+
+catmi-xx() {
+
+    clear
+    print_info "========== 配置文件 =========="
+    echo
+
+    # 普通文件
+    local files=(
+        /root/catmi/hy2/config.yaml
+        /root/catmi/mihomo/clash-meta.yaml
+        /root/catmi/singbox/clash-meta.yaml
+    )
+
+    local file
+    for file in "${files[@]}"; do
+        show_file "$file"
+    done
+
+    # xray out目录
+    echo "------ /root/catmi/xray/out ------"
+    cat_out_files /root/catmi/xray/out
+    echo
+
+    echo "*********************************"
+    print_info "========== V2Ray 文件 =========="
+    echo
+
+    local v2files=(
+        /root/catmi/singbox/v2ray.txt
+        /root/catmi/mihomo/v2ray.txt
+        /root/catmi/xray/v2ray.txt
+    )
+
+    for file in "${v2files[@]}"; do
+        show_file "$file"
+    done
+
+    echo "*********************************"
+    print_info "========== xhttp.json =========="
+    echo
+
+    show_file /root/catmi/xray/xhttp.json
+
+    echo
+    read -p "按回车返回主菜单..."
     main_menu
 }
 exit_program() {
