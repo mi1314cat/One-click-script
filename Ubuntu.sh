@@ -176,50 +176,69 @@ detect_mihomo_service() {
 # ===========================
 refresh_services() {
 
-    docker_installed=$(svc_state docker)
-    docker_running=$(svc_running docker)
+    # 一次性读取所有 systemctl 状态（极限优化）
+    SYSTEMCTL_ACTIVE=$(systemctl list-units --type=service --no-pager)
+    SYSTEMCTL_ENABLED=$(systemctl list-unit-files --type=service --no-pager)
 
-    nginx_installed=$(svc_state nginx)
-    nginx_running=$(svc_running nginx)
+    check_svc_fast() {
+        local svc="$1"
 
-    caddy_installed=$(svc_state caddy)
-    caddy_running=$(svc_running caddy)
+        if echo "$SYSTEMCTL_ENABLED" | grep -qw "${svc}.service"; then
+            eval "${svc}_installed=\"${GREEN}已安装${PLAIN}\""
+        else
+            eval "${svc}_installed=\"${RED}未安装${PLAIN}\""
+        fi
 
+        if echo "$SYSTEMCTL_ACTIVE" | grep -qw "${svc}.service"; then
+            eval "${svc}_running=\"${GREEN}运行中${PLAIN}\""
+        else
+            eval "${svc}_running=\"${RED}未运行${PLAIN}\""
+        fi
+
+        if echo "$SYSTEMCTL_ENABLED" | grep -qw "${svc}.service"; then
+            eval "${svc}_enabled=\"${GREEN}已启用${PLAIN}\""
+        else
+            eval "${svc}_enabled=\"${YELLOW}未启用${PLAIN}\""
+        fi
+    }
+
+    # 常规服务（极速检测）
+    check_svc_fast docker
+    check_svc_fast nginx
+    check_svc_fast caddy
+    check_svc_fast fail2ban
+    check_svc_fast sing-box
+    check_svc_fast hysteria-server
+
+    # UFW（特殊）
     check_ufw
+
+    # nftables（精准）
     check_nft
 
-    fail2ban_installed=$(svc_state fail2ban)
-    fail2ban_running=$(svc_running fail2ban)
-
+    # Xray 自动识别
     xray_svc=$(detect_xray_service)
     if [[ -n "$xray_svc" ]]; then
         xray_installed="${GREEN}已安装${PLAIN}"
-        xray_running=$(svc_running "$xray_svc")
-        xray_enabled=$(svc_enabled "$xray_svc")
+        xray_running=$(echo "$SYSTEMCTL_ACTIVE" | grep -qw "${xray_svc}.service" && echo -e "${GREEN}运行中${PLAIN}" || echo -e "${RED}未运行${PLAIN}")
+        xray_enabled=$(echo "$SYSTEMCTL_ENABLED" | grep -qw "${xray_svc}.service" && echo -e "${GREEN}已启用${PLAIN}" || echo -e "${YELLOW}未启用${PLAIN}")
     else
         xray_installed="${RED}未安装${PLAIN}"
         xray_running="${RED}未运行${PLAIN}"
         xray_enabled="${YELLOW}未启用${PLAIN}"
     fi
 
+    # Mihomo 自动识别
     mihomo_svc=$(detect_mihomo_service)
     if [[ -n "$mihomo_svc" ]]; then
         mihomo_installed="${GREEN}已安装${PLAIN}"
-        mihomo_running=$(svc_running "$mihomo_svc")
-        mihomo_enabled=$(svc_enabled "$mihomo_svc")
+        mihomo_running=$(echo "$SYSTEMCTL_ACTIVE" | grep -qw "${mihomo_svc}.service" && echo -e "${GREEN}运行中${PLAIN}" || echo -e "${RED}未运行${PLAIN}")
+        mihomo_enabled=$(echo "$SYSTEMCTL_ENABLED" | grep -qw "${mihomo_svc}.service" && echo -e "${GREEN}已启用${PLAIN}" || echo -e "${YELLOW}未启用${PLAIN}")
     else
         mihomo_installed="${RED}未安装${PLAIN}"
         mihomo_running="${RED}未运行${PLAIN}"
         mihomo_enabled="${YELLOW}未启用${PLAIN}"
     fi
-
-    sing_installed=$(svc_state sing-box)
-    sing_running=$(svc_running sing-box)
-    sing_enabled=$(svc_enabled sing-box)
-
-    hysteria_installed=$(svc_state hysteria-server)
-    hysteria_running=$(svc_running hysteria-server)
-    hysteria_enabled=$(svc_enabled hysteria-server)
 }
 
 
