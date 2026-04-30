@@ -300,8 +300,8 @@ echo -e "${CYAN}├────────────────────�
 
 echo -e "  Xray:           ${xray_installed} | 状态: ${xray_running} | 启动: ${xray_enabled}"
 echo -e "  Mihomo:         ${mihomo_installed} | 状态: ${mihomo_running} | 启动: ${mihomo_enabled}"
-echo -e "  Sing-box:       ${sing_installed} | 状态: ${sing_running} | 启动: ${sing_enabled}"
-echo -e "  Hysteria2:      ${hysteria_installed} | 状态: ${hysteria_running} | 启动: ${hysteria_enabled}"
+echo -e "  Sing-box:       ${sing_box_installed} | 状态: ${sing_box_running} | 启动: ${sing_box_enabled}"
+echo -e "  Hysteria2:      ${hysteria_server_installed} | 状态: ${hysteria_server_running} | 启动: ${hysteria_server_enabled}"
 
 
 echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
