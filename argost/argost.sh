@@ -149,31 +149,55 @@ EOF
 # ============================================================
 install_client() {
     echo "=============================="
-    echo "🟦 进入客户端安装模式（VPS）"
+    echo "🟦 进入客户端安装模式（方案 A：两个独立服务）"
     echo "=============================="
 
     if [ ! -f "$ENV_FILE" ]; then
         echo -e "${RED}❌ 未找到 $ENV_FILE${NC}"
         echo "请从服务端复制："
-        echo "scp root@你家VPS:/root/catmi/gost/gost.env /root/catmi/gost/gost.env"
+        echo "scp root@服务端IP:/root/catmi/gost/gost.env /root/catmi/gost/gost.env"
         exit 1
     fi
 
     source "$ENV_FILE"
 
-    XRAY_PORT=$(ask_port "请输入本地代理端口（Xray/SOCKS/SS/Trojan）" "10808")
-    rtcp_port=$(ask_port "请输入 RTCP 公网监听端口（你电脑要连的）" "30000")
+    # 本地 SOCKS5 端口（仅本机使用）
+    socks5_port=$(ask_port "请输入本地 SOCKS5 端口" "20000")
+
+    # RTCP 公网监听端口（你电脑要连的）
+    rtcp_port=$(ask_port "请输入本地 RTCP 端口（公网监听）" "30000")
 
     install_gost
 
-cat > /etc/systemd/system/gost-rtcp.service <<EOF
+    # ============================
+    # 创建 SOCKS5 服务（本地代理）
+    # ============================
+cat > /etc/systemd/system/gost-socks5.service <<EOF
 [Unit]
-Description=Gost RTCP Client (HongKong VPS)
+Description=Gost SOCKS5 Client
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=$GOST_BIN -D -L rtcp://:$rtcp_port/127.0.0.1:$XRAY_PORT -F "relay+ws://$uargo_domain:80?path=/$ws_path&host=$uargo_domain"
+ExecStart=$GOST_BIN -D -L socks5://127.0.0.1:$socks5_port
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # ============================
+    # 创建 RTCP 服务（反向隧道）
+    # ============================
+cat > /etc/systemd/system/gost-rtcp.service <<EOF
+[Unit]
+Description=Gost RTCP Client
+After=gost-socks5.service
+
+[Service]
+Type=simple
+ExecStart=$GOST_BIN -D -L rtcp://:$rtcp_port/127.0.0.1:$socks5_port -F "relay+ws://$uargo_domain:80?path=/$ws_path&host=$uargo_domain"
 Restart=always
 RestartSec=3
 
@@ -182,14 +206,17 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
+    systemctl enable --now gost-socks5.service
     systemctl enable --now gost-rtcp.service
 
     echo "=============================="
-    echo "🎉 客户端安装完成（香港 VPS）"
+    echo "🎉 客户端安装完成（argost：SOCKS5 + RTCP）"
     echo "=============================="
-    echo "本地代理端口：127.0.0.1:$XRAY_PORT"
+    echo "SOCKS5 本地端口：127.0.0.1:$socks5_port"
     echo "RTCP 公网端口：$rtcp_port"
+    echo "Argo 域名：$uargo_domain"
 }
+
 
 # ============================================================
 # 主菜单
