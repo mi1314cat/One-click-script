@@ -119,7 +119,7 @@ install_server() {
 
     gost_port=$(ask_port "请输入服务端 gost 监听端口" "20000")
     update_env "$CATMI_ENV" gost_port "$gost_port"
-
+ bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/url_argo.sh)
     uargo_domain=$(read_from_catmi_env "uargo_domain")
     if [ -z "$uargo_domain" ]; then
         echo -e "${RED}catmi.env 中未找到 uargo_domain${NC}"
