@@ -80,23 +80,6 @@ install_gost() {
 }
 
 # ============================================================
-# 创建守护脚本
-# ============================================================
-create_guard() {
-cat > "$BASE_DIR/gost_guard.sh" <<'EOF'
-#!/usr/bin/env bash
-SERVICE_NAME=$1
-while true; do
-    if ! pgrep -x "gost" >/dev/null; then
-        systemctl restart "$SERVICE_NAME"
-    fi
-    sleep 5
-done
-EOF
-chmod +x "$BASE_DIR/gost_guard.sh"
-}
-
-# ============================================================
 # 从 catmi.env 读取变量
 # ============================================================
 read_from_catmi_env() {
@@ -105,11 +88,11 @@ read_from_catmi_env() {
 }
 
 # ============================================================
-# 服务端安装
+# 服务端安装（你家 VPS）
 # ============================================================
 install_server() {
     echo "=============================="
-    echo "🟥 进入服务端安装模式"
+    echo "🟥 进入服务端安装模式（你家 VPS）"
     echo "=============================="
 
     source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/update_env.sh")
@@ -117,9 +100,11 @@ install_server() {
 
     [ -f "$CATMI_ENV" ] && load_env "$CATMI_ENV"
 
-    gost_port=$(ask_port "请输入服务端 gost 监听端口" "20000")
+    gost_port=$(ask_port "请输入本地 gost 服务端端口（仅本地使用）" "20000")
     update_env "$CATMI_ENV" gost_port "$gost_port"
- bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/url_argo.sh)
+
+    bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/url_argo.sh)
+
     uargo_domain=$(read_from_catmi_env "uargo_domain")
     if [ -z "$uargo_domain" ]; then
         echo -e "${RED}catmi.env 中未找到 uargo_domain${NC}"
@@ -136,16 +121,14 @@ ws_path=$ws_path
 gost_port=$gost_port
 EOF
 
-cat > /etc/systemd/system/gost-client.service <<EOF
+cat > /etc/systemd/system/gost-server.service <<EOF
 [Unit]
-Description=Gost Client (SOCKS5 + RTCP)
+Description=Gost Server (for Argo)
 After=network.target
 
 [Service]
 Type=simple
-
-ExecStart=/bin/bash -c '/root/catmi/gost/gost -D -L socks5://[::1]:$socks5_port & /root/catmi/gost/gost -D -L rtcp://:$rtcp_port/[::1]:$socks5_port -F relay+ws://$uargo_domain:80?path=/$ws_path&host=$uargo_domain'
-
+ExecStart=$GOST_BIN -D -L tcp://127.0.0.1:$gost_port
 Restart=always
 RestartSec=3
 
@@ -153,16 +136,11 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-
     systemctl daemon-reload
-    systemctl enable gost-server.service
-    systemctl restart gost-server.service
-
-    create_guard
-    nohup "$BASE_DIR/gost_guard.sh" gost-server.service >/dev/null 2>&1 &
+    systemctl enable --now gost-server.service
 
     echo "=============================="
-    echo "🎉 服务端安装完成"
+    echo "🎉 服务端安装完成（本地监听 127.0.0.1:$gost_port）"
     echo "=============================="
 }
 
@@ -171,52 +149,31 @@ EOF
 # ============================================================
 install_client() {
     echo "=============================="
-    echo "🟦 进入客户端安装模式（方案 A：两个独立服务）"
+    echo "🟦 进入客户端安装模式（VPS）"
     echo "=============================="
 
     if [ ! -f "$ENV_FILE" ]; then
         echo -e "${RED}❌ 未找到 $ENV_FILE${NC}"
         echo "请从服务端复制："
-        echo "scp root@服务端IP:/root/catmi/gost/gost.env /root/catmi/gost/gost.env"
+        echo "scp root@你家VPS:/root/catmi/gost/gost.env /root/catmi/gost/gost.env"
         exit 1
     fi
 
     source "$ENV_FILE"
 
-    socks5_port=$(ask_port "请输入本地 SOCKS5 端口" "20000")
-    rtcp_port=$(ask_port "请输入本地 RTCP 端口" "30000")
+    XRAY_PORT=$(ask_port "请输入本地代理端口（Xray/SOCKS/SS/Trojan）" "10808")
+    rtcp_port=$(ask_port "请输入 RTCP 公网监听端口（你电脑要连的）" "30000")
 
     install_gost
 
-    # ============================
-    # 创建 SOCKS5 服务
-    # ============================
-cat > /etc/systemd/system/gost-socks5.service <<EOF
+cat > /etc/systemd/system/gost-rtcp.service <<EOF
 [Unit]
-Description=Gost SOCKS5 Client
+Description=Gost RTCP Client (HongKong VPS)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=$GOST_BIN -D -L socks5://127.0.0.1:$socks5_port
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # ============================
-    # 创建 RTCP 服务
-    # ============================
-cat > /etc/systemd/system/gost-rtcp.service <<EOF
-[Unit]
-Description=Gost RTCP Client
-After=gost-socks5.service
-
-[Service]
-Type=simple
-ExecStart=$GOST_BIN -D -L rtcp://:$rtcp_port/127.0.0.1:$socks5_port -F "relay+ws://$uargo_domain:80?path=/$ws_path&host=$uargo_domain"
+ExecStart=$GOST_BIN -D -L rtcp://:$rtcp_port/127.0.0.1:$XRAY_PORT -F "relay+ws://$uargo_domain:80?path=/$ws_path&host=$uargo_domain"
 Restart=always
 RestartSec=3
 
@@ -225,21 +182,21 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now gost-socks5.service
     systemctl enable --now gost-rtcp.service
 
     echo "=============================="
-    echo "🎉 客户端安装完成（argost）"
+    echo "🎉 客户端安装完成（香港 VPS）"
     echo "=============================="
+    echo "本地代理端口：127.0.0.1:$XRAY_PORT"
+    echo "RTCP 公网端口：$rtcp_port"
 }
-
 
 # ============================================================
 # 主菜单
 # ============================================================
 echo "请选择安装模式："
-echo "1) 服务端安装"
-echo "2) 客户端安装"
+echo "1) 服务端安装（你家 VPS）"
+echo "2) 客户端安装（香港 VPS）"
 read -p "请输入数字: " mode
 
 case $mode in
