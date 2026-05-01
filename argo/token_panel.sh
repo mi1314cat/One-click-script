@@ -25,20 +25,45 @@ line(){ echo -e "${BLUE}----------------------------------------${NC}"; }
 title(){ echo -e "${GREEN}$1${NC}"; line; }
 
 # ============================
-# cloudflared 自动检测
+# 自动识别架构并下载 cloudflared
+# ============================
+install_cloudflared(){
+    ARCH=$(uname -m)
+
+    case "$ARCH" in
+        x86_64)
+            CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+            ;;
+        aarch64)
+            CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+            ;;
+        armv7l|armhf)
+            CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm"
+            ;;
+        *)
+            echo -e "${RED}不支持的架构: $ARCH${NC}"
+            exit 1
+            ;;
+    esac
+
+    echo -e "${YELLOW}正在下载 cloudflared ($ARCH)...${NC}"
+    wget -qO "$BIN" "$CFD_URL" || {
+        echo -e "${RED}cloudflared 下载失败${NC}"
+        exit 1
+    }
+    chmod +x "$BIN"
+}
+
+# ============================
+# cloudflared 检查（损坏自动修复）
 # ============================
 check_cloudflared(){
     if [[ ! -f "$BIN" ]]; then
-        echo -e "${YELLOW}cloudflared 不存在，正在下载...${NC}"
-        wget -qO "$BIN" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-        chmod +x "$BIN"
-    fi
-
-    if ! "$BIN" --version >/dev/null 2>&1; then
+        install_cloudflared
+    elif ! "$BIN" --version >/dev/null 2>&1; then
         echo -e "${RED}cloudflared 文件损坏，重新下载...${NC}"
         rm -f "$BIN"
-        wget -qO "$BIN" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-        chmod +x "$BIN"
+        install_cloudflared
     fi
 }
 
@@ -72,7 +97,7 @@ After=network.target
 WorkingDirectory=$WORKDIR
 ExecStart=$BIN tunnel run --token $TOKEN
 Restart=always
-RestartSec=5
+RestartSec=3
 KillMode=process
 StandardOutput=append:$LOG_FILE
 StandardError=append:$LOG_FILE
