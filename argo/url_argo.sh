@@ -11,18 +11,37 @@ mkdir -p "$WORKDIR" "$CF_DIR"
 
 err(){ echo "[ERR] $1" >&2; }
 
+# ============================================================
+# 自动根据 CPU 架构下载正确的 cloudflared
+# ============================================================
 check_cloudflared(){
     if [[ ! -f "$BIN" ]]; then
-        wget -qO "$BIN" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-            || { err "cloudflared 下载失败"; exit 1; }
+        ARCH=$(uname -m)
+        case "$ARCH" in
+            x86_64)
+                CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+                ;;
+            aarch64)
+                CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+                ;;
+            armv7l|armhf)
+                CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm"
+                ;;
+            *)
+                err "不支持的架构: $ARCH"
+                exit 1
+                ;;
+        esac
+
+        echo "⬇️ 正在下载 cloudflared ($ARCH)..."
+        wget -qO "$BIN" "$CFD_URL" || { err "cloudflared 下载失败"; exit 1; }
         chmod +x "$BIN"
     fi
 
     if ! "$BIN" --version >/dev/null 2>&1; then
         rm -f "$BIN"
-        wget -qO "$BIN" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-            || { err "cloudflared 下载失败"; exit 1; }
-        chmod +x "$BIN"
+        echo "⚠️ cloudflared 文件损坏，重新下载..."
+        check_cloudflared
     fi
 }
 
@@ -55,7 +74,6 @@ ingress:
   - service: http_status:404
 EOF
 
-# ⭐ 关键：变量写法，但 Bash 会展开
 cat > /etc/systemd/system/argo-file.service <<EOF
 [Unit]
 Description=Argo Tunnel File Mode
@@ -84,12 +102,14 @@ echo "请到 Cloudflare DNS 添加："
 echo "$DOMAIN  CNAME  $TID.cfargotunnel.com"
 echo
 }
+
 DINSTALL_CATMI="/root/catmi"
 CATMIENV_FILE="$DINSTALL_CATMI/catmi.env"
 
 source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/update_env.sh")
 source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/load_env.sh")
-load_env $CATMIENV_FILE
+load_env "$CATMIENV_FILE"
+
 if [ -n "$mode" ]; then
     case "$mode" in
         xray)    xpr=9970 ;;
@@ -109,6 +129,5 @@ fi
 
 create_file_tunnel
 
-
 uargo_domain=$(awk '{print $2}' "$FILE_INFO")
-update_env $CATMIENV_FILE uargo_domain $uargo_domain
+update_env "$CATMIENV_FILE" uargo_domain "$uargo_domain"
