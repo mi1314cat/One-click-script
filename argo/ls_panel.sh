@@ -20,30 +20,49 @@ YELLOW="\033[33m"
 BLUE="\033[36m"
 NC="\033[0m"
 
-line() {
-    echo -e "${BLUE}----------------------------------------${NC}"
-}
+line() { echo -e "${BLUE}----------------------------------------${NC}"; }
+title() { echo -e "${GREEN}$1${NC}"; line; }
 
-title() {
-    echo -e "${GREEN}$1${NC}"
-    line
+# ============================
+# 自动识别架构并下载 cloudflared
+# ============================
+install_cloudflared() {
+    ARCH=$(uname -m)
+
+    case "$ARCH" in
+        x86_64)
+            CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+            ;;
+        aarch64)
+            CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+            ;;
+        armv7l|armhf)
+            CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm"
+            ;;
+        *)
+            echo -e "${RED}不支持的架构: $ARCH${NC}"
+            exit 1
+            ;;
+    esac
+
+    echo -e "${YELLOW}正在下载 cloudflared ($ARCH)...${NC}"
+    wget -qO "$BIN" "$CFD_URL" || {
+        echo -e "${RED}cloudflared 下载失败${NC}"
+        exit 1
+    }
+    chmod +x "$BIN"
 }
 
 # ============================
-# cloudflared 自动检测
+# cloudflared 检查（损坏自动修复）
 # ============================
 check_cloudflared() {
     if [[ ! -f "$BIN" ]]; then
-        echo -e "${YELLOW}cloudflared 不存在，正在下载...${NC}"
-        wget -qO "$BIN" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-        chmod +x "$BIN"
-    fi
-
-    if ! "$BIN" --version >/dev/null 2>&1; then
+        install_cloudflared
+    elif ! "$BIN" --version >/dev/null 2>&1; then
         echo -e "${RED}cloudflared 文件损坏，重新下载...${NC}"
         rm -f "$BIN"
-        wget -qO "$BIN" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-        chmod +x "$BIN"
+        install_cloudflared
     fi
 }
 
@@ -56,11 +75,11 @@ create_temp_tunnel() {
 
     rm -f "$TEMP_LOG"
 
-    # 关键修复：强制不加载任何配置
+    # 强制不加载任何配置
     nohup $BIN tunnel --url http://localhost:8080 --no-autoupdate --config /dev/null \
         > "$TEMP_LOG" 2>&1 &
 
-    sleep 2
+    sleep 1.5
 
     if ! pgrep -f "cloudflared tunnel --url" >/dev/null; then
         echo -e "${RED}临时隧道启动失败！${NC}"
@@ -71,7 +90,7 @@ create_temp_tunnel() {
     for i in {1..20}; do
         URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" "$TEMP_LOG" | head -n 1)
         [[ -n "$URL" ]] && break
-        sleep 1
+        sleep 0.3
     done
 
     if [[ -z "$URL" ]]; then
@@ -121,7 +140,7 @@ delete_temp() {
 }
 
 # ============================
-# 手动诊断 + 自动修复（无 systemd）
+# 手动诊断 + 自动修复
 # ============================
 heal_temp_manual() {
     if [[ ! -f "$TEMP_SAVE" ]]; then
@@ -140,19 +159,16 @@ heal_temp_manual() {
     fi
 
     echo -e "${RED}临时隧道异常（HTTP $HTTP_CODE），自动修复中...${NC}"
-
     restart_temp
 }
 
 # ============================
-# 删除所有临时隧道文件（彻底清理）
+# 删除所有临时隧道文件
 # ============================
 delete_all_temp() {
     title "删除所有临时隧道文件（彻底清理）"
-
     stop_temp
     rm -rf /root/argo_temp
-
     echo -e "${GREEN}临时隧道所有文件已彻底删除${NC}"
 }
 
