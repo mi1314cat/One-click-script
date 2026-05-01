@@ -13,11 +13,38 @@ UPDATE_NODES="/root/argo_temp/update_nodes.sh"
 
 mkdir -p "$WORKDIR"
 
-echo "=== 安装 cloudflared ==="
+echo "=== 安装 cloudflared（自动识别架构） ==="
 
-if [[ ! -f "$BIN" ]]; then
-    wget -qO "$BIN" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+# ============================
+# 自动识别架构并下载 cloudflared
+# ============================
+install_cloudflared() {
+    ARCH=$(uname -m)
+
+    case "$ARCH" in
+        x86_64)
+            CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+            ;;
+        aarch64)
+            CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+            ;;
+        armv7l|armhf)
+            CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm"
+            ;;
+        *)
+            echo "❌ 不支持的架构: $ARCH"
+            exit 1
+            ;;
+    esac
+
+    echo "⬇️ 下载 cloudflared ($ARCH)..."
+    wget -qO "$BIN" "$CFD_URL" || { echo "❌ 下载失败"; exit 1; }
     chmod +x "$BIN"
+}
+
+# 如果不存在或损坏 → 自动下载
+if [[ ! -f "$BIN" ]] || ! "$BIN" --version >/dev/null 2>&1; then
+    install_cloudflared
 fi
 
 # ============================
@@ -34,7 +61,7 @@ After=network.target
 WorkingDirectory=$WORKDIR
 ExecStart=$BIN tunnel --url http://localhost:8080 --no-autoupdate --config /dev/null
 Restart=always
-RestartSec=3
+RestartSec=2
 StandardOutput=append:$TEMP_LOG
 StandardError=append:$TEMP_LOG
 
@@ -50,23 +77,24 @@ systemctl enable argo-temp
 # ============================
 echo "=== 启动临时隧道 ==="
 
+rm -f "$TEMP_LOG"
 systemctl restart argo-temp
-sleep 2
+sleep 1
 
 # ============================
-# 捕获临时域名
+# 捕获临时域名（更快更稳）
 # ============================
 echo "=== 捕获临时域名 ==="
 
-for i in {1..10}; do
+for i in {1..20}; do
     URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" "$TEMP_LOG" | head -n 1)
     [[ -n "$URL" ]] && break
-    sleep 0.5
+    sleep 0.3
 done
 
 if [[ -z "$URL" ]]; then
     echo "❌ 未捕获到临时隧道 URL"
-    tail -n 20 "$TEMP_LOG"
+    tail -n 30 "$TEMP_LOG"
     exit 1
 fi
 
@@ -110,7 +138,7 @@ fi
 if ! curl -s --max-time 3 "https://\$DOMAIN" >/dev/null; then
     echo "域名失效，重启临时隧道..."
     systemctl restart argo-temp
-    sleep 2
+    sleep 1
 fi
 
 # 捕获新域名
@@ -127,7 +155,6 @@ if [[ -n "\$NEW_URL" ]]; then
 
         echo "检测到新域名：\$NEW_DOMAIN"
 
-        # 自动更新节点配置
         [[ -f "\$UPDATE_NODES" ]] && bash "\$UPDATE_NODES"
     fi
 fi
