@@ -92,24 +92,20 @@ source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/head
 load_env $CATMIENV_FILE
 if [ -n "$mode" ]; then
     case "$mode" in
-        xray)
-            xpr=9970
-            ;;
-        mihomo)
-            xpr=9971
-            ;;
-        singbox)
-            xpr=9972
-            ;;
+        xray)    xpr=9970 ;;
+        mihomo)  xpr=9971 ;;
+        singbox) xpr=9972 ;;
         *)
             echo "mode 值无效: $mode"
             exit 1
             ;;
     esac
+elif [ -n "$gost_port" ]; then
+    xpr="$gost_port"
 fi
 
-echo "mode=$mode"
-echo "xpr=$xpr"
+[ -n "$mode" ] && echo "mode=$mode"
+[ -n "$xpr" ]  && echo "xpr=$xpr"
 
 create_file_tunnel
 
