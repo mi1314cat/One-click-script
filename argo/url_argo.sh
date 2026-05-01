@@ -90,21 +90,23 @@ CATMIENV_FILE="$DINSTALL_CATMI/catmi.env"
 source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/update_env.sh")
 source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/load_env.sh")
 load_env $CATMIENV_FILE
-case "$mode" in
-    xray)
-        xpr=9970
-        ;;
-    mihomo)
-        xpr=9971
-        ;;
-    singbox)
-        xpr=9972
-        ;;
-    *)
-        echo "mode 值无效: $mode"
-        exit 1
-        ;;
-esac
+if [ -n "$mode" ]; then
+    case "$mode" in
+        xray)
+            xpr=9970
+            ;;
+        mihomo)
+            xpr=9971
+            ;;
+        singbox)
+            xpr=9972
+            ;;
+        *)
+            echo "mode 值无效: $mode"
+            exit 1
+            ;;
+    esac
+fi
 
 echo "mode=$mode"
 echo "xpr=$xpr"
