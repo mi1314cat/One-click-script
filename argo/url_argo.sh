@@ -161,7 +161,7 @@ if [ -n "$mode" ]; then
             ;;
     esac
 elif [ -n "$$nginx_port" ]; then
-    xpr="$$nginx_port"
+    xpr="$nginx_port"
 else
     xpr=8080
 fi
