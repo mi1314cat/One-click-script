@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
+# ============================
+# UI & 颜色
+# ============================
 GREEN="\033[32m"
 RED="\033[31m"
 YELLOW="\033[33m"
@@ -10,7 +13,9 @@ NC="\033[0m"
 line(){ echo -e "${BLUE}----------------------------------------${NC}"; }
 title(){ echo -e "${GREEN}$1${NC}"; line; }
 
-
+# ============================
+# 基础路径
+# ============================
 WORKDIR="/root/argo_file"
 BIN="$WORKDIR/cloudflared"
 CF_DIR="/root/.cloudflared"
@@ -21,9 +26,9 @@ mkdir -p "$WORKDIR" "$CF_DIR"
 
 err(){ echo "[ERR] $1" >&2; }
 
-# ============================================================
+# ============================
 # 自动根据 CPU 架构下载 cloudflared
-# ============================================================
+# ============================
 check_cloudflared(){
     if [[ ! -f "$BIN" ]]; then
         ARCH=$(uname -m)
@@ -55,9 +60,19 @@ check_cloudflared(){
     fi
 }
 
-# ============================================================
-# 创建 File Mode 隧道（最终稳定版）
-# ============================================================
+# ============================
+# 从 JSON 文件名解析 Tunnel ID（100% 稳定）
+# ============================
+get_latest_tid(){
+    local latest_json
+    latest_json=$(ls -t "$CF_DIR"/*.json 2>/dev/null | head -n 1 || true)
+    [[ -z "$latest_json" ]] && return 1
+    basename "$latest_json" .json
+}
+
+# ============================
+# 创建 File Mode 隧道
+# ============================
 create_file_tunnel(){
     check_cloudflared
     title "创建文件模式固定隧道"
@@ -71,7 +86,7 @@ create_file_tunnel(){
         }
     fi
 
-    # 2. 创建隧道（不解析 OUTPUT）
+    # 2. 创建隧道
     TUNNEL_NAME=$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)
     echo "Tunnel 名称：$TUNNEL_NAME"
 
@@ -80,10 +95,8 @@ create_file_tunnel(){
         return
     fi
 
-    # 3. 从 JSON 文件名解析 TID（唯一正确方法）
-    TID=$(ls -t "$CF_DIR"/*.json 2>/dev/null | head -n 1)
-    TID=$(basename "$TID" .json)
-
+    # 3. 从 JSON 文件名解析 TID
+    TID=$(get_latest_tid)
     [[ -z "$TID" ]] && {
         echo -e "${RED}无法从 JSON 文件名解析 Tunnel ID${NC}"
         return
@@ -98,7 +111,7 @@ create_file_tunnel(){
 
     DOMAIN="$TUNNEL_NAME.$ROOT_DOMAIN"
 
-    # 5. 写入 config.yml（永远正确）
+    # 5. 写入 config.yml
 cat > "$CF_DIR/config.yml" <<EOF
 tunnel: $TID
 credentials-file: $CF_DIR/$TID.json
@@ -124,10 +137,9 @@ EOF
     echo
 }
 
-
-# ============================================================
+# ============================
 # 加载 catmi 环境变量
-# ============================================================
+# ============================
 DINSTALL_CATMI="/root/catmi"
 CATMIENV_FILE="$DINSTALL_CATMI/catmi.env"
 
@@ -135,9 +147,9 @@ source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/head
 source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/load_env.sh")
 load_env "$CATMIENV_FILE"
 
-# ============================================================
+# ============================
 # 端口选择逻辑
-# ============================================================
+# ============================
 if [ -n "$mode" ]; then
     case "$mode" in
         xray)    xpr=9970 ;;
@@ -157,7 +169,7 @@ fi
 echo "mode=$mode"
 echo "xpr=$xpr"
 
-# ============================================================
+# ============================
 # 执行创建隧道
-# ============================================================
+# ============================
 create_file_tunnel
