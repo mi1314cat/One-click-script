@@ -153,6 +153,8 @@ EOF
     echo "🎉 隧道创建成功！请到 Cloudflare DNS 添加："
     echo "$DOMAIN  CNAME  $TID.cfargotunnel.com"
     echo
+update_env "$CATMIENV_FILE" uargo_domain "$DOMAIN"
+    
 }
 
 # ============================
