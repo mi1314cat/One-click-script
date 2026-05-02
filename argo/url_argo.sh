@@ -124,7 +124,25 @@ EOF
 
     echo "📄 已生成配置文件：$CF_DIR/config.yml"
 
-    # 6. systemd
+    # 6. 生成 systemd 服务
+cat > /etc/systemd/system/argo-file.service <<EOF
+[Unit]
+Description=Argo Tunnel File Mode
+After=network.target
+
+[Service]
+WorkingDirectory=$WORKDIR
+ExecStart=$BIN tunnel --config $CF_DIR/config.yml run
+Restart=always
+RestartSec=5
+StandardOutput=append:$LOG_FILE
+StandardError=append:$LOG_FILE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # 7. 启动服务
     systemctl daemon-reload
     systemctl enable argo-file >/dev/null 2>&1
     systemctl restart argo-file
@@ -148,7 +166,7 @@ source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/head
 load_env "$CATMIENV_FILE"
 
 # ============================
-# 端口选择逻辑
+# 端口选择逻辑（修复版）
 # ============================
 if [ -n "$mode" ]; then
     case "$mode" in
@@ -156,8 +174,8 @@ if [ -n "$mode" ]; then
         mihomo)  xpr=9971 ;;
         singbox) xpr=9972 ;;
         *)
-            echo "mode 值无效: $mode"
-            exit 1
+            echo "⚠️ mode 值无效：$mode，已使用默认端口 8080"
+            xpr=8080
             ;;
     esac
 elif [ -n "$nginx_port" ] && echo "$nginx_port" | grep -qE '^[0-9]+$'; then
@@ -165,6 +183,9 @@ elif [ -n "$nginx_port" ] && echo "$nginx_port" | grep -qE '^[0-9]+$'; then
 else
     xpr=8080
 fi
+
+echo "mode=$mode"
+echo "xpr=$xpr"
 
 # ============================
 # 执行创建隧道
