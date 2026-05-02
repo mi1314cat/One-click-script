@@ -12,7 +12,7 @@ mkdir -p "$WORKDIR" "$CF_DIR"
 err(){ echo "[ERR] $1" >&2; }
 
 # ============================================================
-# 自动根据 CPU 架构下载正确的 cloudflared
+# 自动根据 CPU 架构下载 cloudflared
 # ============================================================
 check_cloudflared(){
     if [[ ! -f "$BIN" ]]; then
@@ -45,34 +45,41 @@ check_cloudflared(){
     fi
 }
 
+# ============================================================
+# 创建 File Mode 隧道（最终稳定版）
+# ============================================================
 create_file_tunnel(){
     check_cloudflared
 
+    # 1. login（仅首次）
     if [[ ! -f "$CF_DIR/cert.pem" ]]; then
+        echo "🔐 正在执行 cloudflared login..."
         $BIN login || { err "cloudflared login 失败"; exit 1; }
     fi
 
+    # 2. 创建隧道
     TUNNEL_NAME=$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)
-    $BIN tunnel create "$TUNNEL_NAME" >/tmp/cfd.log 2>&1 || {
-    cat /tmp/cfd.log
-    err "隧道创建失败"
-    exit 1
-}
+    echo "🚀 正在创建隧道：$TUNNEL_NAME"
 
-# 从生成的 json 文件读取 UUID
-TID=$(find "$CF_DIR" -maxdepth 1 -name "*.json" | sed 's#.*/##' | sed 's/.json//' | tail -n1)
+    $BIN tunnel create "$TUNNEL_NAME" >/dev/null 2>&1 || {
+        err "隧道创建失败"
+        exit 1
+    }
 
-[[ -z "$TID" ]] && {
-    err "无法获取 Tunnel ID"
-    exit 1
-}
+    # 3. 从 JSON 文件名解析 Tunnel ID（100% 稳定）
+    TID=$(ls -t "$CF_DIR" | grep -oE "[0-9a-fA-F-]{36}" | head -n 1)
+    [[ -z "$TID" ]] && { err "无法从 JSON 文件名解析 Tunnel ID"; exit 1; }
 
+    echo "🎯 解析到 Tunnel ID：$TID"
+
+    # 4. 用户输入
     read -p "根域名: " ROOT_DOMAIN
-    read -p "本地端口(默认$xpr): " PORT
+    read -p "本地端口(默认 $xpr): " PORT
     PORT=${PORT:-$xpr}
 
     DOMAIN="$TUNNEL_NAME.$ROOT_DOMAIN"
 
+    # 5. 生成 config.yml
 cat > "$CF_DIR/config.yml" <<EOF
 tunnel: $TID
 credentials-file: $CF_DIR/$TID.json
@@ -83,6 +90,9 @@ ingress:
   - service: http_status:404
 EOF
 
+    echo "📄 已生成配置文件：$CF_DIR/config.yml"
+
+    # 6. systemd 服务
 cat > /etc/systemd/system/argo-file.service <<EOF
 [Unit]
 Description=Argo Tunnel File Mode
@@ -100,18 +110,26 @@ StandardError=append:$LOG_FILE
 WantedBy=multi-user.target
 EOF
 
-echo "$TID $DOMAIN $PORT" > "$FILE_INFO"
+    systemctl daemon-reload
+    systemctl enable argo-file >/dev/null 2>&1
+    systemctl restart argo-file
 
-systemctl daemon-reload
-systemctl enable argo-file >/dev/null 2>&1
-systemctl restart argo-file
+    # 7. 写入 file_tunnel.txt
+    echo "$TID $DOMAIN $PORT" > "$FILE_INFO"
 
-echo
-echo "请到 Cloudflare DNS 添加："
-echo "$DOMAIN  CNAME  $TID.cfargotunnel.com"
-echo
+    # 8. 写入 catmi.env
+    update_env "$CATMIENV_FILE" uargo_domain "$DOMAIN"
+
+    # 9. 提示用户添加 DNS
+    echo
+    echo "🎉 隧道创建成功！请到 Cloudflare DNS 添加："
+    echo "$DOMAIN  CNAME  $TID.cfargotunnel.com"
+    echo
 }
 
+# ============================================================
+# 加载 catmi 环境变量
+# ============================================================
 DINSTALL_CATMI="/root/catmi"
 CATMIENV_FILE="$DINSTALL_CATMI/catmi.env"
 
@@ -119,6 +137,9 @@ source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/head
 source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/load_env.sh")
 load_env "$CATMIENV_FILE"
 
+# ============================================================
+# 端口选择逻辑
+# ============================================================
 if [ -n "$mode" ]; then
     case "$mode" in
         xray)    xpr=9970 ;;
@@ -131,12 +152,14 @@ if [ -n "$mode" ]; then
     esac
 elif [ -n "$gost_port" ]; then
     xpr="$gost_port"
+else
+    xpr=8080
 fi
 
-[ -n "$mode" ] && echo "mode=$mode"
-[ -n "$xpr" ]  && echo "xpr=$xpr"
+echo "mode=$mode"
+echo "xpr=$xpr"
 
+# ============================================================
+# 执行创建隧道
+# ============================================================
 create_file_tunnel
-
-uargo_domain=$(awk '{print $2}' "$FILE_INFO")
-update_env "$CATMIENV_FILE" uargo_domain "$uargo_domain"
