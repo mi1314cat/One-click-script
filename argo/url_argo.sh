@@ -53,10 +53,19 @@ create_file_tunnel(){
     fi
 
     TUNNEL_NAME=$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)
-    OUTPUT=$($BIN tunnel create "$TUNNEL_NAME" 2>&1) || { err "隧道创建失败"; exit 1; }
+    $BIN tunnel create "$TUNNEL_NAME" >/tmp/cfd.log 2>&1 || {
+    cat /tmp/cfd.log
+    err "隧道创建失败"
+    exit 1
+}
 
-    TID=$(echo "$OUTPUT" | grep -oE "[a-f0-9-]{36}" | head -n 1)
-    [[ -z "$TID" ]] && { err "无法解析 Tunnel ID"; exit 1; }
+# 从生成的 json 文件读取 UUID
+TID=$(find "$CF_DIR" -maxdepth 1 -name "*.json" | sed 's#.*/##' | sed 's/.json//' | tail -n1)
+
+[[ -z "$TID" ]] && {
+    err "无法获取 Tunnel ID"
+    exit 1
+}
 
     read -p "根域名: " ROOT_DOMAIN
     read -p "本地端口(默认$xpr): " PORT
