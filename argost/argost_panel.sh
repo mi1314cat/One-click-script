@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
+
+# 管理面板脚本（增强版）
+# 功能：显示状态、重启、查看日志、彻底删除 gost 相关文件与 systemd 单元
+# 说明：删除操作会先备份到 /root/catmi/gost_backup_YYYYMMDD_HHMMSS
 
 BASE_DIR="/root/catmi/gost"
 ENV_FILE="$BASE_DIR/gost.env"
+GOST_BIN="$BASE_DIR/gost"
+LOG_DIR="/var/log/gost_manage"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+BACKUP_DIR="/root/catmi/gost_backup_${TIMESTAMP}"
 
 GREEN="\033[32m"
 RED="\033[31m"
 YELLOW="\033[33m"
 NC="\033[0m"
+
+mkdir -p "$LOG_DIR"
+touch "$LOG_DIR/manage.log"
+log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_DIR/manage.log"; }
+
+# 安全退出与清理
+cleanup() {
+    # 保留未来扩展
+    :
+}
+trap cleanup EXIT INT TERM
 
 # 读取 env
 load_env() {
@@ -17,39 +36,34 @@ load_env() {
     fi
 }
 
-# 检查服务是否存在
+# 更稳健的服务存在检测
 has_service() {
     local name="$1"
-    systemctl list-unit-files | grep -q "^${name}.service"
+    if systemctl list-unit-files --type=service --no-legend | awk '{print $1}' | grep -qx "${name}.service"; then
+        return 0
+    fi
+    # 也检查 /etc/systemd/system 和 /lib/systemd/system
+    if [ -f "/etc/systemd/system/${name}.service" ] || [ -f "/lib/systemd/system/${name}.service" ] || [ -f "/usr/lib/systemd/system/${name}.service" ]; then
+        return 0
+    fi
+    return 1
 }
 
-# 检查服务是否 active
+# 服务是否 active
 is_active() {
     local name="$1"
-    systemctl is-active --quiet "$name"
+    systemctl is-active --quiet "$name" 2>/dev/null
 }
 
-# 检测角色
-detect_role() {
-    ROLE=""
-    SERVER=0
-    CLIENT=0
-
-    if has_service "gost-server"; then
-        SERVER=1
-    fi
-    if has_service "gost-socks5" || has_service "gost-rtcp"; then
-        CLIENT=1
-    fi
-
-    if [ "$SERVER" -eq 1 ] && [ "$CLIENT" -eq 1 ]; then
-        ROLE="双端（服务端 + 客户端）"
-    elif [ "$SERVER" -eq 1 ]; then
-        ROLE="仅服务端"
-    elif [ "$CLIENT" -eq 1 ]; then
-        ROLE="仅客户端"
+# 查找占用端口的进程
+who_listen_port() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnp "( sport = :$port )" 2>/dev/null || true
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -iTCP -sTCP:LISTEN -P -n | grep ":$port" || true
     else
-        ROLE="未检测到任何 gost 服务"
+        netstat -ltnp 2>/dev/null | grep ":$port" || true
     fi
 }
 
@@ -64,7 +78,7 @@ show_server_status() {
     load_env
 
     echo -e "${GREEN}服务：gost-server.service${NC}"
-    systemctl --no-pager -l status gost-server.service | sed -n '1,8p'
+    systemctl --no-pager -l status gost-server.service | sed -n '1,12p' || true
 
     echo
     echo -e "${GREEN}配置：${NC}"
@@ -74,18 +88,17 @@ show_server_status() {
 
     echo
     echo -e "${GREEN}监听端口：${NC}"
-    ss -tulnp | grep gost || echo "  未找到 gost 监听（可能未运行或被占用）"
+    ss -tulnp | grep -E 'gost|gost-bin' || echo "  未找到 gost 监听（可能未运行或被占用）"
 }
 
 # 显示客户端状态
 show_client_status() {
     echo -e "${YELLOW}====== 客户端状态 ======${NC}"
-
     load_env
 
     if has_service "gost-socks5"; then
         echo -e "${GREEN}服务：gost-socks5.service${NC}"
-        systemctl --no-pager -l status gost-socks5.service | sed -n '1,8p'
+        systemctl --no-pager -l status gost-socks5.service | sed -n '1,10p' || true
     else
         echo -e "${RED}未检测到 gost-socks5.service${NC}"
     fi
@@ -94,7 +107,7 @@ show_client_status() {
 
     if has_service "gost-rtcp"; then
         echo -e "${GREEN}服务：gost-rtcp.service${NC}"
-        systemctl --no-pager -l status gost-rtcp.service | sed -n '1,8p'
+        systemctl --no-pager -l status gost-rtcp.service | sed -n '1,10p' || true
     else
         echo -e "${RED}未检测到 gost-rtcp.service${NC}"
     fi
@@ -103,13 +116,12 @@ show_client_status() {
     echo -e "${GREEN}配置：${NC}"
     echo "  uargo_domain = ${uargo_domain:-<未定义>}"
     echo "  ws_path      = ${ws_path:-<未定义>}"
-    echo "  socks5_port  = ${socks5_port:-<你在安装时输入的端口>}"
-    echo "  rtcp_port    = ${rtcp_port:-<你在安装时输入的端口>}"
-    echo "  映射关系：本地 SOCKS5 → 127.0.0.1:${socks5_port:-20000}"
-    echo "           RTCP 监听 → :${rtcp_port:-30000} → 远端 gost_port=${gost_port:-<服务端端口>}"
+    echo "  socks5_port  = ${socks5_port:-<未定义>}"
+    echo "  rtcp_port    = ${rtcp_port:-<未定义>}"
+
     echo
     echo -e "${GREEN}监听端口：${NC}"
-    ss -tulnp | grep gost || echo "  未找到 gost 监听（可能未运行）"
+    ss -tulnp | grep -E 'gost|gost-bin' || echo "  未找到 gost 监听（可能未运行）"
 }
 
 # 重启服务端
@@ -118,19 +130,28 @@ restart_server() {
         echo -e "${RED}未检测到 gost-server.service${NC}"
         return
     fi
+    log "重启 gost-server.service"
     systemctl restart gost-server.service
-    echo -e "${GREEN}已重启 gost-server.service${NC}"
+    systemctl status gost-server.service --no-pager -l | sed -n '1,12p'
 }
 
 # 重启客户端
 restart_client() {
+    local any=0
     if has_service "gost-socks5"; then
+        log "重启 gost-socks5.service"
         systemctl restart gost-socks5.service
-        echo -e "${GREEN}已重启 gost-socks5.service${NC}"
+        systemctl status gost-socks5.service --no-pager -l | sed -n '1,8p'
+        any=1
     fi
     if has_service "gost-rtcp"; then
+        log "重启 gost-rtcp.service"
         systemctl restart gost-rtcp.service
-        echo -e "${GREEN}已重启 gost-rtcp.service${NC}"
+        systemctl status gost-rtcp.service --no-pager -l | sed -n '1,8p'
+        any=1
+    fi
+    if [ "$any" -eq 0 ]; then
+        echo -e "${RED}未检测到客户端服务可重启${NC}"
     fi
 }
 
@@ -143,17 +164,17 @@ show_logs() {
     case "$c" in
         1)
             if has_service "gost-server"; then
-                journalctl -u gost-server.service -n 50 --no-pager
+                journalctl -u gost-server.service -n 200 --no-pager
             else
                 echo -e "${RED}未检测到 gost-server.service${NC}"
             fi
             ;;
         2)
             if has_service "gost-socks5"; then
-                journalctl -u gost-socks5.service -n 30 --no-pager
+                journalctl -u gost-socks5.service -n 100 --no-pager
             fi
             if has_service "gost-rtcp"; then
-                journalctl -u gost-rtcp.service -n 30 --no-pager
+                journalctl -u gost-rtcp.service -n 100 --no-pager
             fi
             if ! has_service "gost-socks5" && ! has_service "gost-rtcp"; then
                 echo -e "${RED}未检测到客户端服务${NC}"
@@ -165,39 +186,127 @@ show_logs() {
     esac
 }
 
-# 删除所有 gost 相关
+# 列出所有可能的 gost systemd 单元名
+gost_unit_candidates() {
+    printf "%s\n" "gost-server" "gost-socks5" "gost-rtcp" "gost-client" "gost" | sort -u
+}
+
+# 彻底删除所有 gost 相关文件与服务
 delete_all() {
-    echo -e "${RED}⚠ 警告：这将删除所有 gost 文件和 systemd 服务！${NC}"
-    read -rp "确认删除？输入 YES 确认: " ans
-    if [ "$ans" != "YES" ]; then
+    echo -e "${RED}⚠ 警告：这将停止并删除所有 gost 相关服务与文件${NC}"
+    echo "脚本会先备份现有文件到： $BACKUP_DIR"
+    read -rp "若确认请输入 DELETE ALL 完整字符串以继续: " ans
+    if [ "$ans" != "DELETE ALL" ]; then
         echo "已取消"
         return
     fi
 
-    # 停止服务
-    systemctl stop gost-server.service 2>/dev/null || true
-    systemctl stop gost-socks5.service 2>/dev/null || true
-    systemctl stop gost-rtcp.service 2>/dev/null || true
+    log "开始备份到 $BACKUP_DIR"
+    mkdir -p "$BACKUP_DIR"
 
-    # 删除服务文件
-    rm -f /etc/systemd/system/gost-server.service
-    rm -f /etc/systemd/system/gost-socks5.service
-    rm -f /etc/systemd/system/gost-rtcp.service
+    # 备份 env 与二进制与 systemd 单元
+    if [ -d "$BASE_DIR" ]; then
+        cp -a "$BASE_DIR" "$BACKUP_DIR/" || true
+    fi
+    for u in $(gost_unit_candidates); do
+        for p in "/etc/systemd/system/${u}.service" "/lib/systemd/system/${u}.service" "/usr/lib/systemd/system/${u}.service"; do
+            if [ -f "$p" ]; then
+                mkdir -p "$BACKUP_DIR/systemd"
+                cp -a "$p" "$BACKUP_DIR/systemd/" || true
+            fi
+        done
+    done
 
-    systemctl daemon-reload
+    # 备份 nginx 配置中可能的 gost 相关文件（谨慎）
+    if [ -f /etc/nginx/sites-enabled/default ]; then
+        grep -E "gost|ws/relay|proxy_pass.*127.0.0.1" /etc/nginx/sites-enabled/default >/dev/null 2>&1 && cp -a /etc/nginx/sites-enabled/default "$BACKUP_DIR/nginx_default" || true
+    fi
 
-    # 删除目录
-    rm -rf "$BASE_DIR"
+    log "停止并禁用相关 systemd 单元"
+    for u in $(gost_unit_candidates); do
+        if has_service "$u"; then
+            systemctl stop "${u}.service" 2>/dev/null || true
+            systemctl disable "${u}.service" 2>/dev/null || true
+            systemctl mask "${u}.service" 2>/dev/null || true
+            systemctl reset-failed "${u}.service" 2>/dev/null || true
+            # 删除 unit 文件
+            rm -f "/etc/systemd/system/${u}.service" "/lib/systemd/system/${u}.service" "/usr/lib/systemd/system/${u}.service" || true
+        fi
+    done
 
-    echo -e "${GREEN}已删除所有 gost 文件和 systemd 服务${NC}"
+    # 重新加载 systemd
+    systemctl daemon-reload || true
+
+    # 删除二进制与 env
+    if [ -f "$GOST_BIN" ]; then
+        log "删除二进制 $GOST_BIN"
+        rm -f "$GOST_BIN" || true
+    fi
+    if [ -f "$ENV_FILE" ]; then
+        log "删除 env 文件 $ENV_FILE"
+        rm -f "$ENV_FILE" || true
+    fi
+
+    # 删除 BASE_DIR（谨慎）
+    if [ -d "$BASE_DIR" ]; then
+        log "删除目录 $BASE_DIR"
+        rm -rf "$BASE_DIR" || true
+    fi
+
+    # 清理 nginx 配置中可能的 gost 残留（仅在备份后执行）
+    if [ -f /etc/nginx/sites-enabled/default ]; then
+        if grep -E "gost|ws/relay|proxy_pass.*127.0.0.1" /etc/nginx/sites-enabled/default >/dev/null 2>&1; then
+            log "检测到 nginx default 中可能的 gost 配置，已备份，现从文件中移除相关 location 段"
+            # 备份已在前面完成，下面尝试用 awk 删除包含 ws_path 或 proxy_pass 127.0.0.1 的 location 段
+            awk '
+            BEGIN{skip=0}
+            /location .*ws\/relay/ {skip=1}
+            /location .*{/{if(skip==0) print; next}
+            /}/ {if(skip==1){skip=0; next} }
+            {if(skip==0) print}
+            ' /etc/nginx/sites-enabled/default > /etc/nginx/sites-enabled/default.tmp || true
+            mv /etc/nginx/sites-enabled/default.tmp /etc/nginx/sites-enabled/default || true
+            systemctl restart nginx >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # 最后清理 systemd 状态并解除 mask
+    for u in $(gost_unit_candidates); do
+        systemctl unmask "${u}.service" 2>/dev/null || true
+        systemctl reset-failed "${u}.service" 2>/dev/null || true
+    done
+
+    log "删除完成，备份保存在 $BACKUP_DIR"
+    echo -e "${GREEN}已删除所有 gost 文件和 systemd 服务，备份保存在 $BACKUP_DIR${NC}"
+}
+
+# 查看端口监听情况
+show_ports() {
+    echo -e "${YELLOW}====== 端口监听 ======${NC}"
+    ss -tulnp | sed -n '1,200p'
+    echo
+    echo -e "${YELLOW}检查常见端口占用（20000,30000）${NC}"
+    for p in 20000 30000; do
+        echo "端口 $p 占用信息："
+        who_listen_port "$p" || echo "  未被占用"
+    done
 }
 
 # 主菜单
 main_menu() {
     while true; do
         clear
-        detect_role
-        echo -e "${YELLOW}====== Gost 控制面板（脚本版）======${NC}"
+        # 角色检测
+        ROLE="未检测到任何 gost 服务"
+        if has_service "gost-server" && ( has_service "gost-socks5" || has_service "gost-rtcp" ); then
+            ROLE="双端（服务端 + 客户端）"
+        elif has_service "gost-server"; then
+            ROLE="仅服务端"
+        elif has_service "gost-socks5" || has_service "gost-rtcp"; then
+            ROLE="仅客户端"
+        fi
+
+        echo -e "${YELLOW}====== Gost 控制面板（增强版） ======${NC}"
         echo -e "当前角色：${GREEN}$ROLE${NC}"
         echo
         echo "1) 查看服务端状态"
@@ -206,7 +315,7 @@ main_menu() {
         echo "4) 重启客户端 gost"
         echo "5) 查看日志"
         echo "6) 查看端口监听情况"
-        echo "7) 删除所有 gost 文件和服务"
+        echo "7) 彻底删除所有 gost 文件和服务（备份）"
         echo "0) 退出"
         echo
         read -rp "请选择: " opt
@@ -216,7 +325,7 @@ main_menu() {
             3) restart_server; read -rp "回车继续..." ;;
             4) restart_client; read -rp "回车继续..." ;;
             5) show_logs; read -rp "回车继续..." ;;
-            6) ss -tulnp | grep gost || echo "未找到 gost 监听"; read -rp "回车继续..." ;;
+            6) show_ports; read -rp "回车继续..." ;;
             7) delete_all; read -rp "回车继续..." ;;
             0) exit 0 ;;
             *) echo "无效选择"; sleep 1 ;;
