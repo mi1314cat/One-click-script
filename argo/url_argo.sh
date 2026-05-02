@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -e
 
+GREEN="\033[32m"
+RED="\033[31m"
+YELLOW="\033[33m"
+BLUE="\033[36m"
+NC="\033[0m"
+
+line(){ echo -e "${BLUE}----------------------------------------${NC}"; }
+title(){ echo -e "${GREEN}$1${NC}"; line; }
+
+
 WORKDIR="/root/argo_file"
 BIN="$WORKDIR/cloudflared"
 CF_DIR="/root/.cloudflared"
