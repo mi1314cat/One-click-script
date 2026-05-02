@@ -2,15 +2,11 @@
 set -euo pipefail
 
 # 管理面板脚本（增强版）
-# 功能：显示状态、重启、查看日志、彻底删除 gost 相关文件与 systemd 单元
-# 说明：删除操作会先备份到 /root/catmi/gost_backup_YYYYMMDD_HHMMSS
-
 BASE_DIR="/root/catmi/gost"
 ENV_FILE="$BASE_DIR/gost.env"
 GOST_BIN="$BASE_DIR/gost"
 LOG_DIR="/var/log/gost_manage"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-BACKUP_DIR="/root/catmi/gost_backup_${TIMESTAMP}"
 
 GREEN="\033[32m"
 RED="\033[31m"
@@ -21,12 +17,7 @@ mkdir -p "$LOG_DIR"
 touch "$LOG_DIR/manage.log"
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_DIR/manage.log"; }
 
-# 安全退出与清理
-cleanup() {
-    # 保留未来扩展
-    :
-}
-trap cleanup EXIT INT TERM
+trap 'exit 1' INT TERM
 
 # 读取 env
 load_env() {
@@ -42,17 +33,10 @@ has_service() {
     if systemctl list-unit-files --type=service --no-legend | awk '{print $1}' | grep -qx "${name}.service"; then
         return 0
     fi
-    # 也检查 /etc/systemd/system 和 /lib/systemd/system
     if [ -f "/etc/systemd/system/${name}.service" ] || [ -f "/lib/systemd/system/${name}.service" ] || [ -f "/usr/lib/systemd/system/${name}.service" ]; then
         return 0
     fi
     return 1
-}
-
-# 服务是否 active
-is_active() {
-    local name="$1"
-    systemctl is-active --quiet "$name" 2>/dev/null
 }
 
 # 查找占用端口的进程
@@ -177,7 +161,7 @@ show_logs() {
                 journalctl -u gost-rtcp.service -n 100 --no-pager
             fi
             if ! has_service "gost-socks5" && ! has_service "gost-rtcp"; then
-                echo -e "${RED}未检测到客户端服务${NC}"
+                echo -e "${RED}未检测到客户端服務${NC}"
             fi
             ;;
         *)
@@ -191,36 +175,20 @@ gost_unit_candidates() {
     printf "%s\n" "gost-server" "gost-socks5" "gost-rtcp" "gost-client" "gost" | sort -u
 }
 
-# 彻底删除所有 gost 相关文件与服务
+# 彻底删除所有 gost 相关文件与服务（不备份，确认 y/n 大小写不敏感）
 delete_all() {
-    echo -e "${RED}⚠ 警告：这将停止并删除所有 gost 相关服务与文件${NC}"
-    echo "脚本会先备份现有文件到： $BACKUP_DIR"
-    read -rp "若确认请输入 DELETE ALL 完整字符串以继续: " ans
-    if [ "$ans" != "DELETE ALL" ]; then
-        echo "已取消"
-        return
-    fi
-
-    log "开始备份到 $BACKUP_DIR"
-    mkdir -p "$BACKUP_DIR"
-
-    # 备份 env 与二进制与 systemd 单元
-    if [ -d "$BASE_DIR" ]; then
-        cp -a "$BASE_DIR" "$BACKUP_DIR/" || true
-    fi
-    for u in $(gost_unit_candidates); do
-        for p in "/etc/systemd/system/${u}.service" "/lib/systemd/system/${u}.service" "/usr/lib/systemd/system/${u}.service"; do
-            if [ -f "$p" ]; then
-                mkdir -p "$BACKUP_DIR/systemd"
-                cp -a "$p" "$BACKUP_DIR/systemd/" || true
-            fi
-        done
-    done
-
-    # 备份 nginx 配置中可能的 gost 相关文件（谨慎）
-    if [ -f /etc/nginx/sites-enabled/default ]; then
-        grep -E "gost|ws/relay|proxy_pass.*127.0.0.1" /etc/nginx/sites-enabled/default >/dev/null 2>&1 && cp -a /etc/nginx/sites-enabled/default "$BACKUP_DIR/nginx_default" || true
-    fi
+    echo -e "${RED}⚠ 警告：这将立即停止并删除所有 gost 相关服务与文件，且不做备份！${NC}"
+    read -rp "确认删除？(y/n): " ans
+    # 将输入转为小写再判断
+    case "${ans,,}" in
+        y|yes)
+            log "用户确认删除（无备份）"
+            ;;
+        *)
+            echo "已取消"
+            return
+            ;;
+    esac
 
     log "停止并禁用相关 systemd 单元"
     for u in $(gost_unit_candidates); do
@@ -229,12 +197,10 @@ delete_all() {
             systemctl disable "${u}.service" 2>/dev/null || true
             systemctl mask "${u}.service" 2>/dev/null || true
             systemctl reset-failed "${u}.service" 2>/dev/null || true
-            # 删除 unit 文件
             rm -f "/etc/systemd/system/${u}.service" "/lib/systemd/system/${u}.service" "/usr/lib/systemd/system/${u}.service" || true
         fi
     done
 
-    # 重新加载 systemd
     systemctl daemon-reload || true
 
     # 删除二进制与 env
@@ -253,31 +219,30 @@ delete_all() {
         rm -rf "$BASE_DIR" || true
     fi
 
-    # 清理 nginx 配置中可能的 gost 残留（仅在备份后执行）
+    # 清理 nginx 配置中可能的 gost 残留（仅在检测到相关内容时）
     if [ -f /etc/nginx/sites-enabled/default ]; then
         if grep -E "gost|ws/relay|proxy_pass.*127.0.0.1" /etc/nginx/sites-enabled/default >/dev/null 2>&1; then
-            log "检测到 nginx default 中可能的 gost 配置，已备份，现从文件中移除相关 location 段"
-            # 备份已在前面完成，下面尝试用 awk 删除包含 ws_path 或 proxy_pass 127.0.0.1 的 location 段
+            log "检测到 nginx default 中可能的 gost 配置，尝试移除相关 location 段"
             awk '
             BEGIN{skip=0}
-            /location .*ws\/relay/ {skip=1}
-            /location .*{/{if(skip==0) print; next}
-            /}/ {if(skip==1){skip=0; next} }
-            {if(skip==0) print}
+            /location .*ws\/relay/ {skip=1; next}
+            /location .*{/{ if(skip==0) print; next }
+            /}/ { if(skip==1){ skip=0; next } }
+            { if(skip==0) print }
             ' /etc/nginx/sites-enabled/default > /etc/nginx/sites-enabled/default.tmp || true
             mv /etc/nginx/sites-enabled/default.tmp /etc/nginx/sites-enabled/default || true
             systemctl restart nginx >/dev/null 2>&1 || true
         fi
     fi
 
-    # 最后清理 systemd 状态并解除 mask
+    # 解除 mask 并重置失败状态
     for u in $(gost_unit_candidates); do
         systemctl unmask "${u}.service" 2>/dev/null || true
         systemctl reset-failed "${u}.service" 2>/dev/null || true
     done
 
-    log "删除完成，备份保存在 $BACKUP_DIR"
-    echo -e "${GREEN}已删除所有 gost 文件和 systemd 服务，备份保存在 $BACKUP_DIR${NC}"
+    log "删除完成（无备份）"
+    echo -e "${GREEN}已删除所有 gost 文件和 systemd 服务（无备份）${NC}"
 }
 
 # 查看端口监听情况
@@ -296,7 +261,6 @@ show_ports() {
 main_menu() {
     while true; do
         clear
-        # 角色检测
         ROLE="未检测到任何 gost 服务"
         if has_service "gost-server" && ( has_service "gost-socks5" || has_service "gost-rtcp" ); then
             ROLE="双端（服务端 + 客户端）"
@@ -315,7 +279,7 @@ main_menu() {
         echo "4) 重启客户端 gost"
         echo "5) 查看日志"
         echo "6) 查看端口监听情况"
-        echo "7) 彻底删除所有 gost 文件和服务（备份）"
+        echo "7) 彻底删除所有 gost 文件和服务（无备份，确认 y/n）"
         echo "0) 退出"
         echo
         read -rp "请选择: " opt
