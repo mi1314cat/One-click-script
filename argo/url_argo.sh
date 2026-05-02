@@ -160,15 +160,11 @@ if [ -n "$mode" ]; then
             exit 1
             ;;
     esac
-elif [ -n "$nginx_port" ]; then
+elif [ -n "$nginx_port" ] && echo "$nginx_port" | grep -qE '^[0-9]+$'; then
     xpr="$nginx_port"
 else
     xpr=8080
 fi
-
-
-echo "mode=$mode"
-echo "xpr=$xpr"
 
 # ============================
 # 执行创建隧道
