@@ -180,7 +180,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$GOST_BIN -D -L rtcp://:$rtcp_port/127.0.0.1:$XRAY_PORT -F "relay+ws://$uargo_domain:80?path=/$ws_path&host=$uargo_domain"
+ExecStart=$GOST_BIN -D -L rtcp://127.0.0.1:$rtcp_port/127.0.0.1:$XRAY_PORT -F "relay+ws://$uargo_domain:80?path=/$ws_path&host=$uargo_domain"
 Restart=always
 RestartSec=3
 
