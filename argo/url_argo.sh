@@ -50,27 +50,36 @@ check_cloudflared(){
 # ============================================================
 create_file_tunnel(){
     check_cloudflared
+    title "创建文件模式固定隧道"
 
-    # 1. login（仅首次）
+    # 1. login
     if [[ ! -f "$CF_DIR/cert.pem" ]]; then
-        echo "🔐 正在执行 cloudflared login..."
-        $BIN login || { err "cloudflared login 失败"; exit 1; }
+        echo -e "${YELLOW}未检测到 cert.pem，执行 cloudflared login...${NC}"
+        $BIN login || {
+            echo -e "${RED}cloudflared login 失败${NC}"
+            return
+        }
     fi
 
-    # 2. 创建隧道
+    # 2. 创建隧道（不解析 OUTPUT）
     TUNNEL_NAME=$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)
-    echo "🚀 正在创建隧道：$TUNNEL_NAME"
+    echo "Tunnel 名称：$TUNNEL_NAME"
 
-    $BIN tunnel create "$TUNNEL_NAME" >/dev/null 2>&1 || {
-        err "隧道创建失败"
-        exit 1
+    if ! $BIN tunnel create "$TUNNEL_NAME" >/dev/null 2>&1; then
+        echo -e "${RED}创建隧道失败${NC}"
+        return
+    fi
+
+    # 3. 从 JSON 文件名解析 TID（唯一正确方法）
+    TID=$(ls -t "$CF_DIR"/*.json 2>/dev/null | head -n 1)
+    TID=$(basename "$TID" .json)
+
+    [[ -z "$TID" ]] && {
+        echo -e "${RED}无法从 JSON 文件名解析 Tunnel ID${NC}"
+        return
     }
 
-    # 3. 从 JSON 文件名解析 Tunnel ID（100% 稳定）
-    TID=$(ls -t "$CF_DIR" | grep -oE "[0-9a-fA-F-]{36}" | head -n 1)
-    [[ -z "$TID" ]] && { err "无法从 JSON 文件名解析 Tunnel ID"; exit 1; }
-
-    echo "🎯 解析到 Tunnel ID：$TID"
+    echo -e "🎯 解析到 Tunnel ID：${GREEN}$TID${NC}"
 
     # 4. 用户输入
     read -p "根域名: " ROOT_DOMAIN
@@ -79,7 +88,7 @@ create_file_tunnel(){
 
     DOMAIN="$TUNNEL_NAME.$ROOT_DOMAIN"
 
-    # 5. 生成 config.yml
+    # 5. 写入 config.yml（永远正确）
 cat > "$CF_DIR/config.yml" <<EOF
 tunnel: $TID
 credentials-file: $CF_DIR/$TID.json
@@ -92,40 +101,19 @@ EOF
 
     echo "📄 已生成配置文件：$CF_DIR/config.yml"
 
-    # 6. systemd 服务
-cat > /etc/systemd/system/argo-file.service <<EOF
-[Unit]
-Description=Argo Tunnel File Mode
-After=network.target
-
-[Service]
-WorkingDirectory=$WORKDIR
-ExecStart=$BIN tunnel --config $CF_DIR/config.yml run
-Restart=always
-RestartSec=5
-StandardOutput=append:$LOG_FILE
-StandardError=append:$LOG_FILE
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
+    # 6. systemd
     systemctl daemon-reload
     systemctl enable argo-file >/dev/null 2>&1
     systemctl restart argo-file
 
-    # 7. 写入 file_tunnel.txt
     echo "$TID $DOMAIN $PORT" > "$FILE_INFO"
 
-    # 8. 写入 catmi.env
-    update_env "$CATMIENV_FILE" uargo_domain "$DOMAIN"
-
-    # 9. 提示用户添加 DNS
     echo
     echo "🎉 隧道创建成功！请到 Cloudflare DNS 添加："
     echo "$DOMAIN  CNAME  $TID.cfargotunnel.com"
     echo
 }
+
 
 # ============================================================
 # 加载 catmi 环境变量
