@@ -121,6 +121,9 @@ ws_path=$ws_path
 gost_port=$gost_port
 EOF
 
+# ============================
+# 正确的服务端（relay+ws）
+# ============================
 cat > /etc/systemd/system/gost-server.service <<EOF
 [Unit]
 Description=Gost Server (for Argo)
@@ -128,7 +131,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$GOST_BIN -D -L tcp://127.0.0.1:$gost_port
+ExecStart=$GOST_BIN -D -L relay+ws://127.0.0.1:$gost_port?path=/$ws_path&bind=true
 Restart=always
 RestartSec=3
 
@@ -140,8 +143,11 @@ EOF
     systemctl enable --now gost-server.service
 
     echo "=============================="
-    echo "🎉 服务端安装完成（本地监听 127.0.0.1:$gost_port）"
+    echo "🎉 服务端安装完成（relay+ws 服务端已启动）"
     echo "=============================="
+    echo "本地监听：127.0.0.1:$gost_port"
+    echo "Argo 域名：$uargo_domain"
+    echo "WS 路径：/$ws_path"
 }
 
 # ============================================================
