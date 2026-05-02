@@ -71,24 +71,48 @@ check_cloudflared(){
     fi
 }
 
+# ============================
+# 从 JSON 文件名中获取最新 Tunnel ID（核心稳定逻辑）
+# ============================
+get_latest_tid_from_json(){
+    local latest_json
+    latest_json=$(ls -t "$CF_DIR"/*.json 2>/dev/null | head -n 1 || true)
+    [[ -z "$latest_json" ]] && return 1
+    basename "$latest_json" .json
+}
+
 create_file_tunnel(){
     check_cloudflared
     title "创建文件模式固定隧道"
 
+    # 1. login
     if [[ ! -f "$CF_DIR/cert.pem" ]]; then
         echo -e "${YELLOW}未检测到 cert.pem，执行 cloudflared login...${NC}"
-        $BIN login
+        $BIN login || {
+            echo -e "${RED}cloudflared login 失败${NC}"
+            return
+        }
     fi
 
+    # 2. 创建隧道
     TUNNEL_NAME=$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)
     echo "Tunnel 名称：$TUNNEL_NAME"
 
-    OUTPUT=$($BIN tunnel create "$TUNNEL_NAME" 2>&1)
-    echo "$OUTPUT"
+    if ! $BIN tunnel create "$TUNNEL_NAME" >/dev/null 2>&1; then
+        echo -e "${RED}创建隧道失败${NC}"
+        return
+    fi
 
-    TID=$(echo "$OUTPUT" | grep -oE "[a-f0-9-]{36}" | head -n 1)
-    [[ -z "$TID" ]] && { echo -e "${RED}创建隧道失败${NC}"; return; }
+    # 3. 从 JSON 文件名解析 TID（稳定方案）
+    TID=$(get_latest_tid_from_json)
+    if [[ -z "$TID" ]]; then
+        echo -e "${RED}无法从 JSON 文件名解析 Tunnel ID${NC}"
+        return
+    fi
 
+    echo -e "解析到 Tunnel ID：${GREEN}$TID${NC}"
+
+    # 4. 用户输入
     read -p "请输入根域名（例如 catmicos.dpdns.org）: " ROOT_DOMAIN
     read -p "请输入本地端口（默认 8080）: " PORT
     PORT=${PORT:-8080}
@@ -122,17 +146,17 @@ StandardError=append:$LOG_FILE
 WantedBy=multi-user.target
 EOF
 
-echo "$TID $DOMAIN $PORT" > "$FILE_INFO"
+    echo "$TID $DOMAIN $PORT" > "$FILE_INFO"
 
-systemctl daemon-reload
-systemctl enable argo-file
-systemctl restart argo-file
+    systemctl daemon-reload
+    systemctl enable argo-file >/dev/null 2>&1 || true
+    systemctl restart argo-file
 
-echo -e "${GREEN}隧道已启动${NC}"
-echo "域名：$DOMAIN"
-echo "Tunnel ID：$TID"
-echo "请到 Cloudflare DNS 添加："
-echo "$DOMAIN  CNAME  $TID.cfargotunnel.com"
+    echo -e "${GREEN}隧道已启动${NC}"
+    echo "域名：$DOMAIN"
+    echo "Tunnel ID：$TID"
+    echo "请到 Cloudflare DNS 添加："
+    echo "$DOMAIN  CNAME  $TID.cfargotunnel.com"
 }
 
 heal_file_manual(){
@@ -197,8 +221,8 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable argo-file-health.timer
-systemctl start argo-file-health.timer
+systemctl enable argo-file-health.timer >/dev/null 2>&1 || true
+systemctl start argo-file-health.timer || true
 }
 
 delete_file_tunnel(){
@@ -206,9 +230,17 @@ delete_file_tunnel(){
     confirm || return
 
     if [[ -f /etc/systemd/system/argo-file.service ]]; then
-        systemctl stop argo-file 2>/dev/null
-        systemctl disable argo-file 2>/dev/null
+        systemctl stop argo-file 2>/dev/null || true
+        systemctl disable argo-file 2>/dev/null || true
         rm -f /etc/systemd/system/argo-file.service
+    fi
+
+    if [[ -f "$FILE_INFO" ]]; then
+        read TID DOMAIN PORT < "$FILE_INFO"
+        # 尝试删除对应的 JSON 凭证（不强制）
+        if [[ -n "$TID" && -f "$CF_DIR/$TID.json" ]]; then
+            rm -f "$CF_DIR/$TID.json"
+        fi
     fi
 
     rm -f "$FILE_INFO"
@@ -272,6 +304,7 @@ menu(){
             echo -e "状态：${GREEN}已创建${NC}"
             echo "域名：$DOMAIN"
             echo "Tunnel ID：$TID"
+            echo "本地端口：$PORT"
         else
             echo -e "状态：${RED}未创建${NC}"
         fi
