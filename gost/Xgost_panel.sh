@@ -78,6 +78,35 @@ show_ports() {
 }
 
 # ================================
+# 查看客户端映射状态（关键功能）
+# ================================
+check_client_mapping() {
+    print_title "客户端端口映射状态"
+
+    echo -e "${CYAN}服务端端口 | 客户端连接数 | 客户端 IP 列表${RESET}" >&2
+    echo "--------------------------------------------------------------------------" >&2
+
+    for f in "$SERVER_CONF"/server-*.env; do
+        [[ -f "$f" ]] || continue
+
+        num=$(basename "$f" .env | cut -d'-' -f2)
+        local_port=$(grep '^LOCAL_PORT=' "$f" | cut -d'=' -f2)
+
+        # 检查是否有客户端连接
+        connections=$(ss -tn sport = :$local_port | grep ESTAB | wc -l)
+        client_ips=$(ss -tn sport = :$local_port | grep ESTAB | awk '{print $5}' | cut -d':' -f1 | tr '\n' ' ')
+
+        if [ "$connections" -gt 0 ]; then
+            echo -e "${GREEN}$local_port${RESET} | ${YELLOW}$connections${RESET} | ${MAGENTA}$client_ips${RESET}" >&2
+        else
+            echo -e "${RED}$local_port${RESET} | 0 | -" >&2
+        fi
+    done
+
+    echo "--------------------------------------------------------------------------" >&2
+}
+
+# ================================
 # 主菜单
 # ================================
 menu() {
@@ -89,6 +118,7 @@ menu() {
         echo "1) 进入服务端面板 (gosts.sh)" >&2
         echo "2) 进入客户端面板 (gostc.sh)" >&2
         echo "3) 查看所有 gost 隧道端口" >&2
+        echo "4) 查看客户端映射状态" >&2
         echo "0) 退出" >&2
 
         printf "请选择: " >&2
@@ -103,6 +133,11 @@ menu() {
                 ;;
             3)
                 show_ports
+                printf "按回车继续..." >&2
+                read
+                ;;
+            4)
+                check_client_mapping
                 printf "按回车继续..." >&2
                 read
                 ;;
