@@ -81,10 +81,10 @@ show_ports() {
 # 查看客户端映射状态（关键功能）
 # ================================
 check_client_mapping() {
-    print_title "客户端端口映射状态"
+    print_title "客户端映射状态（服务端可见）"
 
-    echo -e "${CYAN}服务端端口 | 客户端连接数 | 客户端 IP 列表${RESET}" >&2
-    echo "--------------------------------------------------------------------------" >&2
+    echo -e "${CYAN}服务端端口 | 客户端连接数 | 客户端 IP:端口 列表${RESET}" >&2
+    echo "--------------------------------------------------------------------------------" >&2
 
     for f in "$SERVER_CONF"/server-*.env; do
         [[ -f "$f" ]] || continue
@@ -92,18 +92,20 @@ check_client_mapping() {
         num=$(basename "$f" .env | cut -d'-' -f2)
         local_port=$(grep '^LOCAL_PORT=' "$f" | cut -d'=' -f2)
 
-        # 检查是否有客户端连接
+        # 获取客户端连接
         connections=$(ss -tn sport = :$local_port | grep ESTAB | wc -l)
-        client_ips=$(ss -tn sport = :$local_port | grep ESTAB | awk '{print $5}' | cut -d':' -f1 | tr '\n' ' ')
+        client_info=$(ss -tn sport = :$local_port | grep ESTAB | awk '{print $5}' | tr '\n' ' ')
 
         if [ "$connections" -gt 0 ]; then
-            echo -e "${GREEN}$local_port${RESET} | ${YELLOW}$connections${RESET} | ${MAGENTA}$client_ips${RESET}" >&2
+            status="${GREEN}已映射${RESET}"
         else
-            echo -e "${RED}$local_port${RESET} | 0 | -" >&2
+            status="${RED}未映射${RESET}"
         fi
+
+        echo -e "${YELLOW}$local_port${RESET} | ${CYAN}$connections${RESET} | $status | ${MAGENTA}${client_info:--}${RESET}" >&2
     done
 
-    echo "--------------------------------------------------------------------------" >&2
+    echo "--------------------------------------------------------------------------------" >&2
 }
 
 # ================================
