@@ -158,38 +158,36 @@ add_tunnel() {
 
     # ================================
     # 本地端口（LOCAL_PORT）
-    # 作用：
-    #   - 这是客户端本地监听的端口
-    #   - 你的程序连接这个端口后，数据会进入 RTCP 隧道
-    #   - 相当于隧道的“入口”
-    #   - 每个隧道都需要独立的本地端口
     # ================================
+    echo -e "${YELLOW}本地监听端口 (LOCAL_PORT)${RESET}"
+    echo -e "说明：你的程序连接这个端口，数据会进入 RTCP 隧道（隧道入口）" >&2
+    echo -e "例如：你本地软件连接 127.0.0.1:LOCAL_PORT" >&2
     local_port=$(safe_read_port "$(random_free_port)")
 
     # ================================
     # RTCP 远程端口（REMOTE_PORT）
-    # 作用：
-    #   - 这是 RTCP 在远端（Cloudflare 侧）监听的端口
-    #   - relay+ws / relay+wss 会连接这个端口
-    #   - 相当于隧道的“出口”
-    #   - 每个隧道必须使用不同的远程端口
     # ================================
+    echo -e "${YELLOW}RTCP 远程端口 (REMOTE_PORT)${RESET}"
+    echo -e "说明：RTCP 在远端监听的端口（隧道出口），必须唯一" >&2
+    echo -e "relay+ws / relay+wss 会连接这个端口" >&2
     remote_port=$(safe_read_port "$(random_free_port)")
 
-    domain=$(safe_read "请输入 CF 域名" "")
+    # ================================
+    # Cloudflare 域名
+    # ================================
+    echo -e "${YELLOW}请输入 Cloudflare 域名${RESET}"
+    echo -e "说明：隧道最终通过此域名的 80/443 端口转发" >&2
+    echo -e "例如：xxx.cloudflare.com 或 xxx.workers.dev" >&2
+    domain=$(safe_read "CF 域名" "")
     [ -z "$domain" ] && { print_error "域名不能为空"; return; }
 
     # ================================
-    # 访问协议选择
-    # http  → relay+ws://域名:80
-    # https → relay+wss://域名:443
-    # Cloudflare 允许的端口：
-    #   - 80  (ws)
-    #   - 443 (wss)
+    # 协议选择（ws / wss）
     # ================================
-    echo -e "请选择协议：" >&2
-    echo "1) http  (relay+ws, 端口 80)" >&2
-    echo "2) https (relay+wss, 端口 443)" >&2
+    echo -e "${YELLOW}请选择访问协议${RESET}"
+    echo -e "1) http  → relay+ws://域名:80" >&2
+    echo -e "2) https → relay+wss://域名:443（推荐）" >&2
+    echo -e "说明：Cloudflare 仅允许 80 和 443 端口" >&2
     printf "选择 (默认 2): " >&2
     read proto_choice
     proto_choice=$(clean_input "$proto_choice")
@@ -200,9 +198,18 @@ add_tunnel() {
         *) scheme="wss"; port=443 ;;
     esac
 
+    # ================================
+    # WebSocket 路径
+    # ================================
     default_path="/$(cat /proc/sys/kernel/random/uuid)"
-    ws_path=$(safe_read "请输入 WS 路径" "$default_path")
+    echo -e "${YELLOW}请输入 WebSocket 路径 (WS_PATH)${RESET}"
+    echo -e "说明：必须与服务端一致，用于区分不同隧道" >&2
+    echo -e "例如：/abc123 或 /uuid" >&2
+    ws_path=$(safe_read "WS 路径" "$default_path")
 
+    # ================================
+    # 保存配置
+    # ================================
     id=$(next_id)
     id2=$(printf "%02d" "$id")
     conf="$CONF_DIR/client-$id2.env"
@@ -218,6 +225,9 @@ PORT=$port
 WS_PATH=$ws_path
 EOF
 
+    # ================================
+    # systemd 服务生成
+    # ================================
 cat > "$SYSTEMD_DIR/$svc" <<EOF
 [Unit]
 Description=XGost Client Tunnel $id
@@ -236,9 +246,19 @@ EOF
     systemctl daemon-reload
     systemctl enable --now "$svc"
 
+    # ================================
+    # 完整信息展示
+    # ================================
     print_ok "客户端隧道创建成功"
-    echo -e "编号: $id\n本地端口: $local_port\n远程端口: $remote_port\n域名: $domain\n协议: $scheme\n路径: $ws_path\nsystemd: $svc" >&2
+    echo -e "${CYAN}编号:${RESET} $id"
+    echo -e "${CYAN}本地端口:${RESET} $local_port"
+    echo -e "${CYAN}RTCP 远程端口:${RESET} $remote_port"
+    echo -e "${CYAN}CF 域名:${RESET} $domain"
+    echo -e "${CYAN}协议:${RESET} $scheme"
+    echo -e "${CYAN}路径:${RESET} $ws_path"
+    echo -e "${CYAN}systemd:${RESET} $svc"
 }
+
 
 
 # ================================
