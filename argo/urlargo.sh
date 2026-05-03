@@ -113,7 +113,7 @@ create_file_tunnel(){
     echo -e "解析到 Tunnel ID：${GREEN}$TID${NC}"
 
     # 4. 用户输入
-    read -p "请输入根域名（例如 catmicos.dpdns.org）: " ROOT_DOMAIN
+    read -p "请输入根域名（例如 XXXX.COM）: " ROOT_DOMAIN
     read -p "请输入本地端口（默认 8080）: " PORT
     PORT=${PORT:-8080}
 
