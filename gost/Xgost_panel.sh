@@ -22,6 +22,19 @@ print_title() {
     echo -e "${RESET}" >&2
 }
 
+# ================================
+# Banner
+# ================================
+print_banner() {
+cat << "EOF"
+                       |\__/,|   (\\
+                     _.|o o  |_   ) )
+       -------------(((---(((-------------------
+                   catmi.xgost
+       -----------------------------------------
+EOF
+}
+
 BASE_DIR="/root/catmi/xgost"
 SERVER_CONF="$BASE_DIR/server"
 CLIENT_CONF="$BASE_DIR/client"
@@ -69,6 +82,8 @@ show_ports() {
 # ================================
 menu() {
     while true; do
+        clear
+        print_banner
         print_title "XGost 总面板"
 
         echo "1) 进入服务端面板 (gosts.sh)" >&2
