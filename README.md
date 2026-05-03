@@ -1,4 +1,11 @@
 # One-click-script
+
+
+# argo
+
+```bash
+bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/urlargo.sh)
+```
 # ufw管理
 ```bash
 bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/ufw.sh)
