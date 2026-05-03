@@ -203,7 +203,7 @@ After=gost-socks5.service
 
 [Service]
 Type=simple
-ExecStart=${GOST_BIN} -D -L "rtcp://:${rtcp_port}/127.0.0.1:${socks5_port}" -F "relay+wss://${uargo_domain}:443?path=/${WS_PATH}&host=${uargo_domain}"
+ExecStart=${GOST_BIN} -D -L "rtcp://:${rtcp_port}/127.0.0.1:${socks5_port}" -F "relay+wss://${uargo_domain}:443?path=/${ws_path}&host=${uargo_domain}"
 Restart=always
 RestartSec=3
 
