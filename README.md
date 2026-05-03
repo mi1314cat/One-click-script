@@ -1,10 +1,23 @@
 # One-click-script
 
+# 一键脚本
+```
+apt update && apt install bash  &&  apt install curl -y
+```
+```
+bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/APU.sh)
+```
 
 # argo
 
 ```bash
 bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/urlargo.sh)
+```
+
+# gost
+
+```bash
+bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argost/argost_panel.sh)
 ```
 # ufw管理
 ```bash
@@ -23,10 +36,7 @@ source <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/head
 - 完全无需域名，使用自签证书部署hy2
 
 
-# 一键脚本
-```
-apt update && apt install bash  &&  apt install curl -y && bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/APU.sh)
-```
+
 ```bash
 apk add curl && apk add bash && bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/APU.sh)
 ```
