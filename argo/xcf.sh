@@ -399,8 +399,7 @@ switch_bin(){
 
 stop_service(){
   systemctl stop catmi-cfd.service || true
-  read -rp "是否恢复 hosts？[y/N]: " a
-  [[ "$a" =~ [Yy] ]] && restore_hosts
+   restore_hosts
 }
 
 uninstall(){
@@ -429,22 +428,22 @@ status(){
 
 while true; do
   clear
-  echo -e "服务状态：$(status)    当前二进制：$(get_selected)    端口：${CFD_PORT}"
+  echo -e "服务状态：$(status)    当前二进制：$(get_selected)   "
   echo "========================================"
-  echo " Catmi CFD — 中文管理面板（智能下载 + 参数调试版）"
+  echo " Catmi CFD — 管理面板"
   echo " 目录：${BASE_DIR}"
   echo " 服务名：catmi-cfd.service"
   echo "========================================"
-  echo " 1) 安装（备份 hosts、下载 cfd/cfd-tls、生成 IP）"
+  echo " 1) 安装"
   echo " 2) 启动服务"
   echo " 3) 停止服务（可选择恢复 hosts）"
   echo " 4) 查看状态"
   echo " 5) 查看日志（实时）"
   echo " 6) 查看 /etc/hosts"
   echo " 7) 手动备份 hosts"
-  echo " 8) 恢复 hosts（从备份）"
+  echo " 8) 恢复 hosts"
   echo " 9) 切换二进制（cfd ↔ cfd-tls）"
-  echo "10) 卸载（删除全部并恢复 hosts）"
+  echo "10) 卸载"
   echo "11) 参数调试（min/max/multi/num/task）"
   echo " 0) 退出"
   echo "========================================"
