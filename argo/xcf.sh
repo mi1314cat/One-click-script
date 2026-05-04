@@ -78,7 +78,6 @@ smart_download(){
   exit 1
 }
 
-
 install_binary(){
   local name="$1" a="$2"
   local file=""
@@ -142,6 +141,12 @@ PARAM_TASK=${PARAM_TASK}
 EOF
 }
 
+# 当前选择的二进制
+get_selected(){
+  [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+  echo "${selected:-cfd}"
+}
+
 apply_params(){
   save_params
   write_unit
@@ -151,76 +156,118 @@ apply_params(){
 
 param_menu(){
   load_params
+  local sel; sel=$(get_selected)
 
   while true; do
     clear
     echo "========== CFD 参数调试 =========="
+    echo "当前模式：${sel}"
     echo "当前参数："
     echo "  1) min      = ${PARAM_MIN}"
     echo "  2) max      = ${PARAM_MAX}"
-    echo "  3) multi    = ${PARAM_MULTI}"
-    echo "  4) num      = ${PARAM_NUM}"
-    echo "  5) task     = ${PARAM_TASK}"
-    echo "----------------------------------"
-    echo "  6) 应用参数（自动重启服务）"
+    if [ "$sel" = "cfd" ]; then
+      echo "  3) multi    = ${PARAM_MULTI}"
+      echo "  4) num      = ${PARAM_NUM}"
+      echo "  5) task     = ${PARAM_TASK}"
+      echo "----------------------------------"
+      echo "  6) 应用参数（自动重启服务）"
+    else
+      echo "  3) num      = ${PARAM_NUM}"
+      echo "  4) task     = ${PARAM_TASK}"
+      echo "----------------------------------"
+      echo "  5) 应用参数（自动重启服务）"
+    fi
     echo "  0) 返回主菜单"
     echo "=================================="
     read -rp "选择要修改的参数: " p
 
-    case "$p" in
-      1)
-        read -rp "输入新的 min（回车默认 ${PARAM_MIN}）: " v
-        [[ -n "$v" ]] && PARAM_MIN="$v"
-        save_params
-        ;;
-      2)
-        read -rp "输入新的 max（回车默认 ${PARAM_MAX}）: " v
-        [[ -n "$v" ]] && PARAM_MAX="$v"
-        save_params
-        ;;
-      3)
-        read -rp "multi？(true/false，回车默认 ${PARAM_MULTI}): " v
-        case "$v" in
-          true|false) PARAM_MULTI="$v" ;;
-          "") ;;
-          *) warn "必须是 true 或 false" ;;
-        esac
-        save_params
-        ;;
-      4)
-        read -rp "num（最大 50，回车默认 ${PARAM_NUM}）: " v
-        if [[ -n "$v" ]]; then
-          (( v > 50 )) && v=50
-          PARAM_NUM="$v"
-        fi
-        save_params
-        ;;
-      5)
-        read -rp "task（最大 200，回车默认 ${PARAM_TASK}）: " v
-        if [[ -n "$v" ]]; then
-          (( v > 200 )) && v=200
-          PARAM_TASK="$v"
-        fi
-        save_params
-        ;;
-      6)
-        apply_params
-        ;;
-      0)
-        return
-        ;;
-      *)
-        warn "无效选择"
-        ;;
-    esac
+    if [ "$sel" = "cfd" ]; then
+      case "$p" in
+        1)
+          read -rp "输入新的 min（回车默认 ${PARAM_MIN}）: " v
+          [[ -n "$v" ]] && PARAM_MIN="$v"
+          save_params
+          ;;
+        2)
+          read -rp "输入新的 max（回车默认 ${PARAM_MAX}）: " v
+          [[ -n "$v" ]] && PARAM_MAX="$v"
+          save_params
+          ;;
+        3)
+          read -rp "multi？(true/false，回车默认 ${PARAM_MULTI}): " v
+          case "$v" in
+            true|false) PARAM_MULTI="$v" ;;
+            "") ;;
+            *) warn "必须是 true 或 false" ;;
+          esac
+          save_params
+          ;;
+        4)
+          read -rp "num（最大 50，回车默认 ${PARAM_NUM}）: " v
+          if [[ -n "$v" ]]; then
+            (( v > 50 )) && v=50
+            PARAM_NUM="$v"
+          fi
+          save_params
+          ;;
+        5)
+          read -rp "task（最大 200，回车默认 ${PARAM_TASK}）: " v
+          if [[ -n "$v" ]]; then
+            (( v > 200 )) && v=200
+            PARAM_TASK="$v"
+          fi
+          save_params
+          ;;
+        6)
+          apply_params
+          ;;
+        0)
+          return
+          ;;
+        *)
+          warn "无效选择"
+          ;;
+      esac
+    else
+      case "$p" in
+        1)
+          read -rp "输入新的 min（回车默认 ${PARAM_MIN}）: " v
+          [[ -n "$v" ]] && PARAM_MIN="$v"
+          save_params
+          ;;
+        2)
+          read -rp "输入新的 max（回车默认 ${PARAM_MAX}）: " v
+          [[ -n "$v" ]] && PARAM_MAX="$v"
+          save_params
+          ;;
+        3)
+          read -rp "num（最大 50，回车默认 ${PARAM_NUM}）: " v
+          if [[ -n "$v" ]]; then
+            (( v > 50 )) && v=50
+            PARAM_NUM="$v"
+          fi
+          save_params
+          ;;
+        4)
+          read -rp "task（最大 200，回车默认 ${PARAM_TASK}）: " v
+          if [[ -n "$v" ]]; then
+            (( v > 200 )) && v=200
+            PARAM_TASK="$v"
+          fi
+          save_params
+          ;;
+        5)
+          apply_params
+          ;;
+        0)
+          return
+          ;;
+        *)
+          warn "无效选择"
+          ;;
+      esac
+    fi
   done
-}
-
-# ========= 当前选择的二进制 =========
-
-get_selected(){
-  [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
-  echo "${selected:-cfd}"
 }
 
 # ========= 写入 systemd unit =========
@@ -229,19 +276,28 @@ write_unit(){
   local sel; sel=$(get_selected)
   load_params
 
-  CFD_ARGS="-min ${PARAM_MIN} -max ${PARAM_MAX} -multi=${PARAM_MULTI} -num ${PARAM_NUM} -task ${PARAM_TASK}"
-
   if [ "$sel" = "cfd" ]; then
+    local CFD_ARGS="-min ${PARAM_MIN} -max ${PARAM_MAX} -multi=${PARAM_MULTI} -num ${PARAM_NUM} -task ${PARAM_TASK}"
     cat > "$SERVICE" <<EOF
 [Unit]
 Description=Catmi CFD Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
+Type=simple
+User=root
 ExecStart=${BIN_DIR}/cfd -file ${WORK_DIR}/ip ${CFD_ARGS}
 WorkingDirectory=${WORK_DIR}
-Restart=always
-RestartSec=3
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=6
+LimitNOFILE=65536
+
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=catmi-cfd
 
 [Install]
 WantedBy=multi-user.target
@@ -250,13 +306,30 @@ EOF
     cat > "$SERVICE" <<EOF
 [Unit]
 Description=Catmi CFD-TLS Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart=${BIN_DIR}/cfd-tls -l :443 -r 127.0.0.1:${CFD_PORT}
+Type=simple
+User=root
 WorkingDirectory=${WORK_DIR}
-Restart=always
-RestartSec=3
+
+ExecStart=${BIN_DIR}/cfd-tls \
+  -file ${WORK_DIR}/ip \
+  -min ${PARAM_MIN} \
+  -max ${PARAM_MAX} \
+  -num ${PARAM_NUM} \
+  -task ${PARAM_TASK}
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=6
+LimitNOFILE=65536
+
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=catmi-cfd-tls
 
 [Install]
 WantedBy=multi-user.target
@@ -366,7 +439,7 @@ while true; do
   echo " 2) 启动服务"
   echo " 3) 停止服务（可选择恢复 hosts）"
   echo " 4) 查看状态"
-  echo " 5) 查看日志"
+  echo " 5) 查看日志（实时）"
   echo " 6) 查看 /etc/hosts"
   echo " 7) 手动备份 hosts"
   echo " 8) 恢复 hosts（从备份）"
@@ -382,7 +455,7 @@ while true; do
     2) systemctl start catmi-cfd.service ;;
     3) stop_service ;;
     4) systemctl status catmi-cfd.service --no-pager ;;
-    5) journalctl -u catmi-cfd.service -n 200 --no-pager ;;
+    5) journalctl -u catmi-cfd.service -f --no-pager ;;
     6) cat /etc/hosts ;;
     7) backup_hosts ;;
     8) restore_hosts ;;
