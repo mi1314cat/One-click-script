@@ -222,7 +222,7 @@ param_menu(){
           apply_params
           ;;
         0)
-          return
+          break
           ;;
         *)
           warn "无效选择"
@@ -260,7 +260,7 @@ param_menu(){
           apply_params
           ;;
         0)
-          return
+          break
           ;;
         *)
           warn "无效选择"
