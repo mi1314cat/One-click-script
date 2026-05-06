@@ -77,7 +77,37 @@ safe_read_port() {
 
         [[ "$port" =~ ^[0-9]+$ ]] || { print_error "端口必须是数字"; continue; }
         (( port >= 1 && port <= 65535 )) || { print_error "端口范围错误"; continue; }
-        port_in_use "$port" && { print_error "端口已占用"; continue; }
+
+        if port_in_use "$port"; then
+            print_error "端口 $port 已占用"
+            printf "选择操作: [1] 强制使用 [2] 自动换端口 [3] 重新输入: " >&2
+            read choice
+            choice=$(clean_input "$choice")
+
+            case "$choice" in
+                1)
+                    echo "$port"
+                    return
+                    ;;
+                2)
+                    local new_port="$port"
+                    while port_in_use "$new_port"; do
+                        ((new_port++))
+                        ((new_port > 65535)) && { print_error "没有可用端口"; continue 2; }
+                    done
+                    print_info "自动选择可用端口: $new_port"
+                    echo "$new_port"
+                    return
+                    ;;
+                3)
+                    continue
+                    ;;
+                *)
+                    print_error "无效选择"
+                    continue
+                    ;;
+            esac
+        fi
 
         echo "$port"
         return
