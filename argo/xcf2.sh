@@ -272,15 +272,12 @@ echo "当前优选 IP 段：${cur_ip_label}"
           fi
           save_params
           ;;
-        6)
+        9)
           apply_params
           ;;
         12)
   if [ -s "${WORK_DIR}/ipv4.txt" ]; then
-    sed -i "s|-file .* |-file ${WORK_DIR}/ipv4.txt |" "$SERVICE"
-    systemctl daemon-reload
-    systemctl restart catmi-cfd.service
-    info "已切换到 IPv4 优选文件：${WORK_DIR}/ipv4.txt"
+    set_ipfile "ipv4.txt"
   else
     warn "IPv4 文件为空，无法优选"
   fi
@@ -288,20 +285,18 @@ echo "当前优选 IP 段：${cur_ip_label}"
 
 13)
   if [ -s "${WORK_DIR}/ipv6.txt" ]; then
-    sed -i "s|-file .* |-file ${WORK_DIR}/ipv6.txt |" "$SERVICE"
-    systemctl daemon-reload
-    systemctl restart catmi-cfd.service
-    info "已切换到 IPv6 优选文件：${WORK_DIR}/ipv6.txt"
+    set_ipfile "ipv6.txt"
   else
     warn "IPv6 文件为空，无法优选"
   fi
   ;;
 
 14)
-  sed -i "s|-file .* |-file ${WORK_DIR}/ip |" "$SERVICE"
-  systemctl daemon-reload
-  systemctl restart catmi-cfd.service
-  info "已切换到全部 IP 文件：${WORK_DIR}/ip"
+  if [ -s "${WORK_DIR}/ip" ]; then
+    set_ipfile "ip"
+  else
+    warn "全部 IP 文件为空，无法切换"
+  fi
   ;;
 
         0)
