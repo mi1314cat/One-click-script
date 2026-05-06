@@ -159,9 +159,78 @@ check_client_mapping() {
     echo -e "\n${CYAN}↓ 同时显示所有隧道端口 ↓${RESET}\n" >&2
     show_ports
 
-    echo -e "\n${CYAN}↓ Gost 监听端口（含连接数 / IP / 延迟） ↓${RESET}\n" >&2
+    echo -e "\n${CYAN}↓ Gost 监听端口（含连接数 / IP / 延迟）【实时刷新】↓${RESET}\n" >&2
+
+# 记录动态区域开始位置
+tput sc
+
+DYNAMIC_HEIGHT=30   # 根据你的输出高度调整
+
+while true; do
+    # 回到动态区域顶部
+    tput rc
+
+    # 清空动态区域（避免旧内容残留）
+    for ((i=0; i<$DYNAMIC_HEIGHT; i++)); do
+        printf "\033[K\n"
+    done
+
+    # 回到动态区域顶部
+    tput rc
+
+    # ⭐ 输出你原本的彩色函数（保持原样）
     show_gost_listen_ports
+
+    echo -e "\n按任意键返回主菜单..."
+
+    # ⭐ 每 10 秒刷新一次
+    read -t 15 -n 1 key && break
+done
+
+
 }
+
+show_gost_listen_ports_clean() {
+    print_title "Gost 监听端口（连接数 / IP 列表 / 延迟）"
+
+    echo -e "${CYAN}端口 | 连接数 | 连接 IP:端口 | 延迟(ms)${RESET}"
+    echo "--------------------------------------------------------------------------------"
+
+    ports=$(ss -lntp | grep gost | awk '{print $4}' | awk -F: '{print $NF}' | sort -n | uniq)
+
+    for p in $ports; do
+        conns=$(ss -tn sport = :$p | grep ESTAB | awk '{print $5}')
+        count=$(echo "$conns" | wc -l)
+        [[ "$conns" == "" ]] && count=0
+
+        printf "%-5s | %-4s\n" "$p" "$count"
+
+        if [[ "$count" -eq 0 ]]; then
+            echo "--------------------------------------------------------------------------------"
+            continue
+        fi
+
+        while read -r ipport; do
+            [[ -z "$ipport" ]] && continue
+
+            short_ip="${ipport:0:32}"
+            [[ ${#ipport} -gt 32 ]] && short_ip="${short_ip}…"
+
+            clean="${ipport#[}"
+            clean="${clean%]}"
+            ip="${clean%%:*}"
+
+            delay=$(ping -c 1 -W 1 "$ip" 2>/dev/null | grep "time=" | awk -F'time=' '{print $2}' | awk '{print $1}')
+            [[ -z "$delay" ]] && delay="超时"
+
+            printf "      → %-32s | %s ms\n" "$short_ip" "$delay"
+        done <<< "$conns"
+
+        echo "--------------------------------------------------------------------------------"
+    done
+}
+
+
 
 # ================================
 # 主菜单
