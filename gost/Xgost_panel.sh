@@ -132,44 +132,36 @@ show_gost_listen_ports() {
 # 查看客户端映射状态（服务端可见）
 # ================================
 check_client_mapping() {
-    while true; do
-        clear
-        print_title "客户端映射状态（实时监控）"
+    print_title "客户端映射状态（服务端可见）"
 
-        echo -e "${CYAN}服务端端口 | 客户端连接数 | 客户端 IP:端口 列表${RESET}" >&2
-        echo "--------------------------------------------------------------------------------" >&2
+    echo -e "${CYAN}服务端端口 | 客户端连接数 | 客户端 IP:端口 列表${RESET}" >&2
+    echo "--------------------------------------------------------------------------------" >&2
 
-        for f in "$SERVER_CONF"/server-*.env; do
-            [[ -f "$f" ]] || continue
+    for f in "$SERVER_CONF"/server-*.env; do
+        [[ -f "$f" ]] || continue
 
-            local_port=$(get_env "$f" "LOCAL_PORT")
+        local_port=$(get_env "$f" "LOCAL_PORT")
 
-            connections=$(ss -tn sport = :$local_port | grep ESTAB | wc -l || true)
-            client_info=$(ss -tn sport = :$local_port | grep ESTAB | awk '{print $5}' | tr '\n' ' ' || true)
+        connections=$(ss -tn sport = :$local_port | grep ESTAB | wc -l || true)
+        client_info=$(ss -tn sport = :$local_port | grep ESTAB | awk '{print $5}' | tr '\n' ' ' || true)
 
-            if [ "$connections" -gt 0 ]; then
-                status="${GREEN}已映射${RESET}"
-            else
-                status="${RED}未映射${RESET}"
-            fi
+        if [ "$connections" -gt 0 ]; then
+            status="${GREEN}已映射${RESET}"
+        else
+            status="${RED}未映射${RESET}"
+        fi
 
-            echo -e "${YELLOW}$local_port${RESET} | ${CYAN}$connections${RESET} | $status | ${MAGENTA}${client_info:--}${RESET}" >&2
-        done
-
-        echo "--------------------------------------------------------------------------------" >&2
-
-        echo -e "\n${CYAN}↓ 所有隧道端口（实时） ↓${RESET}\n" >&2
-        show_ports
-
-        echo -e "\n${CYAN}↓ Gost 监听端口（连接数 / IP / 延迟）实时 ↓${RESET}\n" >&2
-        show_gost_listen_ports
-
-        echo -e "\n按 Ctrl+C 退出实时监控" >&2
-
-        sleep 1
+        echo -e "${YELLOW}$local_port${RESET} | ${CYAN}$connections${RESET} | $status | ${MAGENTA}${client_info:--}${RESET}" >&2
     done
-}
 
+    echo "--------------------------------------------------------------------------------" >&2
+
+    echo -e "\n${CYAN}↓ 同时显示所有隧道端口 ↓${RESET}\n" >&2
+    show_ports
+
+    echo -e "\n${CYAN}↓ Gost 监听端口（含连接数 / IP / 延迟） ↓${RESET}\n" >&2
+    show_gost_listen_ports
+}
 
 # ================================
 # 主菜单
