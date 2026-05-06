@@ -131,7 +131,7 @@ show_gost_listen_ports() {
 # ================================
 # 查看客户端映射状态（服务端可见）
 # ================================
-check_client_mapping_live() {
+check_client_mapping() {
     while true; do
         clear
         print_title "客户端映射状态（实时监控）"
