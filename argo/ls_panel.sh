@@ -2,7 +2,7 @@
 set -e
 
 # ================================
-# 彩色定义（统一模板）
+# 彩色定义
 # ================================
 RED="\e[31m"
 GREEN="\e[32m"
@@ -28,13 +28,11 @@ print_title() {
 }
 
 # ================================
-# 基础路径（完全隔离）
+# 基础路径
 # ================================
 BASE_DIR="/root/catmi/argo_temp"
 BIN="$BASE_DIR/cloudflared"
 TUNNELS_DIR="$BASE_DIR/tunnels"
-SYSTEMD_DIR="/etc/systemd/system"   # 未使用，仅保持风格统一
-
 mkdir -p "$TUNNELS_DIR"
 
 # ================================
@@ -44,20 +42,11 @@ clean_input() {
     echo "$1" | tr -d '\000-\037'
 }
 
-safe_read() {
-    local prompt="$1" default="$2" input
-    printf "%s (默认: %s): " "$prompt" "$default" >&2
-    read input
-    input=$(clean_input "$input")
-    echo "${input:-$default}"
-}
-
 check_port() {
     local port=$1
     [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 ))
 }
 
-# 标准化隧道编号：输入 1 -> 01, 2 -> 02 ... 99 -> 99
 normalize_id() {
     local id="$1"
     id=$(clean_input "$id")
@@ -84,9 +73,9 @@ install_cloudflared() {
         armv7l|armhf) CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm" ;;
         *) print_error "不支持的架构: $ARCH"; exit 1 ;;
     esac
-    wget -qO "$BIN" "$CFD_URL" || { print_error "cloudflared 下载失败"; exit 1; }
+    wget -qO "$BIN" "$CFD_URL" || { print_error "下载失败"; exit 1; }
     chmod +x "$BIN"
-    print_ok "cloudflared 安装完成：$BIN"
+    print_ok "cloudflared 安装完成"
 }
 
 # 获取下一个隧道编号
@@ -97,7 +86,7 @@ next_id() {
 }
 
 # ================================
-# 列出所有临时隧道（含主进程状态）
+# 列出所有隧道（含状态）
 # ================================
 list_tunnels() {
     print_title "临时隧道列表（自动保活）"
@@ -112,14 +101,14 @@ list_tunnels() {
             local port="${PORT:-?}"
             local url="${URL:-未获取}"
 
-            # 检查主进程状态
+            # 检查主进程
             local tunnel_pid_file="$dir/tunnel.pid"
             local tunnel_status="${RED}离线${RESET}"
             if [[ -f "$tunnel_pid_file" ]] && kill -0 $(cat "$tunnel_pid_file") 2>/dev/null; then
                 tunnel_status="${GREEN}在线${RESET}"
             fi
 
-            # 检查监控进程状态
+            # 检查监控进程
             local monitor_pid_file="$dir/monitor.pid"
             local monitor_status="${RED}未运行${RESET}"
             if [[ -f "$monitor_pid_file" ]] && kill -0 $(cat "$monitor_pid_file") 2>/dev/null; then
@@ -133,46 +122,74 @@ list_tunnels() {
 }
 
 # ================================
-# 启动单个隧道（内部函数）
+# 启动单个隧道（含 429 限流自动重试 + 指数退避）
 # ================================
 start_single_tunnel() {
     local tunnel_dir="$1"
     local port="$2"
     local log_file="$tunnel_dir/cloudflared.log"
     local pid_file="$tunnel_dir/tunnel.pid"
+    local max_retries=5
+    local retry_delay=15   # 初始等待秒数
 
     rm -f "$log_file" "$pid_file"
 
-    nohup $BIN tunnel --url "http://localhost:$port" --no-autoupdate --config /dev/null \
-        > "$log_file" 2>&1 &
-    local pid=$!
-    echo "$pid" > "$pid_file"
-    sleep 1.5
+    for attempt in $(seq 1 $max_retries); do
+        # 启动隧道
+        nohup $BIN tunnel --url "http://localhost:$port" --no-autoupdate --config /dev/null \
+            > "$log_file" 2>&1 &
+        local pid=$!
+        echo "$pid" > "$pid_file"
+        sleep 3
 
-    if ! kill -0 "$pid" 2>/dev/null; then
-        return 1
-    fi
+        # 检查进程是否还活着
+        if ! kill -0 "$pid" 2>/dev/null; then
+            # 进程已退出，检查日志中是否有 429 错误
+            if grep -q "429 Too Many Requests" "$log_file" 2>/dev/null; then
+                print_warn "触发 Cloudflare 限流 (429)，等待 ${retry_delay} 秒后重试 (第 $attempt 次)..."
+                sleep "$retry_delay"
+                retry_delay=$((retry_delay * 2))   # 指数退避
+                continue
+            else
+                # 其他错误
+                cat "$log_file" >&2
+                return 1
+            fi
+        fi
 
-    # 提取域名
-    local url=""
-    for i in {1..20}; do
-        url=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" "$log_file" | head -n 1)
-        [[ -n "$url" ]] && break
-        sleep 0.3
+        # 提取域名
+        local url=""
+        for i in {1..30}; do
+            url=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" "$log_file" | head -n 1)
+            [[ -n "$url" ]] && break
+            sleep 0.5
+        done
+
+        if [[ -n "$url" ]]; then
+            sed -i "/^URL=/d" "$tunnel_dir/tunnel.env" 2>/dev/null || true
+            echo "URL=$url" >> "$tunnel_dir/tunnel.env"
+            return 0
+        else
+            # 未获取到域名，可能也是被限流导致
+            if grep -q "429 Too Many Requests" "$log_file" 2>/dev/null; then
+                print_warn "创建成功但未返回域名（可能限流），等待 ${retry_delay} 秒后重试..."
+                sleep "$retry_delay"
+                retry_delay=$((retry_delay * 2))
+                continue
+            else
+                print_error "未能从日志中提取域名"
+                cat "$log_file" >&2
+                return 1
+            fi
+        fi
     done
 
-    if [[ -n "$url" ]]; then
-        # 更新 env 文件
-        sed -i "/^URL=/d" "$tunnel_dir/tunnel.env" 2>/dev/null || true
-        echo "URL=$url" >> "$tunnel_dir/tunnel.env"
-        return 0
-    else
-        return 1
-    fi
+    print_error "经过 $max_retries 次重试仍失败，请稍后再试或改用固定隧道。"
+    return 1
 }
 
 # ================================
-# 启动单个保活监控（内部函数，已修复参数传递）
+# 启动保活监控（修复版：精确匹配端口，无全局pkill）
 # ================================
 start_monitor() {
     local tunnel_dir="$1"
@@ -189,7 +206,6 @@ start_monitor() {
 
     cat > "$monitor_script" <<'MONITOR_EOF'
 #!/usr/bin/env bash
-# 接收参数: 隧道目录 端口 cloudflared路径
 TUNNEL_DIR="$1"
 PORT="$2"
 BIN="$3"
@@ -200,17 +216,23 @@ CHECK_INTERVAL=60
 
 restart_tunnel() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') 执行重启隧道..." >> "$TUNNEL_DIR/monitor.log"
-    # 杀死旧主进程
+
+    # 1) 通过 PID 文件精确停止旧进程
     if [[ -f "$TUNNEL_DIR/tunnel.pid" ]]; then
-        kill $(cat "$TUNNEL_DIR/tunnel.pid") 2>/dev/null || true
+        local old_pid=$(cat "$TUNNEL_DIR/tunnel.pid")
+        if kill -0 "$old_pid" 2>/dev/null; then
+            kill "$old_pid" 2>/dev/null || true
+            sleep 1
+        fi
         rm -f "$TUNNEL_DIR/tunnel.pid"
     fi
-    # 防止遗留进程（按进程名清理）
-    pkill -f "cloudflared tunnel --url" 2>/dev/null || true
+
+    # 2) 额外清理：仅杀匹配当前端口的 cloudflared 进程（避免误杀其他隧道）
+    pkill -f "cloudflared tunnel --url http://localhost:$PORT" 2>/dev/null || true
 
     rm -f "$TUNNEL_DIR/cloudflared.log"
 
-    # 启动新隧道
+    # 3) 启动新隧道
     nohup $BIN tunnel --url "http://localhost:$PORT" --no-autoupdate --config /dev/null \
         > "$TUNNEL_DIR/cloudflared.log" 2>&1 &
     local new_pid=$!
@@ -218,10 +240,10 @@ restart_tunnel() {
 
     sleep 2
     local new_url=""
-    for i in {1..20}; do
+    for i in {1..25}; do
         new_url=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" "$TUNNEL_DIR/cloudflared.log" | head -n 1)
         [[ -n "$new_url" ]] && break
-        sleep 0.3
+        sleep 0.4
     done
 
     if [[ -n "$new_url" ]]; then
@@ -237,7 +259,6 @@ restart_tunnel() {
 while true; do
     sleep $CHECK_INTERVAL
 
-    # 读取当前 URL
     if [[ -f "$TUNNEL_DIR/tunnel.env" ]]; then
         source "$TUNNEL_DIR/tunnel.env"
     fi
@@ -258,7 +279,7 @@ while true; do
         echo "$(date '+%Y-%m-%d %H:%M:%S') 健康检查通过 ($HTTP_CODE)" >> "$TUNNEL_DIR/monitor.log"
     else
         ((FAIL_COUNT++))
-        echo "$(date '+%Y-%m-%d %H:%M:%S') 健康检查失败 ($HTTP_CODE)，连续失败: $FAIL_COUNT/$MAX_FAIL" >> "$TUNNEL_DIR/monitor.log"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') 健康检查失败 ($HTTP_CODE)，连续: $FAIL_COUNT/$MAX_FAIL" >> "$TUNNEL_DIR/monitor.log"
         if (( FAIL_COUNT >= MAX_FAIL )); then
             echo "$(date '+%Y-%m-%d %H:%M:%S') 连续失败达 $MAX_FAIL 次，重启隧道..." >> "$TUNNEL_DIR/monitor.log"
             restart_tunnel
@@ -268,29 +289,30 @@ done
 MONITOR_EOF
 
     chmod +x "$monitor_script"
-
-    # 启动监控（后台运行），正确传递三个参数
     nohup "$monitor_script" "$tunnel_dir" "$port" "$BIN" >> "$monitor_log" 2>&1 &
     echo $! > "$monitor_pid_file"
 }
 
 # ================================
-# 内部停止函数（不输出菜单交互）
+# 内部停止函数（不输出菜单，仅清理进程）
 # ================================
 stop_tunnel_internal() {
     local tunnel_dir="$1"
-    local monitor_pid_file="$tunnel_dir/monitor.pid"
-    if [[ -f "$monitor_pid_file" ]]; then
-        kill $(cat "$monitor_pid_file") 2>/dev/null || true
-        rm -f "$monitor_pid_file"
+    # 停止监控
+    if [[ -f "$tunnel_dir/monitor.pid" ]]; then
+        kill $(cat "$tunnel_dir/monitor.pid") 2>/dev/null || true
+        rm -f "$tunnel_dir/monitor.pid"
     fi
-    local pid_file="$tunnel_dir/tunnel.pid"
-    if [[ -f "$pid_file" ]]; then
-        kill $(cat "$pid_file") 2>/dev/null || true
-        rm -f "$pid_file"
+    # 停止隧道进程
+    if [[ -f "$tunnel_dir/tunnel.pid" ]]; then
+        kill $(cat "$tunnel_dir/tunnel.pid") 2>/dev/null || true
+        rm -f "$tunnel_dir/tunnel.pid"
     fi
-    # 额外清理可能残留的 cloudflared 进程（针对该端口）
-    pkill -f "cloudflared tunnel --url http://localhost:$(grep -oP 'PORT=\K\d+' "$tunnel_dir/tunnel.env" 2>/dev/null)" 2>/dev/null || true
+    # 精确清理可能残留的进程（按端口）
+    local port=$(grep -oP 'PORT=\K\d+' "$tunnel_dir/tunnel.env" 2>/dev/null || echo "")
+    if [[ -n "$port" ]]; then
+        pkill -f "cloudflared tunnel --url http://localhost:$port" 2>/dev/null || true
+    fi
 }
 
 # ================================
@@ -301,7 +323,6 @@ add_tunnel() {
     print_title "新增临时隧道"
 
     echo -e "${YELLOW}请输入要暴露的本地端口${RESET}" >&2
-    echo "（您本地服务监听的端口，如 8080, 3000, 2222 等）" >&2
     local default_port="8080"
     local port
     printf "端口（默认 %s）: " "$default_port" >&2
@@ -325,26 +346,22 @@ EOF
 
     if ! start_single_tunnel "$tunnel_dir" "$port"; then
         print_error "隧道启动失败"
-        cat "$tunnel_dir/cloudflared.log" 2>/dev/null
         rm -rf "$tunnel_dir"
         return 1
     fi
 
     source "$tunnel_dir/tunnel.env"
-    local url="${URL}"
-
-    if [[ -z "$url" ]]; then
+    if [[ -z "${URL}" ]]; then
         print_error "未能获取域名"
         rm -rf "$tunnel_dir"
         return 1
     fi
 
     start_monitor "$tunnel_dir" "$port"
-
     print_ok "临时隧道创建成功"
     echo -e "编号: ${GREEN}$id2${RESET}"
     echo -e "本地端口: ${YELLOW}$port${RESET}"
-    echo -e "域名: ${CYAN}$url${RESET}"
+    echo -e "域名: ${CYAN}${URL}${RESET}"
     echo -e "监控状态: ${GREEN}已启用${RESET}"
 }
 
@@ -371,7 +388,7 @@ view_logs() {
 }
 
 # ================================
-# 停止单个隧道（含监控）
+# 停止某个隧道（菜单调用）
 # ================================
 stop_tunnel() {
     list_tunnels
@@ -416,16 +433,15 @@ start_tunnel() {
         return
     fi
 
-    # 完全停止旧进程和监控
+    # 完全清理旧进程
     stop_tunnel_internal "$tunnel_dir"
 
-    # 重新启动隧道
+    # 重新启动
     if ! start_single_tunnel "$tunnel_dir" "$port"; then
         print_error "启动失败"
         return 1
     fi
 
-    # 重新启动监控
     start_monitor "$tunnel_dir" "$port"
 
     source "$tunnel_dir/tunnel.env"
@@ -452,7 +468,7 @@ delete_tunnel() {
 }
 
 # ================================
-# 删除所有临时隧道
+# 删除所有隧道
 # ================================
 delete_all_tunnels() {
     print_title "删除所有临时隧道"
@@ -469,7 +485,7 @@ delete_all_tunnels() {
 }
 
 # ================================
-# 一键彻底删除脚本及所有文件
+# 彻底删除脚本及所有文件
 # ================================
 purge_everything() {
     print_title "⚠ 彻底删除临时隧道脚本及所有文件 ⚠"
@@ -507,16 +523,16 @@ purge_everything() {
 # ================================
 menu() {
     while true; do
-        print_title "临时隧道管理 (多开 + 自动保活)"
-        echo "1) 查看隧道列表" >&2                            
-        echo "2) 新增临时隧道" >&2
-        echo "3) 停止某个隧道" >&2
-        echo "4) 启动（重新创建）某个隧道" >&2
-        echo "5) 查看某个隧道日志" >&2
-        echo "6) 删除某个隧道" >&2
-        echo "7) 删除所有隧道" >&2
-        echo "8) 彻底删除脚本及所有文件" >&2
-        echo "0) 退出" >&2
+        print_title "临时隧道管理 (多开 + 自动保活) - 限流修复版"
+        echo "1) 查看隧道列表"
+        echo "2) 新增临时隧道"
+        echo "3) 停止某个隧道"
+        echo "4) 启动（重新创建）某个隧道"
+        echo "5) 查看某个隧道日志"
+        echo "6) 删除某个隧道"
+        echo "7) 删除所有隧道"
+        echo "8) 彻底删除脚本及所有文件"
+        echo "0) 退出"
 
         printf "请选择: " >&2
         read c
@@ -535,6 +551,6 @@ menu() {
             *) print_error "无效选项"; printf "按回车继续..." >&2; read ;;
         esac
     done
-} 
+}
 
 menu
