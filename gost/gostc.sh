@@ -60,6 +60,20 @@ random_free_port() {
     done
 }
 
+# ---------- Base64 编码工具 ----------
+base64_encode() {
+    local input="$1"
+    if command -v base64 >/dev/null 2>&1; then
+        echo -n "$input" | base64 -w 0
+    elif command -v openssl >/dev/null 2>&1; then
+        echo -n "$input" | openssl base64 -A
+    else
+        print_error "系统中未找到 base64 或 openssl 命令，无法进行认证编码。"
+        print_info "请安装 coreutils 或 openssl 后重试。"
+        exit 1
+    fi
+}
+
 safe_read() {
     local prompt="$1" default="$2" input
     printf "%s (默认: %s): " "$prompt" "$default" >&2
@@ -154,7 +168,7 @@ next_id() {
 }
 
 # ================================
-# 列出隧道（含认证信息掩码）
+# 列出隧道
 # ================================
 list_tunnels() {
     print_title "客户端隧道列表"
@@ -166,19 +180,19 @@ list_tunnels() {
         [[ -f "$f" ]] || continue
 
         num=$(basename "$f" .env | cut -d'-' -f2)
-        # 读取配置
         source "$f"
-        # LOCAL_PORT, REMOTE_PORT, DOMAIN, SCHEME, PORT, WS_PATH, AUTH_USER, AUTH_PASS（可能不存在旧配置）
-        local_port="$LOCAL_PORT"
-        remote_port="$REMOTE_PORT"
-        domain="$DOMAIN"
-        scheme="$SCHEME"
-        ws_path="$WS_PATH"
-        auth_show="${AUTH_USER:-none}:$(if [ -n "$AUTH_PASS" ]; then echo "${AUTH_PASS:0:2}******"; else echo "none"; fi)"
+        local_port="${LOCAL_PORT:-?}"
+        remote_port="${REMOTE_PORT:-?}"
+        domain="${DOMAIN:-?}"
+        scheme="${SCHEME:-?}"
+        ws_path="${WS_PATH:-?}"
+        auth_user="${AUTH_USER:-none}"
+        auth_pass="${AUTH_PASS:-}"
+        masked_auth="${auth_user}:$(if [ -n "$auth_pass" ]; then echo "${auth_pass:0:2}******"; else echo "none"; fi)"
 
         svc="xgost-client-$(printf "%02d" "$num").service"
 
-        echo -e "${GREEN}$num${RESET}) 本地: ${YELLOW}$local_port${RESET} | 远程: ${CYAN}$remote_port${RESET} | 域名: ${MAGENTA}$domain${RESET} | 协议: ${BLUE}$scheme${RESET} | 路径: ${WHITE}$ws_path${RESET} | 认证: ${GREEN}$auth_show${RESET} | $svc" >&2
+        echo -e "${GREEN}$num${RESET}) 本地: ${YELLOW}$local_port${RESET} | 远程: ${CYAN}$remote_port${RESET} | 域名: ${MAGENTA}$domain${RESET} | 协议: ${BLUE}$scheme${RESET} | 路径: ${WHITE}$ws_path${RESET} | 认证: ${GREEN}$masked_auth${RESET} | $svc" >&2
     done
 
     echo "-------------------------------------------------------------------------------------------" >&2
@@ -186,70 +200,149 @@ list_tunnels() {
 }
 
 # ================================
-# 新增隧道（支持认证）
+# 解析服务端链接（仅提取路径、认证、协议）
+# ================================
+parse_service_link() {
+    local raw_link="$1"
+    raw_link=$(echo "$raw_link" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^-F[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//')
+
+    # 提取 scheme (ws 或 wss)
+    if echo "$raw_link" | grep -q 'relay+wss://'; then
+        scheme="wss"
+        default_port=443
+    elif echo "$raw_link" | grep -q 'relay+ws://'; then
+        scheme="ws"
+        default_port=80
+    else
+        return 1
+    fi
+
+    # 去掉协议前缀
+    host_part=$(echo "$raw_link" | sed -E 's#^relay\+wss?://##')
+    # 提取端口（如果有）
+    port=$(echo "$host_part" | grep -oP ':\K[0-9]+(?=[/?]|$)' || echo "$default_port")
+
+    # 提取参数：path 和 auth
+    path=$(echo "$host_part" | grep -oP 'path=\K[^&]+' || echo "")
+    auth=$(echo "$host_part" | grep -oP 'auth=\K[^&]+' || echo "")
+    # 提取 host（备用）
+    host_from_link=$(echo "$host_part" | grep -oP 'host=\K[^&]+' || echo "")
+
+    if [ -z "$path" ] || [ -z "$auth" ]; then
+        return 1
+    fi
+
+    auth_user=$(echo "$auth" | cut -d':' -f1)
+    auth_pass=$(echo "$auth" | cut -d':' -f2-)
+    if [ -z "$auth_user" ] || [ -z "$auth_pass" ]; then
+        return 1
+    fi
+
+    # 导出解析结果（不包含域名，域名由用户输入）
+    export SCHEME="$scheme"
+    export PORT="$port"
+    export WS_PATH="$path"
+    export AUTH_USER="$auth_user"
+    export AUTH_PASS="$auth_pass"
+    return 0
+}
+
+# ================================
+# 新增隧道（两种模式）
 # ================================
 add_tunnel() {
     install_gost
     print_title "新增客户端隧道"
 
-    # 本地监听端口（隧道入口）
-    echo -e "${YELLOW}本地监听端口 (LOCAL_PORT)${RESET}"
+    echo -e "${YELLOW}请选择配置方式：${RESET}" >&2
+    echo "1) 粘贴服务端提供的链接（自动提取路径/认证，域名需手动输入）" >&2
+    echo "2) 手动逐步输入" >&2
+    printf "请选择 (默认 1): " >&2
+    read mode
+    mode=$(clean_input "$mode")
+    mode="${mode:-1}"
+
+    local local_port remote_port domain scheme port ws_path auth_user auth_pass host_para
+
+    # 本地监听端口
+    echo -e "${YELLOW}本地监听端口 (LOCAL_PORT)${RESET}" >&2
     echo -e "说明：你的程序连接这个端口，数据会进入 RTCP 隧道（隧道入口）" >&2
-    echo -e "例如：你本地软件连接 127.0.0.1:LOCAL_PORT" >&2
     local_port=$(safe_read_port "$(random_free_port)")
 
-    # RTCP 远程端口（服务端监听端口）
-    echo -e "${YELLOW}RTCP 远程端口 (REMOTE_PORT)${RESET}"
+    # RTCP 远程端口
+    echo -e "${YELLOW}RTCP 远程端口 (REMOTE_PORT)${RESET}" >&2
     echo -e "说明：RTCP 在远端监听的端口（隧道出口），必须唯一，且与服务端预期一致" >&2
     remote_port=$(safe_read_port "$(random_free_port)")
 
-    # Cloudflare 域名
-    echo -e "${YELLOW}请输入 Cloudflare 域名${RESET}"
-    echo -e "说明：隧道最终通过此域名的 80/443 端口转发" >&2
-    echo -e "例如：xxx.cloudflare.com 或 xxx.workers.dev" >&2
-    domain=$(safe_read "CF 域名" "")
-    [ -z "$domain" ] && { print_error "域名不能为空"; return; }
+    if [ "$mode" = "1" ]; then
+        # 模式1：粘贴链接，提取路径、认证，域名强制用户输入
+        echo -e "${YELLOW}请粘贴完整的服务端转发链接${RESET}" >&2
+        echo -e "格式示例: relay+wss://your.domain:443?path=/xxx&auth=user:pass&host=your.domain" >&2
+        printf "链接: " >&2
+        read raw_link
+        raw_link=$(clean_input "$raw_link")
+        if parse_service_link "$raw_link"; then
+            scheme="$SCHEME"
+            port="$PORT"
+            ws_path="$WS_PATH"
+            auth_user="$AUTH_USER"
+            auth_pass="$AUTH_PASS"
+            print_ok "成功解析链接参数："
+            echo -e "  协议: $scheme, 端口: $port" >&2
+            echo -e "  路径: $ws_path" >&2
+            echo -e "  认证: $auth_user:******" >&2
+            echo "" >&2
+        else
+            print_error "链接格式无法识别，请检查后重试，或选择手动输入模式"
+            return
+        fi
 
-    # 协议选择（ws / wss）
-    echo -e "${YELLOW}请选择访问协议${RESET}"
-    echo -e "1) http  → relay+ws://域名:80" >&2
-    echo -e "2) https → relay+wss://域名:443（推荐）" >&2
-    echo -e "说明：Cloudflare 仅允许 80 和 443 端口" >&2
-    printf "选择 (默认 2): " >&2
-    read proto_choice
-    proto_choice=$(clean_input "$proto_choice")
+        # 域名必须由用户输入（即使链接中有域名，也以用户输入为准）
+        while true; do
+            printf "请输入您自己的 Cloudflare 域名（必填）: " >&2
+            read domain
+            domain=$(clean_input "$domain")
+            if [ -n "$domain" ]; then
+                break
+            else
+                print_error "域名不能为空，请重新输入"
+            fi
+        done
+        host_para="$domain"   # host 参数通常与域名相同
+    else
+        # 模式2：手动输入
+        echo -e "${YELLOW}请输入 Cloudflare 域名${RESET}" >&2
+        echo -e "说明：隧道最终通过此域名的 80/443 端口转发" >&2
+        domain=$(safe_read "CF 域名" "")
+        [ -z "$domain" ] && { print_error "域名不能为空"; return; }
 
-    case "$proto_choice" in
-        1) scheme="ws";  port=80 ;;
-        2|"") scheme="wss"; port=443 ;;
-        *) scheme="wss"; port=443 ;;
-    esac
+        echo -e "${YELLOW}请选择访问协议${RESET}" >&2
+        echo "1) http  → relay+ws://域名:80" >&2
+        echo "2) https → relay+wss://域名:443（推荐）" >&2
+        printf "选择 (默认 2): " >&2
+        read proto_choice
+        proto_choice=$(clean_input "$proto_choice")
+        case "$proto_choice" in
+            1) scheme="ws";  port=80 ;;
+            2|"") scheme="wss"; port=443 ;;
+            *) scheme="wss"; port=443 ;;
+        esac
 
-    # WebSocket 路径（必须与服务端一致）
-    default_path="/$(cat /proc/sys/kernel/random/uuid | cut -d'-' -f1)"
-    echo -e "${YELLOW}请输入 WebSocket 路径 (WS_PATH)${RESET}"
-    echo -e "说明：必须与服务端一致，用于区分不同隧道" >&2
-    ws_path=$(safe_read "WS 路径" "$default_path")
+        default_path="/$(cat /proc/sys/kernel/random/uuid | cut -d'-' -f1)"
+        ws_path=$(safe_read "WS 路径" "$default_path")
 
-    # ========== 新增：认证信息 ==========
-    echo -e "${YELLOW}请输入服务端的认证信息${RESET}"
-    echo -e "说明：与服务端创建时设置的 auth 完全一致" >&2
-    auth_user=$(safe_read "认证用户名" "")
-    if [ -z "$auth_user" ]; then
-        print_error "认证用户名不能为空"
-        return
-    fi
-    read -s -p "请输入认证密码: " auth_pass
-    echo
-    if [ -z "$auth_pass" ]; then
-        print_error "认证密码不能为空"
-        return
-    fi
-    read -s -p "确认认证密码: " auth_pass2
-    echo
-    if [ "$auth_pass" != "$auth_pass2" ]; then
-        print_error "两次输入的密码不一致"
-        return
+        echo -e "${YELLOW}请输入服务端的认证信息${RESET}" >&2
+        auth_user=$(safe_read "认证用户名" "")
+        [ -z "$auth_user" ] && { print_error "认证用户名不能为空"; return; }
+        read -s -p "请输入认证密码: " auth_pass
+        echo
+        read -s -p "确认认证密码: " auth_pass2
+        echo
+        if [ -z "$auth_pass" ] || [ "$auth_pass" != "$auth_pass2" ]; then
+            print_error "密码为空或不匹配"
+            return
+        fi
+        host_para="$domain"
     fi
 
     # 保存配置
@@ -270,7 +363,10 @@ AUTH_USER=$auth_user
 AUTH_PASS=$auth_pass
 EOF
 
-    # 构建带认证的 URL
+    # Base64 编码认证信息
+    AUTH_BASE64=$(base64_encode "$auth_user:$auth_pass")
+
+    # systemd 服务文件
     cat > "$SYSTEMD_DIR/$svc" <<EOF
 [Unit]
 Description=XGost Client Tunnel $id (auth)
@@ -278,7 +374,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$GOST_BIN -L "rtcp://:$remote_port/127.0.0.1:$local_port" -F "relay+${scheme}://${domain}:$port?path=$ws_path&host=$domain&auth=$auth_user:$auth_pass"
+ExecStart=$GOST_BIN -L "rtcp://:$remote_port/127.0.0.1:$local_port" -F "relay+${scheme}://${domain}:$port?path=$ws_path&host=$host_para&auth=$AUTH_BASE64"
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -303,7 +399,7 @@ EOF
 }
 
 # ================================
-# 查看状态
+# 状态、停止、启动、重启、日志、删除（与之前一致）
 # ================================
 status_tunnels() {
     print_title "客户端隧道状态"
@@ -311,20 +407,54 @@ status_tunnels() {
         [[ -f "$f" ]] || continue
         num=$(basename "$f" .env | cut -d'-' -f2)
         svc="xgost-client-$num.service"
-
         if systemctl is-active --quiet "$svc"; then
             st="${GREEN}运行中${RESET}"
         else
             st="${RED}未运行${RESET}"
         fi
-
         echo -e "隧道 ${CYAN}$num${RESET} -> $svc : $st" >&2
     done
 }
 
-# ================================
-# 查看日志
-# ================================
+stop_tunnel() {
+    list_tunnels
+    printf "请输入要停止的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    id2=$(printf "%02d" "$num")
+    svc="xgost-client-$id2.service"
+    [ ! -f "$SYSTEMD_DIR/$svc" ] && { print_error "服务不存在: $svc"; return; }
+    systemctl stop "$svc"
+    print_ok "已停止 $svc"
+    systemctl status "$svc" --no-pager -l | head -n 5 >&2
+}
+
+start_tunnel() {
+    list_tunnels
+    printf "请输入要启动的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    id2=$(printf "%02d" "$num")
+    svc="xgost-client-$id2.service"
+    [ ! -f "$SYSTEMD_DIR/$svc" ] && { print_error "服务不存在: $svc"; return; }
+    systemctl start "$svc"
+    print_ok "已启动 $svc"
+    systemctl status "$svc" --no-pager -l | head -n 5 >&2
+}
+
+restart_tunnel() {
+    list_tunnels
+    printf "请输入要重启的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    id2=$(printf "%02d" "$num")
+    svc="xgost-client-$id2.service"
+    [ ! -f "$SYSTEMD_DIR/$svc" ] && { print_error "服务不存在: $svc"; return; }
+    systemctl restart "$svc"
+    print_ok "已重启 $svc"
+    systemctl status "$svc" --no-pager -l | head -n 5 >&2
+}
+
 view_logs() {
     list_tunnels
     printf "请输入要查看日志的编号: " >&2
@@ -332,60 +462,38 @@ view_logs() {
     num=$(clean_input "$num")
     id2=$(printf "%02d" "$num")
     svc="xgost-client-$id2.service"
-
-    if [ ! -f "$SYSTEMD_DIR/$svc" ]; then
-        print_error "服务不存在: $svc"
-        return
-    fi
-
+    [ ! -f "$SYSTEMD_DIR/$svc" ] && { print_error "服务不存在: $svc"; return; }
     print_info "显示 $svc 最近 50 行日志"
     journalctl -u "$svc" -n 50 --no-pager
 }
 
-# ================================
-# 删除隧道
-# ================================
 delete_tunnel() {
     list_tunnels
     printf "请输入要删除的编号: " >&2
     read num
     num=$(clean_input "$num")
     id2=$(printf "%02d" "$num")
-
     conf="$CONF_DIR/client-$id2.env"
     svc="xgost-client-$id2.service"
-
-    if [ ! -f "$conf" ]; then
-        print_error "配置不存在: $conf"
-        return
-    fi
-
+    [ ! -f "$conf" ] && { print_error "配置不存在: $conf"; return; }
     systemctl disable --now "$svc" 2>/dev/null || true
-    rm -f "$conf"
-    rm -f "$SYSTEMD_DIR/$svc"
+    rm -f "$conf" "$SYSTEMD_DIR/$svc"
     systemctl daemon-reload
-
     print_ok "已删除客户端隧道 $num"
 }
 
-# ================================
-# 删除全部隧道
-# ================================
 delete_all() {
     print_title "删除所有客户端隧道"
     read -p "确认删除所有客户端隧道？(yes/no): " ans
     ans=$(clean_input "$ans")
     [ "$ans" != "yes" ] && { print_info "已取消"; return; }
-
     for f in "$CONF_DIR"/client-*.env; do
         [[ -f "$f" ]] || continue
         num=$(basename "$f" .env | cut -d'-' -f2)
         svc="xgost-client-$num.service"
         systemctl disable --now "$svc" 2>/dev/null || true
-        rm -f "$SYSTEMD_DIR/$svc"
-        rm -f "$f"
+        rm -f "$SYSTEMD_DIR/$svc" "$f"
     done
-
     systemctl daemon-reload
     print_ok "已删除所有客户端隧道"
 }
@@ -400,8 +508,11 @@ menu() {
         echo "2) 新增隧道" >&2
         echo "3) 查看隧道状态" >&2
         echo "4) 查看某个隧道日志" >&2
-        echo "5) 删除某个隧道" >&2
-        echo "6) 删除所有隧道" >&2
+        echo "5) 停止某个隧道" >&2
+        echo "6) 启动某个隧道" >&2
+        echo "7) 重启某个隧道" >&2
+        echo "8) 删除某个隧道" >&2
+        echo "9) 删除所有隧道" >&2
         echo "0) 退出" >&2
 
         printf "请选择: " >&2
@@ -409,12 +520,15 @@ menu() {
         c=$(clean_input "$c")
 
         case "$c" in
-            1) list_tunnels;   printf "按回车继续..." >&2; read ;;
-            2) add_tunnel;     printf "按回车继续..." >&2; read ;;
-            3) status_tunnels; printf "按回车继续..." >&2; read ;;
-            4) view_logs;      printf "按回车继续..." >&2; read ;;
-            5) delete_tunnel;  printf "按回车继续..." >&2; read ;;
-            6) delete_all;     printf "按回车继续..." >&2; read ;;
+            1) list_tunnels;    printf "按回车继续..." >&2; read ;;
+            2) add_tunnel;      printf "按回车继续..." >&2; read ;;
+            3) status_tunnels;  printf "按回车继续..." >&2; read ;;
+            4) view_logs;       printf "按回车继续..." >&2; read ;;
+            5) stop_tunnel;     printf "按回车继续..." >&2; read ;;
+            6) start_tunnel;    printf "按回车继续..." >&2; read ;;
+            7) restart_tunnel;  printf "按回车继续..." >&2; read ;;
+            8) delete_tunnel;   printf "按回车继续..." >&2; read ;;
+            9) delete_all;      printf "按回车继续..." >&2; read ;;
             0) exit 0 ;;
             *) print_error "无效选项"; printf "按回车继续..." >&2; read ;;
         esac
