@@ -85,13 +85,14 @@ next_id() {
     echo $((n + 1))
 }
 
+
 # ================================
-# 列出所有临时隧道
+# 列出所有临时隧道（含主进程状态）
 # ================================
 list_tunnels() {
     print_title "临时隧道列表（自动保活）"
-    echo -e "${CYAN}编号 | 本地端口 | 域名 | 监控状态${RESET}" >&2
-    echo "----------------------------------------------------------------------------" >&2
+    echo -e "${CYAN}编号 | 本地端口 | 域名 | 隧道状态 | 监控状态${RESET}" >&2
+    echo "----------------------------------------------------------------------------------------" >&2
     for dir in "$TUNNELS_DIR"/*/; do
         [[ -d "$dir" ]] || continue
         local num=$(basename "$dir")
@@ -100,17 +101,25 @@ list_tunnels() {
             source "$env_file"
             local port="${PORT:-?}"
             local url="${URL:-未获取}"
+
+            # 检查主进程状态
+            local tunnel_pid_file="$dir/tunnel.pid"
+            local tunnel_status="${RED}离线${RESET}"
+            if [[ -f "$tunnel_pid_file" ]] && kill -0 $(cat "$tunnel_pid_file") 2>/dev/null; then
+                tunnel_status="${GREEN}在线${RESET}"
+            fi
+
+            # 检查监控进程状态
             local monitor_pid_file="$dir/monitor.pid"
-            local monitor_status="未运行"
+            local monitor_status="${RED}未运行${RESET}"
             if [[ -f "$monitor_pid_file" ]] && kill -0 $(cat "$monitor_pid_file") 2>/dev/null; then
                 monitor_status="${GREEN}运行中${RESET}"
-            else
-                monitor_status="${RED}未运行${RESET}"
             fi
-            echo -e "${GREEN}$num${RESET}) 端口: ${YELLOW}$port${RESET} | 域名: ${MAGENTA}$url${RESET} | 监控: $monitor_status" >&2
+
+            echo -e "${GREEN}$num${RESET}) 端口: ${YELLOW}$port${RESET} | 域名: ${MAGENTA}$url${RESET} | 隧道: $tunnel_status | 监控: $monitor_status" >&2
         fi
     done
-    echo "----------------------------------------------------------------------------" >&2
+    echo "----------------------------------------------------------------------------------------" >&2
 }
 
 # ================================
