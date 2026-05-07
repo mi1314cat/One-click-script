@@ -17,6 +17,7 @@ RESET="\e[0m"
 print_info()  { echo -e "${CYAN}[Info]${RESET} $1" >&2; }
 print_ok()    { echo -e "${GREEN}[OK]${RESET}  $1" >&2; }
 print_error() { echo -e "${RED}[Error]${RESET} $1" >&2; }
+print_warn()  { echo -e "${YELLOW}[注意]${RESET} $1" >&2; }
 
 print_title() {
     echo -e "${MAGENTA}${BOLD}" >&2
@@ -52,6 +53,11 @@ random_free_port() {
     done
 }
 
+# 生成随机强密码（32位）
+random_auth_pass() {
+    cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1
+}
+
 safe_read() {
     local prompt="$1" default="$2" input
     printf "%s (默认: %s): " "$prompt" "$default" >&2
@@ -77,9 +83,12 @@ safe_read_port() {
 
 install_gost() {
     if [ -x "$GOST_BIN" ]; then
-        return
+        # 尝试确认版本
+        if "$GOST_BIN" -V 2>&1 | grep -qi "gost"; then
+            return
+        fi
     fi
-    print_info "未检测到 gost，正在下载..."
+    print_info "未检测到 gost，正在下载最新版 (v3)..."
     local ARCH FILE_SUFFIX API_JSON URL VERSION
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -88,6 +97,7 @@ install_gost() {
         armv7l|armhf) FILE_SUFFIX="linux_armv7.tar.gz" ;;
         *) print_error "不支持的架构: $ARCH"; exit 1 ;;
     esac
+    # 使用最新 release API，确保 v3 版本
     API_JSON=$(curl -sL https://api.github.com/repos/go-gost/gost/releases/latest)
     if echo "$API_JSON" | grep -q '"browser_download_url"'; then
         URL=$(echo "$API_JSON" | grep browser_download_url | cut -d '"' -f4 | grep "$FILE_SUFFIX" | head -n1)
@@ -96,10 +106,10 @@ install_gost() {
         URL="https://github.com/go-gost/gost/releases/download/v${VERSION}/gost_${VERSION}_${FILE_SUFFIX}"
     fi
     mkdir -p "$BASE_DIR"
-    wget -O /tmp/gost.tar.gz "$URL"
+    wget -q --show-progress -O /tmp/gost.tar.gz "$URL"
     tar -xzf /tmp/gost.tar.gz -C /tmp
     install -m 755 /tmp/gost "$GOST_BIN"
-    print_ok "gost 安装完成：$GOST_BIN"
+    print_ok "gost v3 安装完成：$GOST_BIN"
 }
 
 next_id() {
@@ -109,50 +119,77 @@ next_id() {
 }
 
 list_tunnels() {
-    print_title "当前服务端隧道列表"
-    echo -e "${CYAN}编号 | 本地端口 | 路径 | systemd 名称${RESET}" >&2
-    echo "--------------------------------------------------------" >&2
+    print_title "当前服务端隧道列表（含认证信息）"
+    echo -e "${CYAN}编号 | 本地端口 | 路径 | 认证 (用户名:密码) | systemd 名称${RESET}" >&2
+    echo "--------------------------------------------------------------------------------------------" >&2
     for f in "$CONF_DIR"/server-*.env; do
         [[ -f "$f" ]] || continue
         num=$(basename "$f" .env | cut -d'-' -f2)
-        local_port=$(grep '^LOCAL_PORT=' "$f" | cut -d'=' -f2)
-        ws_path=$(grep '^WS_PATH=' "$f" | cut -d'=' -f2)
+        # 读取配置
+        source "$f"
+        # LOCAL_PORT, WS_PATH, AUTH_USER, AUTH_PASS 已定义
+        local_port="$LOCAL_PORT"
+        ws_path="$WS_PATH"
+        auth_show="${AUTH_USER}:$(echo "$AUTH_PASS" | sed 's/./*/g')"   # 密码用星号掩码
         svc="xgost-server-$(printf "%02d" "$num").service"
-        echo -e "${GREEN}$num${RESET}) 端口: ${YELLOW}$local_port${RESET} | 路径: ${MAGENTA}$ws_path${RESET} | 服务: ${BLUE}$svc${RESET}" >&2
+        echo -e "${GREEN}$num${RESET}) 端口: ${YELLOW}$local_port${RESET} | 路径: ${MAGENTA}$ws_path${RESET} | 认证: ${BLUE}$auth_show${RESET} | 服务: ${CYAN}$svc${RESET}" >&2
     done
-    echo "--------------------------------------------------------" >&2
+    echo "--------------------------------------------------------------------------------------------" >&2
+    echo -e "${YELLOW}提示：完整认证信息请查看对应配置文件 ${CONF_DIR}/server-*.env${RESET}" >&2
 }
 
 add_tunnel() {
     install_gost
-    print_title "新增服务端隧道 (relay+ws)"
+    print_title "新增服务端隧道 (relay+ws with auth)"
 
     default_port=$(random_free_port)
     local_port=$(safe_read_port "$default_port")
-    default_path="/$(cat /proc/sys/kernel/random/uuid)"
+    default_path="/$(cat /proc/sys/kernel/random/uuid | cut -d'-' -f1)"
     ws_path=$(safe_read "请输入 WS 路径" "$default_path")
+
+    # 生成随机认证用户名和密码
+    default_auth_user="gost_$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 6 | head -n 1)"
+    auth_user=$(safe_read "请输入认证用户名" "$default_auth_user")
+    auth_pass=$(random_auth_pass)
+    print_info "自动生成强密码: $auth_pass (请妥善保存)"
+    # 允许用户手动输入密码（可选）
+    read -p "是否自定义密码？(y/N): " custom_pw
+    if [[ "$custom_pw" =~ ^[Yy]$ ]]; then
+        read -s -p "请输入密码: " auth_pass
+        echo
+        read -s -p "确认密码: " auth_pass2
+        echo
+        if [[ "$auth_pass" != "$auth_pass2" ]]; then
+            print_error "两次密码不一致，使用随机密码"
+            auth_pass=$(random_auth_pass)
+        fi
+    fi
 
     id=$(next_id)
     id2=$(printf "%02d" "$id")
     conf="$CONF_DIR/server-$id2.env"
     svc="xgost-server-$id2.service"
 
-cat > "$conf" <<EOF
+    cat > "$conf" <<EOF
 ID=$id
 LOCAL_PORT=$local_port
 WS_PATH=$ws_path
+AUTH_USER=$auth_user
+AUTH_PASS=$auth_pass
 EOF
 
-cat > "$SYSTEMD_DIR/$svc" <<EOF
+    # 构建带认证的 -L 参数
+    cat > "$SYSTEMD_DIR/$svc" <<EOF
 [Unit]
-Description=XGost Server Tunnel $id
+Description=XGost Server Tunnel $id (with auth)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=$GOST_BIN -L relay+ws://127.0.0.1:$local_port?path=$ws_path&bind=true
+ExecStart=$GOST_BIN -L "relay+ws://127.0.0.1:$local_port?path=$ws_path&bind=true&auth=$auth_user:$auth_pass"
 Restart=always
 RestartSec=3
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
@@ -161,12 +198,20 @@ EOF
     systemctl daemon-reload
     systemctl enable --now "$svc"
 
-    print_ok "服务端隧道创建成功"
-    echo -e "编号: $id\n本地端口: $local_port\n路径: $ws_path\nsystemd: $svc" >&2
+    print_ok "服务端隧道创建成功（已启用认证）"
+    echo -e "编号: $id" >&2
+    echo -e "本地端口: $local_port" >&2
+    echo -e "路径: $ws_path" >&2
+    echo -e "用户名: $auth_user" >&2
+    echo -e "密码: $auth_pass" >&2
+    echo -e "systemd 服务: $svc" >&2
+    echo "" >&2
+    print_info "客户端配置示例（需使用相同认证）："
+    echo "  -F \"relay+wss://yourdomain:443?path=$ws_path&auth=$auth_user:$auth_pass&host=yourdomain\"" >&2
 }
 
 status_tunnels() {
-    print_title "服务端隧道状态"
+    print_title "服务端隧道运行状态"
     for f in "$CONF_DIR"/server-*.env; do
         [[ -f "$f" ]] || continue
         num=$(basename "$f" .env | cut -d'-' -f2)
@@ -233,10 +278,10 @@ delete_all() {
 
 menu() {
     while true; do
-        print_title "XGost 服务端隧道面板"
-        echo "1) 查看隧道列表" >&2
-        echo "2) 新增隧道" >&2
-        echo "3) 查看隧道状态" >&2
+        print_title "XGost 服务端隧道面板 (v3 + 认证)"
+        echo "1) 查看隧道列表 (含认证信息)" >&2
+        echo "2) 新增隧道 (自动启用认证)" >&2
+        echo "3) 查看隧道运行状态" >&2
         echo "4) 查看某个隧道日志" >&2
         echo "5) 删除某个隧道" >&2
         echo "6) 删除所有隧道" >&2
