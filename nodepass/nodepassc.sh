@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -e
 
+# ================================
+# 彩色定义
+# ================================
+RED="\e[31m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
+MAGENTA="\e[35m"
+CYAN="\e[36m"
+WHITE="\e[97m"
+BOLD="\e[1m"
+RESET="\e[0m"
+
+# ================================
+# 基础变量
+# ================================
 BASE_DIR="/root/catmi/nodepass"
 BIN_PATH="$BASE_DIR/nodepass"
 CLIENT_BASE="$BASE_DIR/client"
@@ -9,17 +25,21 @@ REPO="NodePassProject/nodepass"
 
 mkdir -p "$BASE_DIR" "$CLIENT_BASE" "$LOG_DIR"
 
-print_info()  { printf "\033[32m[信息]\033[0m %s\n" "$*" >&2; }
-print_error() { printf "\033[31m[错误]\033[0m %s\n" "$*" >&2; }
-print_warn()  { printf "\033[33m[警告]\033[0m %s\n" "$*" >&2; }
+# ================================
+# 打印函数
+# ================================
+print_info()  { echo -e "${CYAN}[信息]${RESET} $1" >&2; }
+print_error() { echo -e "${RED}[错误]${RESET} $1" >&2; }
+print_warn()  { echo -e "${YELLOW}[警告]${RESET} $1" >&2; }
+print_ok()    { echo -e "${GREEN}[OK]${RESET} $1" >&2; }
 
-clean_input() {
-    echo "$1" | tr -d ' \t\r\n'
-}
+clean_input() { echo "$1" | tr -d ' \t\r\n'; }
 
+# ================================
+# 端口检测
+# ================================
 port_in_use() {
-    local port="$1"
-    ss -tuln 2>/dev/null | awk '{print $5}' | grep -qE "[:.]$port\$"
+    ss -tuln 2>/dev/null | awk '{print $5}' | grep -qE "[:.]$1\$"
 }
 
 safe_read_port() {
@@ -35,15 +55,12 @@ safe_read_port() {
 
         if port_in_use "$port"; then
             print_error "端口 $port 已占用"
-            printf "选择操作: [1] 强制使用 [2] 自动换端口 [3] 重新输入: " >&2
+            printf "选择操作: [1] 强制使用] [2] 自动换端口] [3] 重新输入]: " >&2
             read choice
             choice=$(clean_input "$choice")
 
             case "$choice" in
-                1)
-                    echo "$port"
-                    return
-                    ;;
+                1) echo "$port"; return ;;
                 2)
                     local new_port="$port"
                     while port_in_use "$new_port"; do
@@ -54,13 +71,8 @@ safe_read_port() {
                     echo "$new_port"
                     return
                     ;;
-                3)
-                    continue
-                    ;;
-                *)
-                    print_error "无效选择"
-                    continue
-                    ;;
+                3) continue ;;
+                *) print_error "无效选择" ;;
             esac
         fi
 
@@ -69,22 +81,20 @@ safe_read_port() {
     done
 }
 
+# ================================
+# 架构检测 + 下载 NodePass
+# ================================
 detect_arch() {
-    local arch
-    arch=$(uname -m)
-    case "$arch" in
+    case "$(uname -m)" in
         x86_64) echo "amd64" ;;
         aarch64|arm64) echo "arm64" ;;
-        *)
-            print_error "不支持的架构: $arch"
-            exit 1
-            ;;
+        *) print_error "不支持的架构"; exit 1 ;;
     esac
 }
 
 download_nodepass() {
     if [[ -x "$BIN_PATH" ]]; then
-        print_info "NodePass 已存在: $BIN_PATH"
+        print_info "NodePass 已存在"
         return
     fi
 
@@ -93,41 +103,28 @@ download_nodepass() {
 
     print_info "获取 NodePass 最新版本..."
     tag=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
-    if [[ -z "$tag" ]]; then
-        print_error "无法获取最新版本 tag"
-        exit 1
-    fi
     version="${tag#v}"
-    print_info "最新版本: $version (tag: $tag)"
 
     url="https://github.com/${REPO}/releases/download/${tag}/nodepass_${version}_linux_${arch}.tar.gz"
+
     print_info "下载: $url"
 
     tmpdir=$(mktemp -d)
     tarfile="$tmpdir/nodepass.tar.gz"
 
-    curl -L --retry 3 --connect-timeout 10 "$url" -o "$tarfile"
-    if [[ $? -ne 0 ]]; then
-        print_error "下载失败"
-        rm -rf "$tmpdir"
-        exit 1
-    fi
-
+    curl -L "$url" -o "$tarfile"
     tar -xzf "$tarfile" -C "$tmpdir"
-    if [[ ! -f "$tmpdir/nodepass" ]]; then
-        print_error "解压后未找到 nodepass 可执行文件"
-        ls -al "$tmpdir"
-        rm -rf "$tmpdir"
-        exit 1
-    fi
 
     mv "$tmpdir/nodepass" "$BIN_PATH"
     chmod +x "$BIN_PATH"
     rm -rf "$tmpdir"
 
-    print_info "NodePass 安装完成: $BIN_PATH"
+    print_ok "NodePass 下载完成"
 }
 
+# ================================
+# 隧道编号
+# ================================
 next_id() {
     local max=0 id
     for d in "$CLIENT_BASE"/*; do
@@ -139,16 +136,12 @@ next_id() {
     printf "%02d" $((max + 1))
 }
 
-get_client_dir() {
-    local id="$1"
-    echo "$CLIENT_BASE/$id"
-}
+get_client_dir() { echo "$CLIENT_BASE/$1"; }
+get_service_name() { echo "nodepass-client-$1"; }
 
-get_service_name() {
-    local id="$1"
-    echo "nodepass-client-$id"
-}
-
+# ================================
+# 创建隧道
+# ================================
 create_tunnel() {
     download_nodepass
 
@@ -157,24 +150,15 @@ create_tunnel() {
     dir=$(get_client_dir "$id")
     mkdir -p "$dir"
 
-    printf "请输入 Argo 域名 (例如: xxx.example.com): " >&2
+    printf "请输入 Argo 域名: " >&2
     read argo_domain
     argo_domain=$(clean_input "$argo_domain")
-    if [[ -z "$argo_domain" ]]; then
-        print_error "Argo 域名不能为空"
-        return 1
-    fi
+    [[ -z "$argo_domain" ]] && { print_error "Argo 域名不能为空"; return; }
 
-    printf "请输入服务端 WSS 路径 (不含前导 /，长度至少 16 位): " >&2
+    printf "请输入 WSS 路径（至少 16 位）: " >&2
     read wss_path
     wss_path=$(clean_input "$wss_path")
-    if [[ -z "$wss_path" ]]; then
-        print_error "WSS 路径不能为空"
-        return 1
-    fi
-    if [[ ${#wss_path} -lt 16 ]]; then
-        print_warn "路径长度不足 16 位，注意与服务端保持一致"
-    fi
+    [[ -z "$wss_path" ]] && { print_error "WSS 路径不能为空"; return; }
 
     local_port=$(safe_read_port "8888")
 
@@ -182,13 +166,12 @@ create_tunnel() {
 {
   "server": "wss://$argo_domain/$wss_path",
   "local": "127.0.0.1:$local_port",
-  "pool": {
-    "size": 8
-  }
+  "pool": { "size": 8 }
 }
 EOF
 
     local svc="/etc/systemd/system/$(get_service_name "$id").service"
+
     cat >"$svc" <<EOF
 [Unit]
 Description=NodePass Client $id
@@ -205,117 +188,121 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable "$(get_service_name "$id")" >/dev/null 2>&1 || true
+    systemctl enable "$(get_service_name "$id")"
     systemctl restart "$(get_service_name "$id")"
 
-    print_info "创建客户端隧道成功：ID=$id"
-    print_info "Argo 域名: $argo_domain"
-    print_info "WSS 路径: /$wss_path"
-    print_info "本地端口: $local_port"
+    print_ok "创建客户端隧道成功：ID=$id"
 }
 
+# ================================
+# 美化版隧道列表（含状态）
+# ================================
 list_tunnels() {
-    echo "ID    Argo域名                 路径                 本地端口"
-    echo "-------------------------------------------------------------"
+    echo -e "\n${CYAN}╔══════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${CYAN}║                NodePass 客户端隧道列表（状态版）              ║${RESET}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${RESET}"
+
+    printf "${GREEN}%-5s %-24s %-20s %-10s %-10s${RESET}\n" "ID" "Argo 域名" "WSS 路径" "端口" "状态"
+    echo "--------------------------------------------------------------------------"
+
     for d in "$CLIENT_BASE"/*; do
         [[ -d "$d" ]] || continue
-        local id server local path domain port
+
         id=$(basename "$d")
-        server=$(grep '"server"' "$d/client.json" 2>/dev/null | sed -E 's/.*"server": *"([^"]+)".*/\1/')
-        local=$(grep '"local"' "$d/client.json" 2>/dev/null | sed -E 's/.*"local": *"([^"]+)".*/\1/')
+        conf="$d/client.json"
+
+        server=$(jq -r '.server' "$conf")
+        local_port=$(jq -r '.local' "$conf" | sed -E 's/.*:([0-9]+)$/\1/')
         domain=$(echo "$server" | sed -E 's#^wss://([^/]+)/.*#\1#')
         path=$(echo "$server" | sed -E 's#^wss://[^/]+/(.*)$#/\1#')
-        port=$(echo "$local" | sed -E 's/.*:([0-9]+)$/\1/')
-        printf "%-5s %-24s %-20s %s\n" "$id" "${domain:-?}" "${path:-?}" "${port:-?}"
+
+        svc="nodepass-client-$id"
+
+        if systemctl is-active --quiet "$svc"; then
+            status="${GREEN}运行中${RESET}"
+        else
+            status="${RED}停止${RESET}"
+        fi
+
+        printf "%-5s %-24s %-20s %-10s %b\n" "$id" "$domain" "$path" "$local_port" "$status"
     done
+
+    echo
 }
 
+# ================================
+# 选择隧道（带状态提示）
+# ================================
 choose_id() {
-    local id
-    printf "请输入隧道 ID (例如 01): "
+    list_tunnels
+    printf "${YELLOW}请输入隧道 ID: ${RESET}" >&2
     read id
     id=$(clean_input "$id")
-    [[ -d "$(get_client_dir "$id")" ]] || { print_error "隧道不存在: $id"; return 1; }
+
+    [[ -d "$(get_client_dir "$id")" ]] || { print_error "隧道不存在"; return 1; }
+
+    svc="nodepass-client-$id"
+    if systemctl is-active --quiet "$svc"; then
+        print_ok "隧道 $id 当前状态：运行中"
+    else
+        print_warn "隧道 $id 当前状态：停止"
+    fi
+
     echo "$id"
 }
 
-show_logs() {
-    local id svc
-    id=$(choose_id) || return
-    svc=$(get_service_name "$id")
-    journalctl -u "$svc" -f -n 100
-}
-
-start_tunnel() {
-    local id svc
-    id=$(choose_id) || return
-    svc=$(get_service_name "$id")
-    systemctl start "$svc"
-    print_info "已启动隧道 $id"
-}
-
-stop_tunnel() {
-    local id svc
-    id=$(choose_id) || return
-    svc=$(get_service_name "$id")
-    systemctl stop "$svc"
-    print_info "已停止隧道 $id"
-}
-
-restart_tunnel() {
-    local id svc
-    id=$(choose_id) || return
-    svc=$(get_service_name "$id")
-    systemctl restart "$svc"
-    print_info "已重启隧道 $id"
-}
-
-show_conf() {
-    local id dir
-    id=$(choose_id) || return
-    dir=$(get_client_dir "$id")
-    cat "$dir/client.json"
-}
+# ================================
+# 隧道操作
+# ================================
+show_logs() { id=$(choose_id) || return; journalctl -u "$(get_service_name "$id")" -f -n 100; }
+start_tunnel() { id=$(choose_id) || return; systemctl start "$(get_service_name "$id")"; print_ok "已启动"; }
+stop_tunnel() { id=$(choose_id) || return; systemctl stop "$(get_service_name "$id")"; print_ok "已停止"; }
+restart_tunnel() { id=$(choose_id) || return; systemctl restart "$(get_service_name "$id")"; print_ok "已重启"; }
+show_conf() { id=$(choose_id) || return; cat "$(get_client_dir "$id")/client.json"; }
 
 delete_tunnel() {
-    local id dir svc unit
     id=$(choose_id) || return
     dir=$(get_client_dir "$id")
     svc=$(get_service_name "$id")
-    unit="/etc/systemd/system/$svc.service"
 
-    systemctl stop "$svc" 2>/dev/null || true
-    systemctl disable "$svc" 2>/dev/null || true
-    rm -f "$unit"
+    systemctl stop "$svc" || true
+    systemctl disable "$svc" || true
+    rm -f "/etc/systemd/system/$svc.service"
     systemctl daemon-reload
-
     rm -rf "$dir"
 
-    print_info "已彻底删除隧道 $id（服务 + 配置目录）"
+    print_ok "已彻底删除隧道 $id"
 }
 
+# ================================
+# 主菜单（美化版）
+# ================================
 menu() {
     while true; do
-        echo "=============================="
-        echo " NodePass 客户端多隧道面板"
-        echo " 目录: $BASE_DIR"
-        echo "=============================="
-        echo "1. 创建新的客户端隧道"
-        echo "2. 查看所有隧道"
-        echo "3. 查看某个隧道日志"
-        echo "4. 删除某个隧道"
-        echo "5. 重启某个隧道"
-        echo "6. 停止某个隧道"
-        echo "7. 启动某个隧道"
-        echo "8. 查看某个隧道配置"
-        echo "0. 退出"
-        echo "=============================="
-        printf "请输入选项: "
+        echo -e "\n${MAGENTA}${BOLD}"
+        echo "╔══════════════════════════════════════════════╗"
+        echo "║        NodePass 客户端多隧道管理面板         ║"
+        echo "╚══════════════════════════════════════════════╝"
+        echo -e "${RESET}"
+
+        echo -e "${CYAN}1${RESET}) 创建新的客户端隧道"
+        echo -e "${CYAN}2${RESET}) 查看所有隧道（含状态）"
+        echo -e "${CYAN}3${RESET}) 查看某个隧道日志"
+        echo -e "${CYAN}4${RESET}) 删除某个隧道"
+        echo -e "${CYAN}5${RESET}) 重启某个隧道"
+        echo -e "${CYAN}6${RESET}) 停止某个隧道"
+        echo -e "${CYAN}7${RESET}) 启动某个隧道"
+        echo -e "${CYAN}8${RESET}) 查看某个隧道配置"
+        echo -e "${CYAN}0${RESET}) 退出"
+        echo
+
+        printf "${YELLOW}请选择操作: ${RESET}"
         read choice
         choice=$(clean_input "$choice")
+
         case "$choice" in
             1) create_tunnel ;;
-            2) list_tunnels ;;
+            2) list_tunnels; read -p "按回车继续..." ;;
             3) show_logs ;;
             4) delete_tunnel ;;
             5) restart_tunnel ;;
@@ -323,7 +310,7 @@ menu() {
             7) start_tunnel ;;
             8) show_conf ;;
             0) exit 0 ;;
-            *) print_error "无效选项" ;;
+            *) print_error "无效选项"; read -p "按回车继续..." ;;
         esac
     done
 }
