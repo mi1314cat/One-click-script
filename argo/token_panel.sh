@@ -404,10 +404,7 @@ purge_everything() {
 
     systemctl daemon-reload
 
-    # 删除脚本自身
-    SCRIPT_PATH="$(realpath "$0" 2>/dev/null || echo "$0")"
-    print_info "删除脚本 $SCRIPT_PATH ..."
-    rm -f "$SCRIPT_PATH"
+    
 
     echo -e "${GREEN}彻底清理完成！所有文件已删除。脚本即将退出。${RESET}"
     exit 0
