@@ -81,9 +81,22 @@ safe_read_port() {
     done
 }
 
+# ---------- Base64 编码工具 ----------
+base64_encode() {
+    local input="$1"
+    if command -v base64 >/dev/null 2>&1; then
+        echo -n "$input" | base64 -w 0
+    elif command -v openssl >/dev/null 2>&1; then
+        echo -n "$input" | openssl base64 -A
+    else
+        print_error "系统中未找到 base64 或 openssl 命令，无法进行认证编码。"
+        print_info "请安装 coreutils 或 openssl 后重试。"
+        exit 1
+    fi
+}
+
 install_gost() {
     if [ -x "$GOST_BIN" ]; then
-        # 尝试确认版本
         if "$GOST_BIN" -V 2>&1 | grep -qi "gost"; then
             return
         fi
@@ -97,7 +110,6 @@ install_gost() {
         armv7l|armhf) FILE_SUFFIX="linux_armv7.tar.gz" ;;
         *) print_error "不支持的架构: $ARCH"; exit 1 ;;
     esac
-    # 使用最新 release API，确保 v3 版本
     API_JSON=$(curl -sL https://api.github.com/repos/go-gost/gost/releases/latest)
     if echo "$API_JSON" | grep -q '"browser_download_url"'; then
         URL=$(echo "$API_JSON" | grep browser_download_url | cut -d '"' -f4 | grep "$FILE_SUFFIX" | head -n1)
@@ -125,14 +137,14 @@ list_tunnels() {
     for f in "$CONF_DIR"/server-*.env; do
         [[ -f "$f" ]] || continue
         num=$(basename "$f" .env | cut -d'-' -f2)
-        # 读取配置
-        source "$f"
-        # LOCAL_PORT, WS_PATH, AUTH_USER, AUTH_PASS 已定义
-        local_port="$LOCAL_PORT"
-        ws_path="$WS_PATH"
-        auth_show="${AUTH_USER}:$(echo "$AUTH_PASS" | sed 's/./*/g')"   # 密码用星号掩码
+        source "$f"  # 导入 LOCAL_PORT, WS_PATH, AUTH_USER, AUTH_PASS
+        local_port="${LOCAL_PORT:-?}"
+        ws_path="${WS_PATH:-?}"
+        auth_user="${AUTH_USER:-?}"
+        auth_pass="${AUTH_PASS:-?}"
+        masked_pass=$(echo "$auth_pass" | sed 's/./*/g')
         svc="xgost-server-$(printf "%02d" "$num").service"
-        echo -e "${GREEN}$num${RESET}) 端口: ${YELLOW}$local_port${RESET} | 路径: ${MAGENTA}$ws_path${RESET} | 认证: ${BLUE}$auth_show${RESET} | 服务: ${CYAN}$svc${RESET}" >&2
+        echo -e "${GREEN}$num${RESET}) 端口: ${YELLOW}$local_port${RESET} | 路径: ${MAGENTA}$ws_path${RESET} | 认证: ${BLUE}$auth_user:$masked_pass${RESET} | 服务: ${CYAN}$svc${RESET}" >&2
     done
     echo "--------------------------------------------------------------------------------------------" >&2
     echo -e "${YELLOW}提示：完整认证信息请查看对应配置文件 ${CONF_DIR}/server-*.env${RESET}" >&2
@@ -152,7 +164,6 @@ add_tunnel() {
     auth_user=$(safe_read "请输入认证用户名" "$default_auth_user")
     auth_pass=$(random_auth_pass)
     print_info "自动生成强密码: $auth_pass (请妥善保存)"
-    # 允许用户手动输入密码（可选）
     read -p "是否自定义密码？(y/N): " custom_pw
     if [[ "$custom_pw" =~ ^[Yy]$ ]]; then
         read -s -p "请输入密码: " auth_pass
@@ -165,11 +176,15 @@ add_tunnel() {
         fi
     fi
 
+    # Base64 编码认证信息（gost v3 服务端要求）
+    AUTH_BASE64=$(base64_encode "$auth_user:$auth_pass")
+
     id=$(next_id)
     id2=$(printf "%02d" "$id")
     conf="$CONF_DIR/server-$id2.env"
     svc="xgost-server-$id2.service"
 
+    # 保存明文配置（方便查看）
     cat > "$conf" <<EOF
 ID=$id
 LOCAL_PORT=$local_port
@@ -178,7 +193,7 @@ AUTH_USER=$auth_user
 AUTH_PASS=$auth_pass
 EOF
 
-    # 构建带认证的 -L 参数
+    # 服务文件写入 Base64 编码的 auth 参数
     cat > "$SYSTEMD_DIR/$svc" <<EOF
 [Unit]
 Description=XGost Server Tunnel $id (with auth)
@@ -186,7 +201,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$GOST_BIN -L "relay+ws://127.0.0.1:$local_port?path=$ws_path&bind=true&auth=$auth_user:$auth_pass"
+ExecStart=$GOST_BIN -L "relay+ws://127.0.0.1:$local_port?path=$ws_path&bind=true&auth=$AUTH_BASE64"
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -240,6 +255,54 @@ view_logs() {
     journalctl -u "$svc" -n 50 --no-pager
 }
 
+stop_tunnel() {
+    list_tunnels
+    printf "请输入要停止的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    id2=$(printf "%02d" "$num")
+    svc="xgost-server-$id2.service"
+    if [ ! -f "$SYSTEMD_DIR/$svc" ]; then
+        print_error "服务不存在: $svc"
+        return
+    fi
+    systemctl stop "$svc"
+    print_ok "已停止 $svc"
+    systemctl status "$svc" --no-pager -l | head -n 5 >&2
+}
+
+start_tunnel() {
+    list_tunnels
+    printf "请输入要启动的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    id2=$(printf "%02d" "$num")
+    svc="xgost-server-$id2.service"
+    if [ ! -f "$SYSTEMD_DIR/$svc" ]; then
+        print_error "服务不存在: $svc"
+        return
+    fi
+    systemctl start "$svc"
+    print_ok "已启动 $svc"
+    systemctl status "$svc" --no-pager -l | head -n 5 >&2
+}
+
+restart_tunnel() {
+    list_tunnels
+    printf "请输入要重启的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    id2=$(printf "%02d" "$num")
+    svc="xgost-server-$id2.service"
+    if [ ! -f "$SYSTEMD_DIR/$svc" ]; then
+        print_error "服务不存在: $svc"
+        return
+    fi
+    systemctl restart "$svc"
+    print_ok "已重启 $svc"
+    systemctl status "$svc" --no-pager -l | head -n 5 >&2
+}
+
 delete_tunnel() {
     list_tunnels
     printf "请输入要删除的编号: " >&2
@@ -283,8 +346,11 @@ menu() {
         echo "2) 新增隧道 (自动启用认证)" >&2
         echo "3) 查看隧道运行状态" >&2
         echo "4) 查看某个隧道日志" >&2
-        echo "5) 删除某个隧道" >&2
-        echo "6) 删除所有隧道" >&2
+        echo "5) 停止某个隧道" >&2
+        echo "6) 启动某个隧道" >&2
+        echo "7) 重启某个隧道" >&2
+        echo "8) 删除某个隧道" >&2
+        echo "9) 删除所有隧道" >&2
         echo "0) 退出" >&2
         printf "请选择: " >&2
         read c
@@ -294,8 +360,11 @@ menu() {
             2) add_tunnel;   printf "按回车继续..." >&2; read ;;
             3) status_tunnels; printf "按回车继续..." >&2; read ;;
             4) view_logs;    printf "按回车继续..." >&2; read ;;
-            5) delete_tunnel; printf "按回车继续..." >&2; read ;;
-            6) delete_all;   printf "按回车继续..." >&2; read ;;
+            5) stop_tunnel;  printf "按回车继续..." >&2; read ;;
+            6) start_tunnel; printf "按回车继续..." >&2; read ;;
+            7) restart_tunnel; printf "按回车继续..." >&2; read ;;
+            8) delete_tunnel; printf "按回车继续..." >&2; read ;;
+            9) delete_all;   printf "按回车继续..." >&2; read ;;
             0) exit 0 ;;
             *) print_error "无效选项"; printf "按回车继续..." >&2; read ;;
         esac
