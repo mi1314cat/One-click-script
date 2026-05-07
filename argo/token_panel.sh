@@ -1,173 +1,354 @@
 #!/usr/bin/env bash
 set -e
 
-# ============================
-# 基础路径（完全隔离）
-# ============================
-WORKDIR="/root/argo_token"
-BIN="$WORKDIR/cloudflared"
-TOKEN_INFO="$WORKDIR/token_tunnel.txt"
-LOG_FILE="$WORKDIR/token.log"
-HEALTH_SCRIPT="$WORKDIR/token_health.sh"
+# ================================
+# 彩色定义（与 gost/argo 脚本统一）
+# ================================
+RED="\e[31m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
+MAGENTA="\e[35m"
+CYAN="\e[36m"
+WHITE="\e[97m"
+BOLD="\e[1m"
+RESET="\e[0m"
 
-mkdir -p "$WORKDIR"
+print_info()  { echo -e "${CYAN}[Info]${RESET} $1" >&2; }
+print_ok()    { echo -e "${GREEN}[OK]${RESET}  $1" >&2; }
+print_error() { echo -e "${RED}[Error]${RESET} $1" >&2; }
+print_warn()  { echo -e "${YELLOW}[提醒]${RESET} $1" >&2; }
 
-# ============================
-# 颜色
-# ============================
-GREEN="\033[32m"
-RED="\033[31m"
-YELLOW="\033[33m"
-BLUE="\033[36m"
-NC="\033[0m"
-
-line(){ echo -e "${BLUE}----------------------------------------${NC}"; }
-title(){ echo -e "${GREEN}$1${NC}"; line; }
-
-# ============================
-# 自动识别架构并下载 cloudflared
-# ============================
-install_cloudflared(){
-    ARCH=$(uname -m)
-
-    case "$ARCH" in
-        x86_64)
-            CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-            ;;
-        aarch64)
-            CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-            ;;
-        armv7l|armhf)
-            CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm"
-            ;;
-        *)
-            echo -e "${RED}不支持的架构: $ARCH${NC}"
-            exit 1
-            ;;
-    esac
-
-    echo -e "${YELLOW}正在下载 cloudflared ($ARCH)...${NC}"
-    wget -qO "$BIN" "$CFD_URL" || {
-        echo -e "${RED}cloudflared 下载失败${NC}"
-        exit 1
-    }
-    chmod +x "$BIN"
+print_title() {
+    echo -e "${MAGENTA}${BOLD}" >&2
+    echo "╔══════════════════════════════════════════════╗" >&2
+    printf "║ %-42s ║\n" "$1" >&2
+    echo "╚══════════════════════════════════════════════╝" >&2
+    echo -e "${RESET}" >&2
 }
 
-# ============================
-# cloudflared 检查（损坏自动修复）
-# ============================
-check_cloudflared(){
-    if [[ ! -f "$BIN" ]]; then
-        install_cloudflared
-    elif ! "$BIN" --version >/dev/null 2>&1; then
-        echo -e "${RED}cloudflared 文件损坏，重新下载...${NC}"
-        rm -f "$BIN"
-        install_cloudflared
+# ================================
+# 基础路径（完全隔离，不影响 argo 文件模式）
+# ================================
+BASE_DIR="/root/catmi/argo_token"
+BIN="$BASE_DIR/cloudflared"
+TUNNELS_DIR="$BASE_DIR/tunnels"
+SYSTEMD_DIR="/etc/systemd/system"
+HEALTH_SCRIPT="$BASE_DIR/token_health.sh"
+
+mkdir -p "$TUNNELS_DIR"
+
+# ================================
+# 工具函数
+# ================================
+clean_input() {
+    echo "$1" | tr -d '\000-\037'
+}
+
+safe_read() {
+    local prompt="$1" default="$2" input
+    printf "%s (默认: %s): " "$prompt" "$default" >&2
+    read input
+    input=$(clean_input "$input")
+    echo "${input:-$default}"
+}
+
+install_cloudflared() {
+    if [[ -x "$BIN" ]] && "$BIN" --version >/dev/null 2>&1; then
+        return
     fi
+    print_info "未检测到 cloudflared，正在下载最新版..."
+    local ARCH
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)     CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" ;;
+        aarch64)    CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64" ;;
+        armv7l|armhf) CFD_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm" ;;
+        *) print_error "不支持的架构: $ARCH"; exit 1 ;;
+    esac
+    wget -qO "$BIN" "$CFD_URL" || { print_error "cloudflared 下载失败"; exit 1; }
+    chmod +x "$BIN"
+    print_ok "cloudflared 安装完成：$BIN"
 }
 
-# ============================
-# 创建 Token 模式固定隧道
-# ============================
-create_token_tunnel(){
-    check_cloudflared
-    title "创建 Token 模式固定隧道"
+next_id() {
+    local n
+    n=$(ls -d "$TUNNELS_DIR"/*/ 2>/dev/null | wc -l)
+    echo $((n + 1))
+}
 
-    echo -e "${YELLOW}如何获取 Cloudflare Argo Token：${NC}"
-    echo -e "1. 登录 Cloudflare Dashboard"
-    echo -e "2. 进入 Zero Trust 面板： https://one.dash.cloudflare.com/"
-    echo -e "3. 左侧菜单：Access → Tunnels"
-    echo -e "4. 找到你创建的隧道 → 右侧复制 Token"
-    echo -e "5. Token 格式类似："
-    echo -e "   ${GREEN}eyJhIjoiY2YtYWNjb3VudC0xMjMiLCJ0IjoiYWJjZGVmZ2hpamtsbW5vcHFyIn0...${NC}"
-    echo
+# ================================
+# 列出所有 Token 隧道
+# ================================
+list_tunnels() {
+    print_title "Token 模式隧道列表"
+    echo -e "${CYAN}编号 | 备注名称 | Token (前20字符) | systemd 服务${RESET}" >&2
+    echo "----------------------------------------------------------------------------" >&2
+    for dir in "$TUNNELS_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        local num=$(basename "$dir")
+        local env_file="$dir/token.env"
+        if [[ -f "$env_file" ]]; then
+            source "$env_file"
+            local note="${NOTE:-无}"
+            local token_prefix="${TOKEN:0:20}..."
+            local svc="argo-token-${num}.service"
+            echo -e "${GREEN}$num${RESET}) 备注: ${YELLOW}$note${RESET} | Token: ${MAGENTA}$token_prefix${RESET} | 服务: ${BLUE}$svc${RESET}" >&2
+        fi
+    done
+    echo "----------------------------------------------------------------------------" >&2
+}
 
-    read -p "请输入 Cloudflare Argo Token: " TOKEN
-    [[ -z "$TOKEN" ]] && echo -e "${RED}Token 不能为空${NC}" && return
+# ================================
+# 新增 Token 隧道
+# ================================
+add_tunnel() {
+    install_cloudflared
+    print_title "新增 Token 模式隧道"
 
-    echo "$TOKEN" > "$TOKEN_INFO"
+    echo -e "${YELLOW}如何获取 Cloudflare Argo Token：${RESET}" >&2
+    echo "1. 登录 Cloudflare Dashboard" >&2
+    echo "2. 进入 Zero Trust 面板： https://one.dash.cloudflare.com/" >&2
+    echo "3. 左侧菜单：Access → Tunnels" >&2
+    echo "4. 找到你创建的隧道 → 右侧复制 Token" >&2
+    echo "5. Token 格式类似：eyJhIjoiY2YtYWNjb3VudC0xMjMiLCJ0IjoiYWJjZGVmZ2hpamtsbW5vcHFyIn0..." >&2
+    echo ""
 
-cat > /etc/systemd/system/argo-token.service <<EOF
+    # 输入 Token
+    printf "请输入 Cloudflare Argo Token (必填): " >&2
+    read TOKEN
+    TOKEN=$(clean_input "$TOKEN")
+    if [[ -z "$TOKEN" ]]; then
+        print_error "Token 不能为空"
+        return 1
+    fi
+
+    # 输入备注（可选）
+    printf "请输入隧道备注（方便识别，例如：Web 服务, SSH 等）: " >&2
+    read NOTE
+    NOTE=$(clean_input "$NOTE")
+    NOTE="${NOTE:-未备注}"
+
+    # 隧道编号
+    local id=$(next_id)
+    local id2=$(printf "%02d" "$id")
+    local tunnel_dir="$TUNNELS_DIR/$id2"
+    mkdir -p "$tunnel_dir"
+
+    # 保存配置
+    cat > "$tunnel_dir/token.env" <<EOF
+ID=$id
+TOKEN=$TOKEN
+NOTE=$NOTE
+EOF
+
+    # 创建 systemd 服务
+    local svc="argo-token-$id2.service"
+    local log_file="$tunnel_dir/argo.log"
+    cat > "$SYSTEMD_DIR/$svc" <<EOF
 [Unit]
-Description=Argo Tunnel Token Mode
+Description=Argo Token Tunnel $id2 ($NOTE)
 After=network.target
 
 [Service]
-WorkingDirectory=$WORKDIR
+WorkingDirectory=$tunnel_dir
 ExecStart=$BIN tunnel run --token $TOKEN
 Restart=always
 RestartSec=3
 KillMode=process
-StandardOutput=append:$LOG_FILE
-StandardError=append:$LOG_FILE
+StandardOutput=append:$log_file
+StandardError=append:$log_file
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable argo-token
-    systemctl restart argo-token
+    systemctl enable --now "$svc"
 
-    echo -e "${GREEN}Token 模式固定隧道已启动${NC}"
+    print_ok "Token 隧道创建成功"
+    echo -e "编号: ${GREEN}$id2${RESET}"
+    echo -e "备注: ${YELLOW}$NOTE${RESET}"
+    echo -e "Token (已隐藏): ${MAGENTA}${TOKEN:0:20}...${RESET}"
+    echo -e "Systemd 服务: ${BLUE}$svc${RESET}"
+    echo ""
+    print_info "此隧道对应的 Cloudflare 面板配置需自行设置 ingress 规则"
 }
 
-# ============================
-# 手动诊断 + 自动修复
-# ============================
-heal_token_manual(){
-    if [[ ! -f "$TOKEN_INFO" ]]; then
-        echo -e "${RED}未创建 Token 模式隧道${NC}"
+# ================================
+# 查看状态
+# ================================
+status_tunnels() {
+    print_title "Token 隧道运行状态"
+    for dir in "$TUNNELS_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        local num=$(basename "$dir")
+        local svc="argo-token-${num}.service"
+        if systemctl is-active --quiet "$svc"; then
+            echo -e "隧道 ${CYAN}$num${RESET} -> $svc : ${GREEN}运行中${RESET}" >&2
+        else
+            echo -e "隧道 ${CYAN}$num${RESET} -> $svc : ${RED}未运行${RESET}" >&2
+        fi
+    done
+}
+
+# ================================
+# 查看日志
+# ================================
+view_logs() {
+    list_tunnels
+    printf "请输入要查看日志的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    local tunnel_dir="$TUNNELS_DIR/$num"
+    if [[ ! -d "$tunnel_dir" ]]; then
+        print_error "隧道不存在: $num"
         return
     fi
-
-    echo -e "${BLUE}检测 Token 隧道状态...${NC}"
-
-    if systemctl is-active --quiet argo-token; then
-        echo -e "${GREEN}Token 隧道正在运行${NC}"
-        return
-    fi
-
-    echo -e "${RED}Token 隧道未运行，正在自动修复...${NC}"
-
-    systemctl restart argo-token
-    sleep 2
-
-    if systemctl is-active --quiet argo-token; then
-        echo -e "${GREEN}修复成功${NC}"
+    local log_file="$tunnel_dir/argo.log"
+    if [[ -f "$log_file" ]]; then
+        print_info "显示 argo-token-${num}.service 最近 50 行日志"
+        tail -n 50 "$log_file"
     else
-        echo -e "${RED}修复失败${NC}"
+        print_error "日志文件不存在"
     fi
 }
 
-# ============================
-# systemd 自动修复
-# ============================
-generate_token_health_script(){
-cat > "$HEALTH_SCRIPT" <<EOF
-#!/usr/bin/env bash
-if ! systemctl is-active --quiet argo-token; then
-    systemctl restart argo-token
-fi
-EOF
-
-chmod +x "$HEALTH_SCRIPT"
+# ================================
+# 停止、启动、重启
+# ================================
+stop_tunnel() {
+    list_tunnels
+    printf "请输入要停止的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    local svc="argo-token-${num}.service"
+    if ! systemctl list-unit-files | grep -q "$svc"; then
+        print_error "服务不存在: $svc"
+        return
+    fi
+    systemctl stop "$svc"
+    print_ok "已停止 $svc"
+    systemctl status "$svc" --no-pager -l | head -n 5 >&2
 }
 
-install_token_health_timer(){
-cat > /etc/systemd/system/argo-token-health.service <<EOF
+start_tunnel() {
+    list_tunnels
+    printf "请输入要启动的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    local svc="argo-token-${num}.service"
+    if ! systemctl list-unit-files | grep -q "$svc"; then
+        print_error "服务不存在: $svc"
+        return
+    fi
+    systemctl start "$svc"
+    print_ok "已启动 $svc"
+    systemctl status "$svc" --no-pager -l | head -n 5 >&2
+}
+
+restart_tunnel() {
+    list_tunnels
+    printf "请输入要重启的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    local svc="argo-token-${num}.service"
+    if ! systemctl list-unit-files | grep -q "$svc"; then
+        print_error "服务不存在: $svc"
+        return
+    fi
+    systemctl restart "$svc"
+    print_ok "已重启 $svc"
+    systemctl status "$svc" --no-pager -l | head -n 5 >&2
+}
+
+# ================================
+# 删除隧道
+# ================================
+delete_tunnel() {
+    list_tunnels
+    printf "请输入要删除的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    local tunnel_dir="$TUNNELS_DIR/$num"
+    local svc="argo-token-${num}.service"
+    if [[ ! -d "$tunnel_dir" ]]; then
+        print_error "隧道不存在: $num"
+        return
+    fi
+    systemctl disable --now "$svc" 2>/dev/null || true
+    rm -f "$SYSTEMD_DIR/$svc"
+    rm -rf "$tunnel_dir"
+    systemctl daemon-reload
+    print_ok "已删除 Token 隧道 $num"
+}
+
+delete_all_tunnels() {
+    print_title "删除所有 Token 隧道"
+    read -p "确认删除所有 Token 隧道？(yes/no): " ans
+    ans=$(clean_input "$ans")
+    [[ "$ans" != "yes" ]] && { print_info "已取消"; return; }
+    for dir in "$TUNNELS_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        local num=$(basename "$dir")
+        local svc="argo-token-${num}.service"
+        systemctl disable --now "$svc" 2>/dev/null || true
+        rm -f "$SYSTEMD_DIR/$svc"
+        rm -rf "$dir"
+    done
+    systemctl daemon-reload
+    print_ok "已删除所有 Token 隧道"
+}
+
+# ================================
+# 健康检查（检测所有隧道服务是否 active，否则重启）
+# ================================
+heal_check() {
+    print_info "正在检查所有 Token 隧道健康状态..."
+    for dir in "$TUNNELS_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        local num=$(basename "$dir")
+        local svc="argo-token-${num}.service"
+        if systemctl is-active --quiet "$svc"; then
+            echo -e "隧道 $num ($svc) : ${GREEN}正常${RESET}"
+        else
+            echo -e "隧道 $num ($svc) : ${RED}未运行${RESET}，尝试重启..."
+            systemctl restart "$svc"
+        fi
+    done
+}
+
+# ================================
+# 定时健康检查安装
+# ================================
+install_heal_timer() {
+    cat > "$HEALTH_SCRIPT" <<'HEAL_EOF'
+#!/usr/bin/env bash
+BASE_DIR="/root/catmi/argo_token"
+TUNNELS_DIR="$BASE_DIR/tunnels"
+for dir in "$TUNNELS_DIR"/*/; do
+    [[ -d "$dir" ]] || continue
+    num=$(basename "$dir")
+    svc="argo-token-${num}.service"
+    if ! systemctl is-active --quiet "$svc"; then
+        systemctl restart "$svc"
+    fi
+done
+HEAL_EOF
+    chmod +x "$HEALTH_SCRIPT"
+
+    cat > /etc/systemd/system/argo-token-health.service <<EOF
 [Unit]
-Description=自动修复 Token 模式隧道
+Description=Token Tunnel Health One-shot
 
 [Service]
 Type=oneshot
 ExecStart=/bin/bash $HEALTH_SCRIPT
 EOF
 
-cat > /etc/systemd/system/argo-token-health.timer <<EOF
+    cat > /etc/systemd/system/argo-token-health.timer <<EOF
 [Unit]
-Description=每 5 分钟自动修复 Token 模式隧道
+Description=Every 5 minutes check token tunnels
 
 [Timer]
 OnBootSec=30
@@ -177,107 +358,103 @@ OnUnitActiveSec=300
 WantedBy=timers.target
 EOF
 
-systemctl daemon-reload
-systemctl enable argo-token-health.timer
-systemctl start argo-token-health.timer
+    systemctl daemon-reload
+    systemctl enable argo-token-health.timer --now 2>/dev/null || true
+    print_ok "Token 健康检查定时器已安装（每5分钟）"
 }
 
-# ============================
-# 删除 Token 隧道（含 systemd）
-# ============================
-delete_token_tunnel(){
-    echo -e "${YELLOW}确认删除 Token 模式隧道？(YES 删除)${NC}"
-    read -p "> " C
-    [[ "$C" != "YES" ]] && echo "已取消" && return
-
-    systemctl stop argo-token 2>/dev/null
-    systemctl disable argo-token 2>/dev/null
-    rm -f /etc/systemd/system/argo-token.service
-
-    systemctl stop argo-token-health.timer 2>/dev/null
-    systemctl disable argo-token-health.timer 2>/dev/null
-    rm -f /etc/systemd/system/argo-token-health.timer
-    rm -f /etc/systemd/system/argo-token-health.service
-
-    rm -f "$TOKEN_INFO" "$HEALTH_SCRIPT"
-
-    echo -e "${GREEN}Token 模式隧道已删除${NC}"
-}
-
-# ============================
-# 删除所有文件（彻底清理）
-# ============================
-delete_all(){
-    echo -e "${YELLOW}此操作将删除整个 /root/argo_token 目录，确认？(YES 删除)${NC}"
-    read -p "> " C
-    [[ "$C" != "YES" ]] && echo "已取消" && return
-
-    delete_token_tunnel
-    rm -rf "$WORKDIR"
-
-    echo -e "${GREEN}所有 Token 隧道文件已彻底删除${NC}"
-}
-
-# ============================
-# 查看日志
-# ============================
-view_log(){
-    title "Token 隧道日志"
-    if [[ -f "$LOG_FILE" ]]; then
-        tail -n 50 "$LOG_FILE"
-    else
-        echo -e "${RED}没有日志文件${NC}"
+# ================================
+# 一键彻底删除（脚本 + 所有关联文件）
+# ================================
+purge_everything() {
+    print_title "⚠ 彻底删除 Token 脚本及所有文件 ⚠"
+    echo -e "${RED}将执行：${RESET}"
+    echo "  - 删除所有 Token 隧道（含 systemd 服务）"
+    echo "  - 删除健康检查定时器"
+    echo "  - 删除 cloudflared 二进制"
+    echo "  - 删除整个工作目录 $BASE_DIR"
+    echo "  - 删除此脚本自身"
+    echo ""
+    read -p "确认彻底删除？请输入 yes 继续: " ans
+    ans=$(clean_input "$ans")
+    if [[ "$ans" != "yes" ]]; then
+        print_info "已取消"
+        return
     fi
+
+    # 删除所有隧道
+    for dir in "$TUNNELS_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        local num=$(basename "$dir")
+        local svc="argo-token-${num}.service"
+        systemctl disable --now "$svc" 2>/dev/null || true
+        rm -f "$SYSTEMD_DIR/$svc"
+        rm -rf "$dir"
+    done
+
+    # 删除健康检查
+    systemctl disable --now argo-token-health.timer 2>/dev/null || true
+    systemctl disable --now argo-token-health.service 2>/dev/null || true
+    rm -f /etc/systemd/system/argo-token-health.service
+    rm -f /etc/systemd/system/argo-token-health.timer
+
+    # 删除工作目录
+    print_info "删除工作目录 $BASE_DIR ..."
+    rm -rf "$BASE_DIR"
+
+    systemctl daemon-reload
+
+    # 删除脚本自身
+    SCRIPT_PATH="$(realpath "$0" 2>/dev/null || echo "$0")"
+    print_info "删除脚本 $SCRIPT_PATH ..."
+    rm -f "$SCRIPT_PATH"
+
+    echo -e "${GREEN}彻底清理完成！所有文件已删除。脚本即将退出。${RESET}"
+    exit 0
 }
 
-# ============================
-# 菜单
-# ============================
-menu(){
+# ================================
+# 主菜单
+# ================================
+menu() {
+    # 安装健康检查（首次运行自动配置）
+    install_heal_timer
+
     while true; do
-        title "固定隧道（Token 模式）独立管理"
+        print_title "Argo Token 隧道管理面板（多隧道版）"
+        echo "1) 查看隧道列表" >&2
+        echo "2) 新增 Token 隧道" >&2
+        echo "3) 查看隧道运行状态" >&2
+        echo "4) 查看某个隧道日志" >&2
+        echo "5) 停止某个隧道" >&2
+        echo "6) 启动某个隧道" >&2
+        echo "7) 重启某个隧道" >&2
+        echo "8) 删除某个隧道" >&2
+        echo "9) 删除所有隧道" >&2
+        echo "10) 手动健康检查" >&2
+        echo "11) 彻底删除脚本及所有文件" >&2
+        echo "0) 退出" >&2
 
-        if [[ -f "$TOKEN_INFO" ]]; then
-            read TOKEN < "$TOKEN_INFO"
-            echo -e "状态：${GREEN}已创建${NC}"
-            echo "Token：$TOKEN"
-        else
-            echo -e "状态：${RED}未创建${NC}"
-        fi
+        printf "请选择: " >&2
+        read c
+        c=$(clean_input "$c")
 
-        echo
-        echo "1) 创建 Token 模式隧道"
-        echo "2) 重启 Token 模式隧道"
-        echo "3) 停止 Token 模式隧道"
-        echo "4) 删除 Token 模式隧道"
-        echo "5) 手动诊断并自动修复"
-        echo "6) 查看日志"
-        echo "7) 删除所有文件（彻底清理）"
-        echo "0) 退出"
-        read -p "选择: " CH
-
-        case $CH in
-            1) create_token_tunnel ;;
-            2)
-                if [[ ! -f "$TOKEN_INFO" ]]; then
-                    echo -e "${RED}未创建 Token 隧道，无法重启${NC}"
-                else
-                    systemctl restart argo-token
-                fi
-                ;;
-            3) systemctl stop argo-token ;;
-            4) delete_token_tunnel ;;
-            5) heal_token_manual ;;
-            6) view_log ;;
-            7) delete_all ;;
+        case "$c" in
+            1) list_tunnels;      printf "按回车继续..." >&2; read ;;
+            2) add_tunnel;        printf "按回车继续..." >&2; read ;;
+            3) status_tunnels;    printf "按回车继续..." >&2; read ;;
+            4) view_logs;         printf "按回车继续..." >&2; read ;;
+            5) stop_tunnel;       printf "按回车继续..." >&2; read ;;
+            6) start_tunnel;      printf "按回车继续..." >&2; read ;;
+            7) restart_tunnel;    printf "按回车继续..." >&2; read ;;
+            8) delete_tunnel;     printf "按回车继续..." >&2; read ;;
+            9) delete_all_tunnels; printf "按回车继续..." >&2; read ;;
+            10) heal_check;       printf "按回车继续..." >&2; read ;;
+            11) purge_everything; ;;   # 函数内退出
             0) exit 0 ;;
+            *) print_error "无效选项"; printf "按回车继续..." >&2; read ;;
         esac
     done
 }
 
-# ============================
-# 启动入口
-# ============================
-generate_token_health_script
-install_token_health_timer
 menu
