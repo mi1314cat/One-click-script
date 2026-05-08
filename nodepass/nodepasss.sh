@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
-readonly RED='\e[31m'
-readonly GREEN='\e[32m'
-readonly YELLOW='\e[33m'
-readonly CYAN='\e[36m'
-readonly MAGENTA='\e[35m'
-readonly BOLD='\e[1m'
-readonly RESET='\e[0m'
+# ================================
+# 彩色定义
+# ================================
+RED="\e[31m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
+MAGENTA="\e[35m"
+CYAN="\e[36m"
+WHITE="\e[97m"
+BOLD="\e[1m"
+RESET="\e[0m"
 
-print_info()  { echo -e "${CYAN}[信息]${RESET} $*" >&2; }
-print_ok()    { echo -e "${GREEN}[OK]${RESET}   $*" >&2; }
-print_error() { echo -e "${RED}[错误]${RESET} $*" >&2; }
-print_warn()  { echo -e "${YELLOW}[注意]${RESET} $*" >&2; }
+print_info()  { echo -e "${CYAN}[Info]${RESET} $1" >&2; }
+print_ok()    { echo -e "${GREEN}[OK]${RESET}  $1" >&2; }
+print_error() { echo -e "${RED}[Error]${RESET} $1" >&2; }
+print_warn()  { echo -e "${YELLOW}[注意]${RESET} $1" >&2; }
 
 print_title() {
     echo -e "${MAGENTA}${BOLD}" >&2
@@ -22,265 +27,160 @@ print_title() {
     echo -e "${RESET}" >&2
 }
 
-readonly BASE_DIR="/root/catmi/nodepass"
-readonly BIN_PATH="$BASE_DIR/nodepass"
-readonly CONF_DIR="$BASE_DIR/server"
-readonly SYSTEMD_DIR="/etc/systemd/system"
-readonly REPO="NodePassProject/nodepass"
-readonly SERVICE_PREFIX="nodepass-server"
+# ================================
+# 基础路径
+# ================================
+BASE_DIR="/root/catmi/nodepass"
+CONF_DIR="$BASE_DIR/server"
+BIN_PATH="$BASE_DIR/nodepass"
+SYSTEMD_DIR="/etc/systemd/system"
+mkdir -p "$CONF_DIR"
 
-mkdir -p "$BASE_DIR" "$CONF_DIR"
-
-check_deps() {
-    local missing=()
-    for prog in curl jq openssl ss; do
-        if ! command -v "$prog" &>/dev/null; then
-            missing+=("$prog")
-        fi
-    done
-    [[ ${#missing[@]} -eq 0 ]] && return
-    print_warn "缺少依赖: ${missing[*]}，正在安装..."
-    if command -v apt &>/dev/null; then
-        apt update -qq && apt install -y -qq "${missing[@]}"
-    elif command -v yum &>/dev/null; then
-        yum install -y -q "${missing[@]}"
-    else
-        print_error "请手动安装: ${missing[*]}"
-        exit 1
-    fi
-    for prog in "${missing[@]}"; do
-        if ! command -v "$prog" &>/dev/null; then
-            print_error "安装 $prog 失败"
-            exit 1
-        fi
-    done
-    print_ok "依赖已就绪"
+clean_input() {
+    echo "$1" | tr -d '\000-\037'
 }
 
-clean_input() { tr -d '\000-\037' <<< "$1"; }
-port_in_use() { ss -tuln | awk '{print $5}' | grep -qE "(:|])$1$"; }
+# ================================
+# 端口工具
+# ================================
+port_in_use() {
+    ss -tuln | awk '{print $5}' | grep -E -q "(:|])$1$"
+}
+
 random_port() { shuf -i 10000-60000 -n 1; }
 
 random_free_port() {
-    for _ in {1..20}; do
-        local port
-        port=$(random_port)
-        if ! port_in_use "$port"; then
-            echo "$port"
+    while true; do
+        p=$(random_port)
+        if ! port_in_use "$p"; then
+            echo "$p"
             return
         fi
     done
-    print_error "未找到空闲端口"
-    exit 1
 }
 
 safe_read() {
     local prompt="$1" default="$2" input
     printf "%s (默认: %s): " "$prompt" "$default" >&2
-    read -r input
-    input=$(clean_input "${input:-$default}")
-    echo "$input"
+    read input
+    input=$(clean_input "$input")
+    echo "${input:-$default}"
 }
 
 safe_read_port() {
     local default="$1" input port
     while true; do
-        printf "监听端口 (默认: %s): " "$default" >&2
-        read -r input
+        printf "请输入本地监听端口 (默认: %s): " "$default" >&2
+        read input
         input=$(clean_input "$input")
         port="${input:-$default}"
         [[ "$port" =~ ^[0-9]+$ ]] || { print_error "端口必须是数字"; continue; }
-        (( port >= 1 && port <= 65535 )) || { print_error "端口范围 1-65535"; continue; }
-        if port_in_use "$port"; then
-            print_error "端口已占用"
-            printf "选择操作: [1] 强制使用 [2] 自动寻找空闲端口 [3] 重新输入]: " >&2
-            read -r choice
-            choice=$(clean_input "$choice")
-            case "$choice" in
-                1) echo "$port"; return ;;
-                2) while port_in_use "$port"; do ((port++)); done; print_info "自动选择: $port"; echo "$port"; return ;;
-                3) continue ;;
-                *) print_error "无效" ;;
-            esac
-        fi
+        (( port >= 1 && port <= 65535 )) || { print_error "端口范围错误"; continue; }
+        port_in_use "$port" && { print_error "端口已占用"; continue; }
         echo "$port"
         return
     done
 }
 
-detect_arch() {
-    case "$(uname -m)" in
-        x86_64)      echo "amd64" ;;
-        aarch64|arm64) echo "arm64" ;;
-        *) print_error "不支持的架构"; exit 1 ;;
-    esac
-}
-
-get_latest_version() {
-    local tag
-    tag=$(curl -fsSL -H "User-Agent: NP-Manager" "https://api.github.com/repos/${REPO}/releases/latest" \
-        | jq -r '.tag_name')
-    [[ -z "$tag" || "$tag" == "null" ]] && { print_error "无法获取最新版本"; exit 1; }
-    echo "${tag#v}"
-}
-
+# ================================
+# NodePass 下载
+# ================================
 install_nodepass() {
-    local force="${1:-false}"
-    [[ -x "$BIN_PATH" && "$force" != "true" ]] && return
-    print_info "下载 NodePass ..."
-    local arch version url tmpdir
-    arch=$(detect_arch)
-    version=$(get_latest_version)
-    url="https://github.com/${REPO}/releases/download/v${version}/nodepass_${version}_linux_${arch}.tar.gz"
-    tmpdir=$(mktemp -d)
-    trap 'rm -rf "$tmpdir"' RETURN
-    curl -fsSL -o "$tmpdir/nodepass.tar.gz" "$url" || { print_error "下载失败"; exit 1; }
-    tar -xzf "$tmpdir/nodepass.tar.gz" -C "$tmpdir"
-    [[ -f "$tmpdir/nodepass" ]] || { print_error "压缩包无效"; exit 1; }
-    mv -f "$tmpdir/nodepass" "$BIN_PATH"
-    chmod +x "$BIN_PATH"
-    print_ok "NodePass 已更新至 v${version}"
-}
+    if [ -x "$BIN_PATH" ]; then
+        return
+    fi
 
-next_id() {
-    local max=0 num
-    for f in "$CONF_DIR"/server-*.env; do
-        [[ -f "$f" ]] || continue
-        num=$(basename "$f" .env | cut -d'-' -f2)
-        num=$((10#$num))
-        ((num > max)) && max=$num
-    done
-    printf "%02d" $((max + 1))
-}
+    print_info "正在下载 NodePass 最新版本..."
 
-choose_protocol() {
-    print_info "选择传输协议:"
-    echo "  1) ws  - WebSocket (pool=2)" >&2
-    echo "  2) h2  - HTTP/2 gRPC (pool=3)" >&2
-    echo "  3) tcp - 原始 TCP (pool=0)" >&2
-    printf "选项 (默认 1): " >&2
-    read -r choice
-    choice=$(clean_input "$choice")
-    case "$choice" in
-        2) echo "h2" ;;
-        3) echo "tcp" ;;
-        *) echo "ws" ;;
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)   ARCH2="amd64" ;;
+        aarch64)  ARCH2="arm64" ;;
+        *) print_error "不支持的架构: $ARCH"; exit 1 ;;
     esac
+
+    VERSION=$(curl -sL https://api.github.com/repos/NodePassProject/nodepass/releases/latest | grep tag_name | cut -d '"' -f4 | sed 's/v//')
+    URL="https://github.com/NodePassProject/nodepass/releases/download/v${VERSION}/nodepass_${VERSION}_linux_${ARCH2}.tar.gz"
+
+    mkdir -p "$BASE_DIR"
+    wget -q --show-progress -O /tmp/nodepass.tar.gz "$URL"
+    tar -xzf /tmp/nodepass.tar.gz -C /tmp
+    install -m 755 /tmp/nodepass "$BIN_PATH"
+
+    print_ok "NodePass 安装完成：$BIN_PATH"
 }
 
-generate_tunnel_key() { openssl rand -base64 32; }
+# ================================
+# ID 管理
+# ================================
+next_id() {
+    local n
+    n=$(ls "$CONF_DIR"/server-*.env 2>/dev/null | wc -l)
+    echo $((n + 1))
+}
 
+gen_path() {
+    echo "/$(cat /proc/sys/kernel/random/uuid | cut -d'-' -f1)"
+}
+
+gen_pass() {
+    cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 24 | head -n 1
+}
+
+# ================================
+# 新增隧道
+# ================================
 add_tunnel() {
     install_nodepass
     print_title "新增 NodePass 服务端隧道"
 
-    local listen_addr
-    listen_addr=$(safe_read "监听地址（Nginx 转发目标）" "127.0.0.1")
+    # 服务 IP（用于 -tunnel-addr）
+    service_ip=$(safe_read "请输入服务 IP" "127.0.0.1")
 
-    local default_port
+    # 本地监听端口
     default_port=$(random_free_port)
-    local port
-    port=$(safe_read_port "$default_port")
+    local_port=$(safe_read_port "$default_port")
 
-    local protocol
-    protocol=$(choose_protocol)
+    # 路径
+    default_path=$(gen_path)
+    ws_path=$(safe_read "请输入路径" "$default_path")
 
-    # 路径（自动生成默认值）
-    local path=""
-    if [[ "$protocol" != "tcp" ]]; then
-        print_info "路径长度需 ≥16 字符，按回车自动生成随机路径" >&2
-        while true; do
-            printf "隧道路径 (默认自动生成): " >&2
-            read -r input
-            input=$(clean_input "$input")
-            if [[ -z "$input" ]]; then
-                path="/$(openssl rand -hex 12)"   # 25 字符
-                print_info "已生成随机路径: ${path}" >&2
-                break
-            else
-                path="$input"
-                [[ "$path" != /* ]] && path="/$path"
-                if [[ ${#path} -ge 16 ]]; then
-                    break
-                else
-                    print_error "路径长度不能少于 16 字符"
-                fi
-            fi
-        done
-    fi
+    # 后端
+    target_ip=$(safe_read "请输入后端 IP" "127.0.0.1")
+    target_port=$(safe_read "请输入后端端口" "8080")
 
-    local target
-    target=$(safe_read "后端目标地址:端口" "127.0.0.1:8080")
+    # 密码（统一逻辑）
+    random_pw=$(gen_pass)
+    password=$(safe_read "请输入密码" "$random_pw")
 
-    # 隧道密钥
-    print_info "隧道密钥设置"
-    echo "  [1] 自动生成安全密钥（推荐）" >&2
-    echo "  [2] 手动输入密钥" >&2
-    printf "请选择 (默认 1): " >&2
-    read -r key_choice
-    key_choice=$(clean_input "$key_choice")
-    local tunnel_key
-    if [[ "$key_choice" == "2" ]]; then
-        while true; do
-            tunnel_key=$(safe_read "请输入隧道密钥（至少 16 字符）" "")
-            [[ ${#tunnel_key} -ge 16 ]] && break
-            print_error "密钥过短，至少 16 字符"
-        done
-    else
-        tunnel_key=$(generate_tunnel_key)
-        print_ok "已生成随机密钥: ${YELLOW}$tunnel_key${RESET}"
-    fi
-
-    local pool
-    case "$protocol" in
-        ws)  pool=2 ;;
-        h2)  pool=3 ;;
-        tcp) pool=0 ;;
-    esac
-
-    local tls_opts="-tls 0"
-
-    local id id2 conf svc_name
+    # 分配 ID
     id=$(next_id)
     id2=$(printf "%02d" "$id")
-    conf="$CONF_DIR/server-${id2}.env"
-    svc_name="${SERVICE_PREFIX}-${id2}.service"
+    conf="$CONF_DIR/server-$id2.env"
+    svc="nodepass-server-$id2.service"
 
+    # 保存 env
     cat > "$conf" <<EOF
 ID=$id
-PROTOCOL=$protocol
-POOL=$pool
-LISTEN_ADDR=$listen_addr
-PORT=$port
-PATH=$path
-TARGET=$target
-TUNNEL_KEY=$tunnel_key
-TLS_OPTIONS=$tls_opts
+SERVICE_IP=$service_ip
+LOCAL_PORT=$local_port
+WS_PATH=$ws_path
+TARGET_IP=$target_ip
+TARGET_PORT=$target_port
+PASSWORD=$password
 EOF
 
-    local path_opt=""
-    [[ -n "$path" ]] && path_opt="-tunnel-path $path"
-
-    local cmd="$BIN_PATH server \
-  -tunnel-addr $listen_addr \
-  -tunnel-port $port \
-  -pool $pool \
-  $tls_opts \
-  $path_opt \
-  -target-addr ${target%:*} \
-  -target-port ${target#*:} \
-  -key \"$tunnel_key\""
-
-    cat > "$SYSTEMD_DIR/$svc_name" <<EOF
+    # 写入 systemd
+    cat > "$SYSTEMD_DIR/$svc" <<EOF
 [Unit]
-Description=NodePass Server Tunnel $id (${protocol}${path:+ }$path)
+Description=NodePass Server Tunnel $id (ws $ws_path)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=$cmd
-Restart=on-failure
-RestartSec=10
+ExecStart=$BIN_PATH server -tunnel-addr $service_ip -tunnel-port $local_port -pool 2 -tls 0 -target-addr $target_ip -target-port $target_port -password $password
+Restart=always
+RestartSec=3
 LimitNOFILE=1048576
 
 [Install]
@@ -288,143 +188,229 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now "$svc_name"
+    systemctl enable --now "$svc"
 
-    print_ok "隧道 $id 创建成功"
-    echo -e "  监听地址:   ${YELLOW}$listen_addr:$port${RESET}"
-    echo -e "  协议:       ${CYAN}$protocol${RESET}"
-    [[ -n "$path" ]] && echo -e "  路径:       ${CYAN}$path${RESET}"
-    echo -e "  后端目标:   ${MAGENTA}$target${RESET}"
-    echo -e "  隧道密钥:   ${GREEN}$tunnel_key${RESET}  ← 请记下此密钥，客户端连接时必需"
-    echo -e "  systemd 服务: ${CYAN}$svc_name${RESET}"
+    # ============================
+    # 美化输出 + 客户端命令
+    # ============================
+    print_title "隧道创建成功"
+
+    echo -e "${CYAN}协议:${RESET} ws"
+    echo -e "${CYAN}服务 IP:${RESET} $service_ip"
+    echo -e "${CYAN}监听:${RESET} $service_ip:$local_port"
+    echo -e "${CYAN}路径:${RESET} $ws_path"
+    echo -e "${CYAN}后端:${RESET} $target_ip:$target_port"
+    echo -e "${CYAN}密码:${RESET} $password"
+    echo -e "${CYAN}服务名:${RESET} $svc"
     echo
-    print_warn "密钥需通过安全渠道发送给客户端管理员！"
+
+    print_info "客户端连接示例（NodePass 客户端）："
+    echo -e "${GREEN}nodepass client -server ws://yourdomain.com$ws_path -password $password${RESET}"
+    echo
 }
 
+
+# ================================
+# 列表（带运行状态 + 明文密码）
+# ================================
 list_tunnels() {
-    print_title "隧道列表"
-    local found=0
-    printf "${GREEN}%-4s %-6s %-6s %-16s %-20s${RESET}\n" "ID" "端口" "协议" "路径" "服务名"
-    echo "---------------------------------------------------------------"
-    for f in "$CONF_DIR"/server-*.env; do
-        [[ -f "$f" ]] || continue
-        found=1
-        source "$f"
-        local svc="${SERVICE_PREFIX}-$(printf "%02d" "$ID").service"
-        printf "%-4s %-6s %-6s %-16s %s\n" "$ID" "$PORT" "$PROTOCOL" "${PATH:--}" "$svc"
-    done
-    [[ $found -eq 0 ]] && print_warn "暂无隧道"
-}
+    print_title "当前 NodePass 隧道列表"
+    echo -e "${CYAN}编号 | 端口 | 路径 | 后端 | 密码 | 状态 | systemd 名称${RESET}" >&2
+    echo "--------------------------------------------------------------------------------------------------------" >&2
 
-status_tunnels() {
-    print_title "运行状态"
-    local found=0
+    local any=0
     for f in "$CONF_DIR"/server-*.env; do
         [[ -f "$f" ]] || continue
+        any=1
+        num=$(basename "$f" .env | cut -d'-' -f2)
         source "$f"
-        local svc="${SERVICE_PREFIX}-$(printf "%02d" "$ID").service"
+        svc="nodepass-server-$num.service"
         if systemctl is-active --quiet "$svc"; then
-            echo -e "隧道 ${GREEN}$ID${RESET} → ${YELLOW}运行中${RESET}"
+            st="${GREEN}运行中${RESET}"
         else
-            echo -e "隧道 ${RED}$ID${RESET} → ${RED}未运行${RESET}"
+            st="${RED}未运行${RESET}"
         fi
-        found=1
+        echo -e "${GREEN}$num${RESET}) 端口: ${YELLOW}$LOCAL_PORT${RESET} | 路径: ${MAGENTA}$WS_PATH${RESET} | 后端: ${BLUE}$TARGET_IP:$TARGET_PORT${RESET} | 密码: ${CYAN}$PASSWORD${RESET} | 状态: $st | 服务: ${CYAN}$svc${RESET}" >&2
     done
-    [[ $found -eq 0 ]] && print_warn "暂无隧道"
+
+    [[ "$any" -eq 0 ]] && echo -e "${YELLOW}暂无隧道${RESET}" >&2
+    echo "--------------------------------------------------------------------------------------------------------" >&2
 }
 
+# ================================
+# 运行状态（单独视图）
+# ================================
+status_tunnels() {
+    print_title "隧道运行状态"
+    local any=0
+    for f in "$CONF_DIR"/server-*.env; do
+        [[ -f "$f" ]] || continue
+        any=1
+        num=$(basename "$f" .env | cut -d'-' -f2)
+        svc="nodepass-server-$num.service"
+        if systemctl is-active --quiet "$svc"; then
+            st="${GREEN}运行中${RESET}"
+        else
+            st="${RED}未运行${RESET}"
+        fi
+        echo -e "隧道 ${CYAN}$num${RESET} -> $svc : $st" >&2
+    done
+    [[ "$any" -eq 0 ]] && echo -e "${YELLOW}暂无隧道${RESET}" >&2
+}
+
+# ================================
+# 日志
+# ================================
 view_logs() {
-    local num
-    num=$(safe_read "输入隧道编号" "")
-    [[ -z "$num" ]] && return
-    local id2 svc
-    id2=$(printf "%02d" "$((10#$num))")
-    svc="${SERVICE_PREFIX}-${id2}.service"
-    if [[ ! -f "$SYSTEMD_DIR/$svc" ]]; then
-        print_error "服务不存在"
+    list_tunnels
+    printf "请输入要查看日志的编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    [[ -z "$num" || ! "$num" =~ ^[0-9]+$ ]] && { print_error "编号无效"; return; }
+    id2=$(printf "%02d" "$num")
+    svc="nodepass-server-$id2.service"
+
+    if [ ! -f "$SYSTEMD_DIR/$svc" ]; then
+        print_error "服务不存在: $svc"
         return
     fi
-    journalctl -u "$svc" -f -n 100
+
+    print_info "显示 $svc 最近 50 行日志"
+    journalctl -u "$svc" -n 50 --no-pager
+}
+
+# ================================
+# 停止 / 启动 / 重启 / 删除
+# ================================
+stop_tunnel() {
+    list_tunnels
+    printf "请输入要停止的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    [[ -z "$num" || ! "$num" =~ ^[0-9]+$ ]] && { print_error "编号无效"; return; }
+    id2=$(printf "%02d" "$num")
+    svc="nodepass-server-$id2.service"
+    if [ ! -f "$SYSTEMD_DIR/$svc" ]; then
+        print_error "服务不存在: $svc"
+        return
+    fi
+    systemctl stop "$svc"
+    print_ok "已停止 $svc"
+    systemctl status "$svc" --no-pager -l | head -n 5 >&2
+}
+
+start_tunnel() {
+    list_tunnels
+    printf "请输入要启动的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    [[ -z "$num" || ! "$num" =~ ^[0-9]+$ ]] && { print_error "编号无效"; return; }
+    id2=$(printf "%02d" "$num")
+    svc="nodepass-server-$id2.service"
+    if [ ! -f "$SYSTEMD_DIR/$svc" ]; then
+        print_error "服务不存在: $svc"
+        return
+    fi
+    systemctl start "$svc"
+    print_ok "已启动 $svc"
+    systemctl status "$svc" --no-pager -l | head -n 5 >&2
+}
+
+restart_tunnel() {
+    list_tunnels
+    printf "请输入要重启的隧道编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    [[ -z "$num" || ! "$num" =~ ^[0-9]+$ ]] && { print_error "编号无效"; return; }
+    id2=$(printf "%02d" "$num")
+    svc="nodepass-server-$id2.service"
+    if [ ! -f "$SYSTEMD_DIR/$svc" ]; then
+        print_error "服务不存在: $svc"
+        return
+    fi
+    systemctl restart "$svc"
+    print_ok "已重启 $svc"
+    systemctl status "$svc" --no-pager -l | head -n 5 >&2
 }
 
 delete_tunnel() {
-    local num
-    num=$(safe_read "输入要删除的隧道编号" "")
-    [[ -z "$num" ]] && return
-    local id2 conf svc
-    id2=$(printf "%02d" "$((10#$num))")
-    conf="$CONF_DIR/server-${id2}.env"
-    svc="${SERVICE_PREFIX}-${id2}.service"
-    if [[ ! -f "$conf" ]]; then print_error "隧道不存在"; return; fi
+    list_tunnels
+    printf "请输入要删除的编号: " >&2
+    read num
+    num=$(clean_input "$num")
+    [[ -z "$num" || ! "$num" =~ ^[0-9]+$ ]] && { print_error "编号无效"; return; }
+    id2=$(printf "%02d" "$num")
+
+    conf="$CONF_DIR/server-$id2.env"
+    svc="nodepass-server-$id2.service"
+
+    if [ ! -f "$conf" ]; then
+        print_error "配置不存在: $conf"
+        return
+    fi
+
     systemctl disable --now "$svc" 2>/dev/null || true
-    rm -f "$conf" "$SYSTEMD_DIR/$svc"
+    rm -f "$conf"
+    rm -f "$SYSTEMD_DIR/$svc"
     systemctl daemon-reload
+
     print_ok "已删除隧道 $num"
 }
 
 delete_all() {
     print_title "删除所有隧道"
-    local confirm
-    confirm=$(safe_read "输入 yes 确认" "no")
-    [[ "$confirm" != "yes" ]] && { print_info "已取消"; return; }
+    read -p "确认删除所有隧道？(yes/no): " ans
+    ans=$(clean_input "$ans")
+    [ "$ans" != "yes" ] && { print_info "已取消"; return; }
+
     for f in "$CONF_DIR"/server-*.env; do
         [[ -f "$f" ]] || continue
-        local num id2 svc
         num=$(basename "$f" .env | cut -d'-' -f2)
-        id2=$(printf "%02d" "$((10#$num))")
-        svc="${SERVICE_PREFIX}-${id2}.service"
+        svc="nodepass-server-$num.service"
         systemctl disable --now "$svc" 2>/dev/null || true
-        rm -f "$f" "$SYSTEMD_DIR/$svc"
+        rm -f "$SYSTEMD_DIR/$svc"
+        rm -f "$f"
     done
+
     systemctl daemon-reload
-    print_ok "已删除全部隧道"
+    print_ok "已删除所有隧道"
 }
 
-update_nodepass() {
-    install_nodepass true
-    local restarted=0
-    for f in "$CONF_DIR"/server-*.env; do
-        [[ -f "$f" ]] || continue
-        source "$f"
-        local svc="${SERVICE_PREFIX}-$(printf "%02d" "$ID").service"
-        if systemctl is-active --quiet "$svc"; then
-            systemctl restart "$svc"
-            ((restarted++))
-        fi
-    done
-    print_ok "更新完成，已重启 $restarted 个隧道"
-}
-
-main_menu() {
+# ================================
+# 菜单
+# ================================
+menu() {
     while true; do
-        print_title "NodePass 服务端管理 (Nginx 后置)"
-        echo "  1) 查看隧道列表" >&2
-        echo "  2) 新增隧道" >&2
-        echo "  3) 查看运行状态" >&2
-        echo "  4) 查看隧道日志" >&2
-        echo "  5) 删除单个隧道" >&2
-        echo "  6) 删除全部隧道" >&2
-        echo "  7) 更新 NodePass" >&2
-        echo "  0) 退出" >&2
-        echo
-        local choice
-        read -rp "请输入选项: " choice
-        choice=$(clean_input "$choice")
-        case "$choice" in
-            1) list_tunnels ;;
-            2) add_tunnel ;;
-            3) status_tunnels ;;
-            4) view_logs ;;
-            5) delete_tunnel ;;
-            6) delete_all ;;
-            7) update_nodepass ;;
-            0) print_info "再见"; exit 0 ;;
-            *) print_error "无效选项" ;;
+        print_title "NodePass 服务端隧道面板"
+        echo "1) 查看隧道列表 (含运行状态 + 密码)" >&2
+        echo "2) 新增隧道" >&2
+        echo "3) 查看隧道运行状态" >&2
+        echo "4) 查看某个隧道日志" >&2
+        echo "5) 停止某个隧道" >&2
+        echo "6) 启动某个隧道" >&2
+        echo "7) 重启某个隧道" >&2
+        echo "8) 删除某个隧道" >&2
+        echo "9) 删除所有隧道" >&2
+        echo "0) 退出" >&2
+        printf "请选择: " >&2
+
+        read c
+        c=$(clean_input "$c")
+
+        case "$c" in
+            1) list_tunnels;     printf "按回车继续..." >&2; read ;;
+            2) add_tunnel;       printf "按回车继续..." >&2; read ;;
+            3) status_tunnels;   printf "按回车继续..." >&2; read ;;
+            4) view_logs;        printf "按回车继续..." >&2; read ;;
+            5) stop_tunnel;      printf "按回车继续..." >&2; read ;;
+            6) start_tunnel;     printf "按回车继续..." >&2; read ;;
+            7) restart_tunnel;   printf "按回车继续..." >&2; read ;;
+            8) delete_tunnel;    printf "按回车继续..." >&2; read ;;
+            9) delete_all;       printf "按回车继续..." >&2; read ;;
+            0) exit 0 ;;
+            *) print_error "无效选项"; printf "按回车继续..." >&2; read ;;
         esac
-        echo
-        read -rp "按回车键继续..." _
     done
 }
 
-check_deps
-main_menu
+menu
