@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ================================
-# 彩色与基础函数
-# ================================
 readonly RED='\e[31m'
 readonly GREEN='\e[32m'
 readonly YELLOW='\e[33m'
@@ -25,9 +22,6 @@ print_title() {
     echo -e "${RESET}" >&2
 }
 
-# ================================
-# 路径定义
-# ================================
 readonly BASE_DIR="/root/catmi/nodepass"
 readonly BIN_PATH="$BASE_DIR/nodepass"
 readonly CLIENT_BASE="$BASE_DIR/client"
@@ -37,9 +31,6 @@ readonly SERVICE_PREFIX="nodepass-client"
 
 mkdir -p "$BASE_DIR" "$CLIENT_BASE" "$LOG_DIR"
 
-# ================================
-# 依赖检查
-# ================================
 check_deps() {
     local missing=()
     for prog in curl jq openssl ss; do
@@ -47,9 +38,7 @@ check_deps() {
             missing+=("$prog")
         fi
     done
-    if [[ ${#missing[@]} -eq 0 ]]; then
-        return
-    fi
+    [[ ${#missing[@]} -eq 0 ]] && return
     print_warn "缺少依赖: ${missing[*]}，正在安装..."
     if command -v apt &>/dev/null; then
         apt update -qq && apt install -y -qq "${missing[@]}"
@@ -68,11 +57,7 @@ check_deps() {
     print_ok "依赖已就绪"
 }
 
-# ================================
-# 辅助函数
-# ================================
 clean_input() { tr -d '\000-\037' <<< "$1"; }
-
 port_in_use() { ss -tuln | awk '{print $5}' | grep -qE "(:|])$1$"; }
 
 safe_read() {
@@ -90,14 +75,8 @@ safe_read_port() {
         read -r input
         input=$(clean_input "$input")
         port="${input:-$default}"
-        if [[ ! "$port" =~ ^[0-9]+$ ]]; then
-            print_error "端口必须是数字"
-            continue
-        fi
-        if (( port < 1 || port > 65535 )); then
-            print_error "端口范围 1-65535"
-            continue
-        fi
+        [[ "$port" =~ ^[0-9]+$ ]] || { print_error "端口必须是数字"; continue; }
+        (( port >= 1 && port <= 65535 )) || { print_error "端口范围 1-65535"; continue; }
         if port_in_use "$port"; then
             print_error "端口已占用"
             printf "选择操作: [1] 强制使用 [2] 自动寻找空闲端口 [3] 重新输入]: " >&2
@@ -115,9 +94,6 @@ safe_read_port() {
     done
 }
 
-# ================================
-# NodePass 安装
-# ================================
 detect_arch() {
     case "$(uname -m)" in
         x86_64)      echo "amd64" ;;
@@ -135,7 +111,7 @@ get_latest_version() {
 }
 
 install_nodepass() {
-    if [[ -x "$BIN_PATH" ]]; then return; fi
+    [[ -x "$BIN_PATH" ]] && return
     print_info "下载 NodePass ..."
     local arch version url tmpdir
     arch=$(detect_arch)
@@ -151,9 +127,6 @@ install_nodepass() {
     print_ok "NodePass 安装完成"
 }
 
-# ================================
-# 隧道 ID
-# ================================
 next_id() {
     local max=0 num
     for d in "$CLIENT_BASE"/*; do
@@ -169,9 +142,11 @@ next_id() {
 get_client_dir() { echo "$CLIENT_BASE/$1"; }
 get_service_name() { echo "${SERVICE_PREFIX}-$1"; }
 
-# ================================
-# 创建客户端隧道
-# ================================
+# 自动生成随机路径
+generate_random_path() {
+    echo "/$(openssl rand -hex 12)"
+}
+
 create_tunnel() {
     install_nodepass
 
@@ -185,14 +160,12 @@ create_tunnel() {
 
     print_title "新建客户端隧道"
 
-    # Argo 域名
     while true; do
         argo_domain=$(safe_read "Argo 域名（例如 tunnel.example.com）" "")
         [[ -n "$argo_domain" ]] && break
         print_error "域名不能为空"
     done
 
-    # 隧道密钥（必须与服务端一致）
     print_warn "请输入服务端对应隧道的密钥（服务端创建时会输出）"
     while true; do
         tunnel_key=$(safe_read "隧道密钥" "")
@@ -203,7 +176,6 @@ create_tunnel() {
         fi
     done
 
-    # 协议选择
     echo
     print_info "选择要启用的协议（至少选一个）"
     printf "启用 WebSocket (WS) ? [y/N]: " >&2
@@ -219,39 +191,56 @@ create_tunnel() {
         return
     fi
 
-    # 路径（长度≥16）
+    # WS 路径（自动生成）
     if $enable_ws; then
+        print_info "WS 路径长度需 ≥16 字符，按回车自动生成" >&2
         while true; do
-            ws_path=$(safe_read "WS 路径（例如 /ws_xxxxxxxxxxxxxxx）" "/")
-            [[ ${#ws_path} -ge 16 ]] && break
-            print_error "路径长度至少 16 字符"
+            printf "WS 路径 (默认自动生成): " >&2
+            read -r input
+            input=$(clean_input "$input")
+            if [[ -z "$input" ]]; then
+                ws_path=$(generate_random_path)
+                print_info "已生成随机 WS 路径: ${ws_path}" >&2
+                break
+            else
+                ws_path="$input"
+                [[ "$ws_path" != /* ]] && ws_path="/$ws_path"
+                [[ ${#ws_path} -ge 16 ]] && break
+                print_error "路径长度不能少于 16 字符"
+            fi
         done
-        [[ "$ws_path" != /* ]] && ws_path="/$ws_path"
     fi
 
+    # H2 路径（自动生成）
     if $enable_h2; then
+        print_info "H2 路径长度需 ≥16 字符，按回车自动生成" >&2
         while true; do
-            h2_path=$(safe_read "H2 路径（例如 /h2_xxxxxxxxxxxxxxx）" "/")
-            [[ ${#h2_path} -ge 16 ]] && break
-            print_error "路径长度至少 16 字符"
+            printf "H2 路径 (默认自动生成): " >&2
+            read -r input
+            input=$(clean_input "$input")
+            if [[ -z "$input" ]]; then
+                h2_path=$(generate_random_path)
+                print_info "已生成随机 H2 路径: ${h2_path}" >&2
+                break
+            else
+                h2_path="$input"
+                [[ "$h2_path" != /* ]] && h2_path="/$h2_path"
+                [[ ${#h2_path} -ge 16 ]] && break
+                print_error "路径长度不能少于 16 字符"
+            fi
         done
-        [[ "$h2_path" != /* ]] && h2_path="/$h2_path"
     fi
 
-    # 本地监听端口
     local_port=$(safe_read_port "8888")
 
-    # MUX 流数
     while true; do
         mux_streams=$(safe_read "多路复用流数 (1-8)" "2")
-        if [[ "$mux_streams" =~ ^[1-8]$ ]]; then
-            break
-        else
-            print_error "请输入 1~8 之间的数字"
+        if [[ "$mux_streams" =~ ^[1-8]$ ]]; then break
+        else print_error "请输入 1~8 之间的数字"
         fi
     done
 
-    # 构建 JSON
+    # 生成 client.json
     local connects="["
     local first=true
 
@@ -299,7 +288,6 @@ create_tunnel() {
 }
 EOF
 
-    # systemd 服务
     local svc_name svc_path
     svc_name=$(get_service_name "$id")
     svc_path="/etc/systemd/system/${svc_name}.service"
@@ -326,14 +314,11 @@ EOF
     print_ok "客户端隧道 $id 创建成功"
     echo -e "  本地监听: 127.0.0.1:${local_port}"
     echo -e "  密钥:     ${GREEN}${tunnel_key}${RESET}"
-    $enable_ws && echo -e "  WS 路径:  ${ws_path} (wss://${argo_domain}${ws_path})"
-    $enable_h2 && echo -e "  H2 路径:  ${h2_path} (https://${argo_domain}${h2_path})"
+    $enable_ws && echo -e "  WS 路径:  ${ws_path}"
+    $enable_h2 && echo -e "  H2 路径:  ${h2_path}"
     echo -e "  MUX 流:   ${mux_streams}"
 }
 
-# ================================
-# 隧道列表
-# ================================
 list_tunnels() {
     print_title "客户端隧道列表"
     local found=0
@@ -341,13 +326,12 @@ list_tunnels() {
     echo "-----------------------------------------------------------------------------"
     for d in "$CLIENT_BASE"/*; do
         [[ -d "$d" ]] || continue
-        local id
+        local id conf
         id=$(basename "$d")
-        local conf="$d/client.json"
+        conf="$d/client.json"
         local port domain protocols
 
         port=$(jq -r '.transport.listen' "$conf" | cut -d: -f2)
-
         local addr
         addr=$(jq -r '.connect[0].address // ""' "$conf")
         domain="${addr#*@}"
@@ -359,9 +343,8 @@ list_tunnels() {
             protocols+="${proto^^}${path:0:8}..."
         done < <(jq -r '.connect[] | "\(.protocol)|\(.path // "")"' "$conf")
 
-        local svc
+        local svc status
         svc=$(get_service_name "$id")
-        local status
         if systemctl is-active --quiet "$svc"; then
             status="${GREEN}运行中${RESET}"
         else
@@ -374,14 +357,11 @@ list_tunnels() {
     [[ $found -eq 0 ]] && print_warn "暂无隧道"
 }
 
-# ================================
-# 隧道选择器
-# ================================
 choose_id() {
     list_tunnels
     local id
     id=$(safe_read "输入隧道 ID" "")
-    [[ -z "$id" ]] && { print_error "ID 不能为空"; return 1; }
+    [[ -z "$id" ]] && return 1
     local dir
     dir=$(get_client_dir "$id")
     [[ -d "$dir" ]] || { print_error "隧道不存在"; return 1; }
@@ -395,9 +375,6 @@ choose_id() {
     echo "$id"
 }
 
-# ================================
-# 操作函数
-# ================================
 show_logs() {
     local id
     id=$(choose_id) || return
@@ -437,7 +414,6 @@ delete_tunnel() {
     local dir svc
     dir=$(get_client_dir "$id")
     svc=$(get_service_name "$id")
-
     systemctl stop "$svc" 2>/dev/null || true
     systemctl disable "$svc" 2>/dev/null || true
     rm -f "/etc/systemd/system/${svc}.service"
@@ -446,9 +422,6 @@ delete_tunnel() {
     print_ok "已删除隧道 $id"
 }
 
-# ================================
-# 主菜单
-# ================================
 main_menu() {
     while true; do
         print_title "NodePass 客户端管理"
@@ -482,8 +455,5 @@ main_menu() {
     done
 }
 
-# ================================
-# 启动
-# ================================
 check_deps
 main_menu
