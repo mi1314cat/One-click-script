@@ -275,9 +275,9 @@ add_tunnel() {
     echo -e "说明：RTCP 在远端监听的端口（隧道出口），必须唯一，且与服务端预期一致" >&2
     remote_port=$(safe_read_port "$(random_free_port)")
 
-    # ========== 增加 mux 参数输入 ==========
+    # ========== 多路复用并发数 MUX（范围 1-8，默认 2）==========
     echo -e "${YELLOW}多路复用并发数 (MUX)${RESET}" >&2
-    echo -e "说明：控制 gost 单个连接内的最大并发流数量，默认 2，最大 8" >&2
+    echo -e "说明：控制 gost 单个连接内的最大并发流数量，范围 1-8，默认 2" >&2
     default_mux=2
     while true; do
         read -p "请输入 MUX 值 (默认 $default_mux): " mux_input
@@ -287,8 +287,11 @@ add_tunnel() {
             break
         fi
         if [[ "$mux_input" =~ ^[0-9]+$ ]]; then
-            if [ "$mux_input" -gt 8 ]; then
-                print_warn "输入值 $mux_input 大于最大限制 8，已自动调整为 8"
+            if [ "$mux_input" -lt 1 ]; then
+                print_warn "输入值小于最小值 1，已自动调整为 1"
+                mux_val=1
+            elif [ "$mux_input" -gt 8 ]; then
+                print_warn "输入值大于最大值 8，已自动调整为 8"
                 mux_val=8
             else
                 mux_val=$mux_input
