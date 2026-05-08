@@ -168,13 +168,13 @@ next_id() {
 }
 
 # ================================
-# 列出隧道
+# 列出隧道（增加 mux 列）
 # ================================
 list_tunnels() {
     print_title "客户端隧道列表"
 
-    echo -e "${CYAN}编号 | 本地端口 | 远程端口 | 域名 | 协议 | 路径 | 认证 | systemd${RESET}" >&2
-    echo "-------------------------------------------------------------------------------------------" >&2
+    echo -e "${CYAN}编号 | 本地端口 | 远程端口 | 域名 | 协议 | 路径 | 认证 | MUX | systemd${RESET}" >&2
+    echo "---------------------------------------------------------------------------------------------------" >&2
 
     for f in "$CONF_DIR"/client-*.env; do
         [[ -f "$f" ]] || continue
@@ -189,13 +189,14 @@ list_tunnels() {
         auth_user="${AUTH_USER:-none}"
         auth_pass="${AUTH_PASS:-}"
         masked_auth="${auth_user}:$(if [ -n "$auth_pass" ]; then echo "${auth_pass:0:2}******"; else echo "none"; fi)"
+        mux="${MUX:-2}"    # [新增] 读取 mux，默认为 2
 
         svc="xgost-client-$(printf "%02d" "$num").service"
 
-        echo -e "${GREEN}$num${RESET}) 本地: ${YELLOW}$local_port${RESET} | 远程: ${CYAN}$remote_port${RESET} | 域名: ${MAGENTA}$domain${RESET} | 协议: ${BLUE}$scheme${RESET} | 路径: ${WHITE}$ws_path${RESET} | 认证: ${GREEN}$masked_auth${RESET} | $svc" >&2
+        echo -e "${GREEN}$num${RESET}) 本地: ${YELLOW}$local_port${RESET} | 远程: ${CYAN}$remote_port${RESET} | 域名: ${MAGENTA}$domain${RESET} | 协议: ${BLUE}$scheme${RESET} | 路径: ${WHITE}$ws_path${RESET} | 认证: ${GREEN}$masked_auth${RESET} | MUX: ${WHITE}$mux${RESET} | $svc" >&2
     done
 
-    echo "-------------------------------------------------------------------------------------------" >&2
+    echo "---------------------------------------------------------------------------------------------------" >&2
     echo -e "${YELLOW}提示：完整认证信息请查看对应配置文件 ${CONF_DIR}/client-*.env${RESET}" >&2
 }
 
@@ -248,7 +249,7 @@ parse_service_link() {
 }
 
 # ================================
-# 新增隧道（两种模式）
+# 新增隧道（两种模式）+ 增加 mux 参数
 # ================================
 add_tunnel() {
     install_gost
@@ -262,7 +263,7 @@ add_tunnel() {
     mode=$(clean_input "$mode")
     mode="${mode:-1}"
 
-    local local_port remote_port domain scheme port ws_path auth_user auth_pass host_para
+    local local_port remote_port domain scheme port ws_path auth_user auth_pass host_para mux_val
 
     # 本地监听端口
     echo -e "${YELLOW}本地监听端口 (LOCAL_PORT)${RESET}" >&2
@@ -273,6 +274,30 @@ add_tunnel() {
     echo -e "${YELLOW}RTCP 远程端口 (REMOTE_PORT)${RESET}" >&2
     echo -e "说明：RTCP 在远端监听的端口（隧道出口），必须唯一，且与服务端预期一致" >&2
     remote_port=$(safe_read_port "$(random_free_port)")
+
+    # ========== 增加 mux 参数输入 ==========
+    echo -e "${YELLOW}多路复用并发数 (MUX)${RESET}" >&2
+    echo -e "说明：控制 gost 单个连接内的最大并发流数量，默认 2，最大 8" >&2
+    default_mux=2
+    while true; do
+        read -p "请输入 MUX 值 (默认 $default_mux): " mux_input
+        mux_input=$(clean_input "$mux_input")
+        if [ -z "$mux_input" ]; then
+            mux_val=$default_mux
+            break
+        fi
+        if [[ "$mux_input" =~ ^[0-9]+$ ]]; then
+            if [ "$mux_input" -gt 8 ]; then
+                print_warn "输入值 $mux_input 大于最大限制 8，已自动调整为 8"
+                mux_val=8
+            else
+                mux_val=$mux_input
+            fi
+            break
+        else
+            print_error "请输入一个数字"
+        fi
+    done
 
     if [ "$mode" = "1" ]; then
         # 模式1：粘贴链接，提取路径、认证，域名强制用户输入
@@ -361,12 +386,13 @@ PORT=$port
 WS_PATH=$ws_path
 AUTH_USER=$auth_user
 AUTH_PASS=$auth_pass
+MUX=$mux_val
 EOF
 
     # Base64 编码认证信息
     AUTH_BASE64=$(base64_encode "$auth_user:$auth_pass")
 
-    # systemd 服务文件
+    # systemd 服务文件（增加 -mux 参数）
     cat > "$SYSTEMD_DIR/$svc" <<EOF
 [Unit]
 Description=XGost Client Tunnel $id (auth)
@@ -374,7 +400,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$GOST_BIN -L "rtcp://:$remote_port/127.0.0.1:$local_port" -F "relay+${scheme}://${domain}:$port?path=$ws_path&host=$host_para&auth=$AUTH_BASE64"
+ExecStart=$GOST_BIN -L "rtcp://:$remote_port/127.0.0.1:$local_port" -F "relay+${scheme}://${domain}:$port?path=$ws_path&host=$host_para&auth=$AUTH_BASE64" -mux $mux_val
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -386,7 +412,7 @@ EOF
     systemctl daemon-reload
     systemctl enable --now "$svc"
 
-    print_ok "客户端隧道创建成功（已启用认证）"
+    print_ok "客户端隧道创建成功（已启用认证和多路复用 MUX=$mux_val）"
     echo -e "${CYAN}编号:${RESET} $id"
     echo -e "${CYAN}本地端口:${RESET} $local_port"
     echo -e "${CYAN}RTCP 远程端口:${RESET} $remote_port"
@@ -395,6 +421,7 @@ EOF
     echo -e "${CYAN}路径:${RESET} $ws_path"
     echo -e "${CYAN}认证用户名:${RESET} $auth_user"
     echo -e "${CYAN}认证密码:${RESET} $auth_pass (请妥善保存)"
+    echo -e "${CYAN}MUX 并发数:${RESET} $mux_val"
     echo -e "${CYAN}systemd:${RESET} $svc"
 }
 
@@ -503,7 +530,7 @@ delete_all() {
 # ================================
 menu() {
     while true; do
-        print_title "XGost 客户端隧道面板 (认证版)"
+        print_title "XGost 客户端隧道面板 (认证版 + MUX)"
         echo "1) 查看隧道列表" >&2
         echo "2) 新增隧道" >&2
         echo "3) 查看隧道状态" >&2
