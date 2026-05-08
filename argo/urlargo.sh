@@ -158,7 +158,7 @@ add_tunnel() {
     fi
 
     local TUNNEL_NAME
-    TUNNEL_NAME="tunnel-$(tr -dc 'a-z0-9' </dev/urandom | head -c 8)"
+    TUNNEL_NAME="$(tr -dc 'a-z0-9' </dev/urandom | head -c 8)"
     print_info "创建 Cloudflare 隧道：$TUNNEL_NAME"
     $BIN tunnel create "$TUNNEL_NAME" >/dev/null 2>&1 || { print_error "创建隧道失败"; return 1; }
 
