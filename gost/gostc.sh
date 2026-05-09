@@ -259,28 +259,28 @@ add_tunnel() {
     echo "1) 粘贴服务端提供的链接（自动提取路径/认证，域名需手动输入）" >&2
     echo "2) 手动逐步输入" >&2
     printf "请选择 (默认 1): " >&2
-    read mode
+    read -r mode
     mode=$(clean_input "$mode")
     mode="${mode:-1}"
 
     local local_port remote_port domain scheme port ws_path auth_user auth_pass host_para mux_val
 
-    # 本地监听端口
+    # ---------- 本地监听端口 ----------
     echo -e "${YELLOW}本地监听端口 (LOCAL_PORT)${RESET}" >&2
     echo -e "说明：你的程序连接这个端口，数据会进入 RTCP 隧道（隧道入口）" >&2
     local_port=$(safe_read_port "$(random_free_port)")
 
-    # RTCP 远程端口
+    # ---------- RTCP 远程端口 ----------
     echo -e "${YELLOW}RTCP 远程端口 (REMOTE_PORT)${RESET}" >&2
     echo -e "说明：RTCP 在远端监听的端口（隧道出口），必须唯一，且与服务端预期一致" >&2
     remote_port=$(safe_read_port "$(random_free_port)")
 
-    # ========== 多路复用并发数 MUX（范围 1-8，默认 2）==========
+    # ---------- 多路复用并发数 MUX ----------
     echo -e "${YELLOW}多路复用并发数 (MUX)${RESET}" >&2
-    echo -e "说明：控制 gost 单个连接内的最大并发流数量，范围 1-8，默认 2" >&2
+    echo -e "说明：控制 gost 单个连接内的最大并发流数量，范围 1-8，默认 2（设为 1 表示禁用多路复用）" >&2
     default_mux=2
     while true; do
-        read -p "请输入 MUX 值 (默认 $default_mux): " mux_input
+        read -r -p "请输入 MUX 值 (默认 $default_mux): " mux_input
         mux_input=$(clean_input "$mux_input")
         if [ -z "$mux_input" ]; then
             mux_val=$default_mux
@@ -302,12 +302,12 @@ add_tunnel() {
         fi
     done
 
+    # ---------- 配置模式 ----------
     if [ "$mode" = "1" ]; then
-        # 模式1：粘贴链接，提取路径、认证，域名强制用户输入
+        # 模式1：粘贴链接，提取参数
         echo -e "${YELLOW}请粘贴完整的服务端转发链接${RESET}" >&2
         echo -e "格式示例: relay+wss://your.domain:443?path=/xxx&auth=user:pass&host=your.domain" >&2
-        printf "链接: " >&2
-        read raw_link
+        read -r -p "链接: " raw_link
         raw_link=$(clean_input "$raw_link")
         if parse_service_link "$raw_link"; then
             scheme="$SCHEME"
@@ -322,13 +322,12 @@ add_tunnel() {
             echo "" >&2
         else
             print_error "链接格式无法识别，请检查后重试，或选择手动输入模式"
-            return
+            return 1
         fi
 
-        # 域名必须由用户输入（即使链接中有域名，也以用户输入为准）
+        # 域名必须由用户输入（即使链接中有域名，也以此为准）
         while true; do
-            printf "请输入您自己的 Cloudflare 域名（必填）: " >&2
-            read domain
+            read -r -p "请输入您自己的 Cloudflare 域名（必填）: " domain
             domain=$(clean_input "$domain")
             if [ -n "$domain" ]; then
                 break
@@ -336,19 +335,18 @@ add_tunnel() {
                 print_error "域名不能为空，请重新输入"
             fi
         done
-        host_para="$domain"   # host 参数通常与域名相同
+        host_para="$domain"
     else
-        # 模式2：手动输入
+        # 模式2：手动逐步输入
         echo -e "${YELLOW}请输入 Cloudflare 域名${RESET}" >&2
         echo -e "说明：隧道最终通过此域名的 80/443 端口转发" >&2
         domain=$(safe_read "CF 域名" "")
-        [ -z "$domain" ] && { print_error "域名不能为空"; return; }
+        [ -z "$domain" ] && { print_error "域名不能为空"; return 1; }
 
         echo -e "${YELLOW}请选择访问协议${RESET}" >&2
         echo "1) http  → relay+ws://域名:80" >&2
         echo "2) https → relay+wss://域名:443（推荐）" >&2
-        printf "选择 (默认 2): " >&2
-        read proto_choice
+        read -r -p "选择 (默认 2): " proto_choice
         proto_choice=$(clean_input "$proto_choice")
         case "$proto_choice" in
             1) scheme="ws";  port=80 ;;
@@ -361,19 +359,19 @@ add_tunnel() {
 
         echo -e "${YELLOW}请输入服务端的认证信息${RESET}" >&2
         auth_user=$(safe_read "认证用户名" "")
-        [ -z "$auth_user" ] && { print_error "认证用户名不能为空"; return; }
-        read -s -p "请输入认证密码: " auth_pass
+        [ -z "$auth_user" ] && { print_error "认证用户名不能为空"; return 1; }
+        read -r -s -p "请输入认证密码: " auth_pass
         echo
-        read -s -p "确认认证密码: " auth_pass2
+        read -r -s -p "确认认证密码: " auth_pass2
         echo
         if [ -z "$auth_pass" ] || [ "$auth_pass" != "$auth_pass2" ]; then
             print_error "密码为空或不匹配"
-            return
+            return 1
         fi
         host_para="$domain"
     fi
 
-    # 保存配置
+    # ---------- 持久化配置 ----------
     id=$(next_id)
     id2=$(printf "%02d" "$id")
     conf="$CONF_DIR/client-$id2.env"
@@ -392,10 +390,17 @@ AUTH_PASS=$auth_pass
 MUX=$mux_val
 EOF
 
-    # Base64 编码认证信息
+    # 认证信息 base64 编码
     AUTH_BASE64=$(base64_encode "$auth_user:$auth_pass")
 
-    # systemd 服务文件（增加 -mux 参数）
+    # 构建可选的 -mux 参数（mux=1 时不需要）
+    if [ "$mux_val" -ne 1 ]; then
+        mux_param="-mux $mux_val"
+    else
+        mux_param=""
+    fi
+
+    # ---------- 生成 systemd 服务 ----------
     cat > "$SYSTEMD_DIR/$svc" <<EOF
 [Unit]
 Description=XGost Client Tunnel $id (auth)
@@ -403,7 +408,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$GOST_BIN -L "rtcp://:$remote_port/127.0.0.1:$local_port" -F "relay+${scheme}://${domain}:$port?path=$ws_path&host=$host_para&auth=$AUTH_BASE64" -mux $mux_val
+ExecStart=$GOST_BIN -L "rtcp://:$remote_port/127.0.0.1:$local_port" -F "relay+${scheme}://${domain}:$port?path=$ws_path&host=$host_para&auth=$AUTH_BASE64" $mux_param
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -415,7 +420,7 @@ EOF
     systemctl daemon-reload
     systemctl enable --now "$svc"
 
-    print_ok "客户端隧道创建成功（已启用认证和多路复用 MUX=$mux_val）"
+    print_ok "客户端隧道创建成功（已启用认证）"
     echo -e "${CYAN}编号:${RESET} $id"
     echo -e "${CYAN}本地端口:${RESET} $local_port"
     echo -e "${CYAN}RTCP 远程端口:${RESET} $remote_port"
@@ -425,6 +430,9 @@ EOF
     echo -e "${CYAN}认证用户名:${RESET} $auth_user"
     echo -e "${CYAN}认证密码:${RESET} $auth_pass (请妥善保存)"
     echo -e "${CYAN}MUX 并发数:${RESET} $mux_val"
+    if [ "$mux_val" -eq 1 ]; then
+        echo -e "${CYAN}注意:${RESET} 多路复用已禁用（MUX=1）"
+    fi
     echo -e "${CYAN}systemd:${RESET} $svc"
 }
 
