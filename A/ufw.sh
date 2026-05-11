@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# UFW 防火墙管理面板 v8.0（旗舰版 + SSH 动态适配）
+# UFW 防火墙管理面板 v8.1（旗舰版 + SSH 动态适配 + 安全同步）
 # - UI 美化（渐变标题 + 蓝色选项 + 子菜单）
 # - 入站严格控制 / 出站全放行（适配 Vultr）
 # - 多 SSH 端口支持（永不锁死）
-# - SSH 端口变更后支持一键同步规则
+# - SSH 端口变更后支持一键同步规则（先加后删，绝不失联）
 # - 端口占用检测（TCP/UDP）
 # - 自动检测端口是否已开放
 # - 自动检测 Web 服务（Nginx/Caddy）
@@ -131,7 +131,6 @@ get_current_ssh_ports() {
     while IFS= read -r line; do
       port="$(echo "$line" | grep -iE '^Port ' | awk '{print $2}')"
       if [[ -n "$port" && "$port" =~ ^[0-9]+$ ]]; then
-        # 避免重复添加
         if [[ ! " ${ports[*]} " =~ " ${port} " ]]; then
           ports+=("$port")
         fi
@@ -154,35 +153,17 @@ get_current_ssh_ports() {
 get_ufw_ssh_ports() {
   local ports=()
   local port
+  # 直接 grep 包含注释的行，提取端口号
   while IFS= read -r line; do
-    # 匹配类似 "22/tcp ALLOW IN    Anywhere  # UFW_PANEL_SSH"
     if echo "$line" | grep -q "$SSH_COMMENT"; then
+      # 行格式如: "22/tcp ALLOW IN    Anywhere  # UFW_PANEL_SSH"
       port="$(echo "$line" | awk '{print $1}' | cut -d'/' -f1)"
       if [[ -n "$port" && "$port" =~ ^[0-9]+$ ]]; then
         ports+=("$port")
       fi
     fi
-  done < <(ufw status 2>/dev/null | grep -E '^[0-9]+/tcp' || true)
+  done < <(ufw status 2>/dev/null || true)
   printf '%s\n' "${ports[@]}" | sort -nu | tr '\n' ' '
-}
-
-# =========================
-# 删除所有带有标记的 SSH 规则（避免误删用户规则）
-# =========================
-remove_ssh_rules() {
-  local line port proto
-  ufw status | grep "$SSH_COMMENT" | while IFS= read -r line; do
-    port_proto="$(echo "$line" | awk '{print $1}')"
-    port="$(echo "$port_proto" | cut -d'/' -f1)"
-    proto="$(echo "$port_proto" | cut -d'/' -f2)"
-    if [[ -n "$port" && -n "$proto" ]]; then
-      # 先检查规则是否确实存在且带有注释，再删除
-      if ufw status | grep -q "$port/$proto.*$SSH_COMMENT"; then
-        ufw delete allow "$port/$proto" >/dev/null 2>&1 || true
-        log "删除 SSH 规则: $port/$proto"
-      fi
-    fi
-  done
 }
 
 # =========================
@@ -190,42 +171,76 @@ remove_ssh_rules() {
 # =========================
 add_ssh_rule() {
   local port="$1"
-  ufw allow from any to any port "$port" proto tcp comment "$SSH_COMMENT" >/dev/null
-  log "添加 SSH 规则: $port/tcp"
+  # 避免重复添加
+  if ! ufw status | grep -q "$port/tcp.*$SSH_COMMENT"; then
+    ufw allow from any to any port "$port" proto tcp comment "$SSH_COMMENT" >/dev/null
+    log "添加 SSH 规则: $port/tcp"
+  fi
 }
 
 # =========================
-# 同步 SSH 端口规则（核心功能）
+# 安全同步 SSH 端口规则（先添加新端口，再删除旧端口，避免失联）
 # =========================
 sync_ssh_ports() {
-  local current_ports="$(get_current_ssh_ports)"
-  local ufw_ports="$(get_ufw_ssh_ports)"
+  local current_ports new_ports
+  current_ports="$(get_ufw_ssh_ports)"
+  new_ports="$(get_current_ssh_ports)"
 
-  if [[ "$current_ports" == "$ufw_ports" ]]; then
-    print_info "SSH 端口规则已是最新: $current_ports"
+  if [[ "$current_ports" == "$new_ports" ]]; then
+    print_info "SSH 端口规则已是最新: $new_ports"
     return 0
   fi
 
-  print_warn "当前 UFW 规则中的 SSH 端口: ${ufw_ports:-无}"
-  print_warn "实际监听的 SSH 端口: $current_ports"
-  echo -e "${YELLOW}是否更新防火墙规则？此操作不会影响其他手动添加的端口规则。${RESET}"
+  print_warn "当前 UFW 规则中的 SSH 端口: ${current_ports:-无}"
+  print_warn "实际监听的 SSH 端口: $new_ports"
+
+  # 额外警告：如果当前 SSH 会话端口不在新端口列表中，有失联风险
+  local session_port="${SSH_CLIENT##* }"
+  session_port="${session_port%% *}"
+  if [[ -n "$session_port" && ! " $new_ports " =~ " $session_port " ]]; then
+    echo -e "${RED}⚠️ 严重警告：您当前的 SSH 连接端口 ($session_port) 不在新的监听端口列表中！${RESET}"
+    echo -e "${RED}   如果继续同步，您可能会立即断开连接。${RESET}"
+    echo -e "${YELLOW}   建议先在 sshd_config 中同时保留新旧端口，重启 sshd，再执行同步。${RESET}"
+    read -r -p "风险极高，是否仍然继续？(y/N): " force
+    if [[ ! "$force" =~ ^[Yy]$ ]]; then
+      print_info "取消同步"
+      return 0
+    fi
+  fi
+
+  echo -e "${YELLOW}是否更新防火墙规则？此操作会先添加新端口的规则，再删除旧端口的规则。${RESET}"
+  echo -e "${YELLOW}注意：如果新旧端口不同，您当前的 SSH 连接不会中断（只要旧规则未被立即删除——但同步过程会保持旧规则直到最后一步删除）。${RESET}"
   read -r -p "确认同步？(y/N): " confirm
   if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     print_info "取消同步"
     return 0
   fi
 
-  loading "正在同步 SSH 端口规则..."
-  # 1. 删除所有带标记的旧规则
-  remove_ssh_rules
-  # 2. 添加新规则
-  for port in $current_ports; do
+  loading "正在安全同步 SSH 端口规则（先添加新端口）..."
+
+  # 第一步：添加所有新端口的规则（如果已存在则跳过）
+  for port in $new_ports; do
     add_ssh_rule "$port"
   done
-  # 3. 重新加载 UFW（使规则生效）
+
+  # 等待规则生效（UFW 规则添加通常即时生效）
+  sleep 1
+
+  # 第二步：删除旧端口的规则（仅删除带有注释且不在新端口列表中的）
+  ufw status | grep "$SSH_COMMENT" | while IFS= read -r line; do
+    port_proto="$(echo "$line" | awk '{print $1}')"
+    port="$(echo "$port_proto" | cut -d'/' -f1)"
+    if [[ -n "$port" && ! " $new_ports " =~ " $port " ]]; then
+      ufw delete allow "$port_proto" >/dev/null 2>&1 || true
+      log "删除旧 SSH 规则: $port_proto"
+    fi
+  done
+
+  # 重载 UFW 使规则生效（删除操作后重载是必要的）
   ufw reload >/dev/null
-  print_info "SSH 端口规则已更新为: $current_ports"
-  log "SSH 端口规则已同步: $current_ports"
+
+  print_info "SSH 端口规则已安全更新为: $new_ports"
+  log "SSH 端口规则安全同步: $new_ports"
 }
 
 # =========================
@@ -246,7 +261,7 @@ if [[ ! -f "$INIT_FLAG" ]]; then
 
   # 为每个 SSH 端口添加规则（带注释）
   for port in $SSH_PORTS; do
-    ufw allow from any to any port "$port" proto tcp comment "$SSH_COMMENT" >/dev/null
+    add_ssh_rule "$port"
   done
   # 开放 Web 服务常用端口
   ufw allow 80 >/dev/null
@@ -589,7 +604,7 @@ while true; do
   PADDED_STATUS="$(printf "%*s%s" $LEFT_PAD "" "$STATUS_TEXT")"
 
   echo -e "${BOLD}${GRAD1}╔════════════════════════════════════════════════╗"
-  echo -e "${GRAD2}║              UFW 防火墙管理面板 v8.0           ║"
+  echo -e "${GRAD2}║              UFW 防火墙管理面板 v8.1           ║"
   echo -e "${GRAD3}╠════════════════════════════════════════════════╣${RESET}"
   echo -e "║${STATUS_COLOR}${PADDED_STATUS}${RESET}║"
   echo "╠════════════════════════════════════════════════╣"
