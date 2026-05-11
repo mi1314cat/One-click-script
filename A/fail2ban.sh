@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Fail2ban 全功能管理面板 - 终极诊断修复版
-#  特性：兼容 status 返回空但部分 jail 运行的情况
+#  Fail2ban 全功能管理面板 - 终极版（强制探测运行 jail）
+#  特性：无视 status 空列表，直接探测已知 jail
 # ============================================================
 set -o pipefail
 
@@ -108,125 +108,114 @@ else
     INI_SET() { echo "警告: 未安装 crudini，配置修改受限" >&2; return 1; }
 fi
 
-### ---------- 精准提取启动失败原因（增强版）----------
+### ---------- 精准提取启动失败原因 ----------
 extract_jail_failures() {
     FAILED_JAILS=()
     local errors=""
-    # 优先从 fail2ban 日志中获取最近 2 分钟的 ERROR 和关键 WARNING
     if [[ -n "$F2B_LOGFILE" && -f "$F2B_LOGFILE" ]]; then
-        errors=$(grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} fail2ban\.' "$F2B_LOGFILE" | grep -E 'ERROR|WARNING' | tail -30)
+        errors=$(grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} fail2ban\.' "$F2B_LOGFILE" | grep -E 'ERROR|WARNING' | tail -40)
     else
         errors=$(journalctl -u fail2ban --since "2 minutes ago" --no-pager | grep -E 'ERROR|WARNING')
     fi
 
+    local jail_name=""
     while IFS= read -r line; do
-        # 跳过 already banned 这类无关警告
         [[ "$line" =~ already\ banned ]] && continue
 
-        local jail_name=""
-        local reason=""
-
-        # 提取 jail 名称
         if [[ "$line" =~ jail[[:space:]]*[\'\"]([^\'\"]+)[\'\"] ]]; then
             jail_name="${BASH_REMATCH[1]}"
         elif [[ "$line" =~ while\ (?:reading|configuring)\ jail\ \'([^\']+)\' ]]; then
             jail_name="${BASH_REMATCH[1]}"
-        elif [[ "$line" =~ \'([^\']+)\'.*?(?:filter|logpath|action) ]]; then
+        elif [[ "$line" =~ (sshd|recidive|postfix|dovecot|nginx-http-auth) ]]; then
             jail_name="${BASH_REMATCH[1]}"
-        elif [[ "$line" =~ 'No file(s) found for logpath' ]]; then
-            jail_name="sshd"   # 通常是 sshd jail
         fi
 
-        # 提取具体原因
-        if [[ "$line" =~ 'No file(s) found for logpath' ]]; then
-            reason="日志文件不存在 (logpath missing)"
-        elif [[ "$line" =~ 'filter not found' ]]; then
-            reason="filter 文件缺失"
-        elif [[ "$line" =~ 'action not found' ]]; then
-            reason="action 文件缺失"
-        elif [[ "$line" =~ 'Unable to read action' ]]; then
-            reason="banaction 不可用"
-        elif [[ "$line" =~ WARNING.*already\ banned ]]; then
-            continue
-        else
-            reason=$(echo "$line" | sed -E 's/^.*(ERROR|WARNING)[[:space:]]+//' | cut -c1-120)
-        fi
-
-        if [[ -n "$jail_name" && -n "$reason" ]]; then
+        if [[ -n "$jail_name" ]]; then
+            local reason=""
+            if [[ "$line" =~ 'No file(s) found for logpath' ]]; then
+                reason="日志文件不存在 (logpath missing)"
+            elif [[ "$line" =~ 'filter not found' ]]; then
+                reason="filter 文件缺失"
+            elif [[ "$line" =~ 'action not found' ]]; then
+                reason="action 文件缺失"
+            elif [[ "$line" =~ 'Unable to read action' ]]; then
+                reason="banaction 不可用"
+            elif [[ "$line" =~ ERROR ]]; then
+                reason=$(echo "$line" | sed -E 's/^.*ERROR[[:space:]]+//' | cut -c1-120)
+            else
+                continue
+            fi
             FAILED_JAILS+=("$jail_name: $reason")
         fi
     done <<< "$errors"
 
-    # 去重
     if [[ ${#FAILED_JAILS[@]} -gt 0 ]]; then
         mapfile -t FAILED_JAILS < <(printf "%s\n" "${FAILED_JAILS[@]}" | sort -u)
     fi
 }
 
-### ---------- 状态刷新（兼容 status 返回空但部分 jail 运行）----------
+### ---------- 状态刷新（强制探测实际运行的 jail）----------
 refresh_status() {
     unset F2B_JAIL_STATUS
     declare -gA F2B_JAIL_STATUS
     F2B_JAIL_COUNT=0
     F2B_BAN_TOTAL=0
+    FAILED_JAILS=()
 
     detect_fail2ban || return
     if ! systemctl is-active fail2ban &>/dev/null; then
         return
     fi
 
+    # 方法1：从 status 获取 jail 列表
     local raw jail_list
     raw=$("$FAIL2BAN_BIN" status 2>&1)
     jail_list=$(echo "$raw" | awk -F': ' '/Jail list:/ {print $2}' | tr ',' ' ' | xargs)
 
-    # 如果主命令返回空，尝试从配置文件中读取启用的 jail 并逐个检测
+    # 如果获取不到任何 jail，尝试直接探测常见 jail
     if [[ -z "$jail_list" ]]; then
-        local enabled_jails=()
-        # 从 jail.local 和 jail.d/*.conf 中提取 enabled=true 的 jail
-        for conf in /etc/fail2ban/jail.local /etc/fail2ban/jail.d/*.conf; do
-            [[ -f "$conf" ]] || continue
-            while IFS= read -r line; do
-                if [[ "$line" =~ ^[[:space:]]*\[([^]]+)\] ]]; then
-                    current_jail="${BASH_REMATCH[1]}"
-                elif [[ "$line" =~ ^[[:space:]]*enabled[[:space:]]*=[[:space:]]*(true|1|yes) ]]; then
-                    enabled_jails+=("$current_jail")
-                fi
-            done < "$conf"
+        print_warn "fail2ban-client status 返回空列表，正在直接探测可能运行的 jail..."
+        # 常见 jail 列表
+        local candidate_jails=("sshd" "recidive" "postfix" "dovecot" "nginx-http-auth" "apache-auth")
+        local found_jails=()
+        for jail in "${candidate_jails[@]}"; do
+            if "$FAIL2BAN_BIN" status "$jail" &>/dev/null; then
+                found_jails+=("$jail")
+            fi
         done
-        # 去重
-        if [[ ${#enabled_jails[@]} -gt 0 ]]; then
-            mapfile -t enabled_jails < <(printf "%s\n" "${enabled_jails[@]}" | sort -u)
-            jail_list="${enabled_jails[*]}"
+        if [[ ${#found_jails[@]} -gt 0 ]]; then
+            jail_list="${found_jails[*]}"
+            print_info "通过直接探测发现运行中的 jail: $jail_list"
         fi
     fi
 
     if [[ -n "$jail_list" ]]; then
         for jail in $jail_list; do
-            local detail banned
-            detail=$("$FAIL2BAN_BIN" status "$jail" 2>/dev/null)
+            local status_output banned
+            status_output=$("$FAIL2BAN_BIN" status "$jail" 2>/dev/null)
             if [[ $? -eq 0 ]]; then
-                banned=$(echo "$detail" | awk -F': ' '/Currently banned:/ {print $2}')
-                banned=${banned:-0}
-                if [[ "$banned" =~ ^[0-9]+$ ]]; then
-                    F2B_JAIL_STATUS["$jail"]=$banned
-                    ((F2B_JAIL_COUNT++))
-                    ((F2B_BAN_TOTAL+=banned))
-                fi
+                # 提取 "Currently banned:" 后的数字
+                banned=$(echo "$status_output" | grep -i "Currently banned" | awk '{print $NF}')
+                [[ "$banned" =~ ^[0-9]+$ ]] || banned=0
+                F2B_JAIL_STATUS["$jail"]=$banned
+                ((F2B_JAIL_COUNT++))
+                ((F2B_BAN_TOTAL+=banned))
             fi
         done
     fi
 
-    # 提取失败 jail（如果还有未启动的）
-    extract_jail_failures
+    # 如果还是没有 jail，尝试提取失败原因
+    if [[ $F2B_JAIL_COUNT -eq 0 ]]; then
+        extract_jail_failures
+    fi
 }
 
 ### ---------- 重启并精准诊断 ----------
 restart_and_diagnose() {
     print_info "重启 Fail2ban 服务..."
     systemctl restart fail2ban
-    sleep 5
+    sleep 8
 
-    # 强制刷新状态
     refresh_status
 
     if [[ $F2B_JAIL_COUNT -gt 0 ]]; then
@@ -257,7 +246,6 @@ fix_ssh_logpath() {
         return 0
     fi
     print_warn "未找到传统 SSH 日志文件 (${SSH_LOGFILE:-/var/log/auth.log})"
-    # 尝试切换到 systemd 后端
     if grep -q "^backend = systemd" /etc/fail2ban/jail.local 2>/dev/null; then
         print_info "已配置 systemd 后端，无需日志文件"
         return 0
@@ -307,7 +295,6 @@ auto_diagnose_and_fix() {
     fix_banaction
     fix_recidive_log
 
-    # 检查 sshd filter
     if [[ ! -f /etc/fail2ban/filter.d/sshd.conf ]]; then
         print_warn "sshd filter 缺失，尝试恢复"
         if [[ -f /usr/share/fail2ban/filter.d/sshd.conf ]]; then
@@ -385,7 +372,7 @@ EOF
     restart_and_diagnose
 }
 
-### ---------- 安装与运维功能 ----------
+### ---------- 安装 ----------
 install_fail2ban() {
     detect_fail2ban && { print_info "Fail2ban 已安装。"; return; }
     print_title_bar "安装 Fail2ban"
@@ -405,21 +392,76 @@ install_fail2ban() {
     auto_diagnose_and_fix
 }
 
+### ---------- 运维功能（改进交互）----------
 ban_ip() {
     refresh_status
-    [[ $F2B_JAIL_COUNT -eq 0 ]] && { print_warn "当前无可用 jail"; return; }
-    echo "可用 jail: ${!F2B_JAIL_STATUS[*]}"
-    read -rp "输入 jail 名称: " jail; [[ -z "$jail" ]] && return
-    read -rp "输入 IP: " ip; [[ -z "$ip" ]] && return
+    if [[ $F2B_JAIL_COUNT -eq 0 ]]; then
+        print_warn "当前无可用 jail"
+        return
+    fi
+
+    local jail_names=("${!F2B_JAIL_STATUS[@]}")
+    echo "可用 jail："
+    for i in "${!jail_names[@]}"; do
+        echo "  $((i+1))) ${jail_names[$i]}"
+    done
+    read -rp "请输入 jail 名称或序号: " input
+    [[ -z "$input" ]] && return
+
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        local idx=$((input-1))
+        if [[ $idx -ge 0 && $idx -lt ${#jail_names[@]} ]]; then
+            jail="${jail_names[$idx]}"
+        else
+            print_error "无效序号"
+            return
+        fi
+    else
+        jail="$input"
+        if [[ ! " ${jail_names[*]} " =~ " ${jail} " ]]; then
+            print_error "jail '$jail' 不存在"
+            return
+        fi
+    fi
+
+    read -rp "输入 IP: " ip
+    [[ -z "$ip" ]] && return
     "$FAIL2BAN_BIN" set "$jail" banip "$ip" && print_info "已封禁 $ip" || print_error "封禁失败"
 }
 
 unban_ip() {
     refresh_status
-    [[ $F2B_JAIL_COUNT -eq 0 ]] && { print_warn "当前无可用 jail"; return; }
-    echo "可用 jail: ${!F2B_JAIL_STATUS[*]}"
-    read -rp "输入 jail 名称: " jail; [[ -z "$jail" ]] && return
-    read -rp "输入 IP: " ip; [[ -z "$ip" ]] && return
+    if [[ $F2B_JAIL_COUNT -eq 0 ]]; then
+        print_warn "当前无可用 jail"
+        return
+    fi
+
+    local jail_names=("${!F2B_JAIL_STATUS[@]}")
+    echo "可用 jail："
+    for i in "${!jail_names[@]}"; do
+        echo "  $((i+1))) ${jail_names[$i]}"
+    done
+    read -rp "请输入 jail 名称或序号: " input
+    [[ -z "$input" ]] && return
+
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        local idx=$((input-1))
+        if [[ $idx -ge 0 && $idx -lt ${#jail_names[@]} ]]; then
+            jail="${jail_names[$idx]}"
+        else
+            print_error "无效序号"
+            return
+        fi
+    else
+        jail="$input"
+        if [[ ! " ${jail_names[*]} " =~ " ${jail} " ]]; then
+            print_error "jail '$jail' 不存在"
+            return
+        fi
+    fi
+
+    read -rp "输入 IP: " ip
+    [[ -z "$ip" ]] && return
     "$FAIL2BAN_BIN" set "$jail" unbanip "$ip" && print_info "已解封 $ip" || print_error "解封失败"
 }
 
@@ -521,10 +563,36 @@ restore_default() {
 
 view_jail_details() {
     refresh_status
-    [[ $F2B_JAIL_COUNT -eq 0 ]] && { print_warn "无活跃 jail"; return; }
-    echo "活跃 jail: ${!F2B_JAIL_STATUS[*]}"
-    read -rp "输入 jail 名称: " j
-    "$FAIL2BAN_BIN" status "$j" 2>&1
+    if [[ $F2B_JAIL_COUNT -eq 0 ]]; then
+        print_warn "无活跃 jail"
+        return
+    fi
+
+    local jail_names=("${!F2B_JAIL_STATUS[@]}")
+    echo "活跃 jail："
+    for i in "${!jail_names[@]}"; do
+        echo "  $((i+1))) ${jail_names[$i]}"
+    done
+    read -rp "请输入 jail 名称或序号: " input
+    [[ -z "$input" ]] && return
+
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        local idx=$((input-1))
+        if [[ $idx -ge 0 && $idx -lt ${#jail_names[@]} ]]; then
+            jail="${jail_names[$idx]}"
+        else
+            print_error "无效序号"
+            return
+        fi
+    else
+        jail="$input"
+        if [[ ! " ${jail_names[*]} " =~ " ${jail} " ]]; then
+            print_error "jail '$jail' 不存在"
+            return
+        fi
+    fi
+
+    "$FAIL2BAN_BIN" status "$jail" 2>&1
 }
 
 fix_boot_order() {
