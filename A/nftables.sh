@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# nftables 防火墙管理面板 v8.1（稳定版 / Debian+Ubuntu+CentOS 通用）
+# nftables 防火墙管理面板 v9.0（稳定版 / Debian+Ubuntu+CentOS 通用）
 # - 独立规则文件：/etc/nftables.d/ufw-panel.nft
 # - systemd 自动加载
 # - 渐变 UI + 子菜单 + 动态动画
-# - 永不锁死 SSH
+# - 永不锁死 SSH（支持多端口、动态更新）
 # - 端口管理 / Web 服务管理 / 自动开放端口
 # - 备份 / 恢复 / 日志系统
 # - 去除全局 set -e，改为局部防呆，避免意外退出
@@ -33,6 +33,7 @@ fi
 # =========================
 print_info()  { echo -e "${CYAN}# ${GREEN}[Info]${RESET} $1"; }
 print_error() { echo -e "${CYAN}# ${RED}[Error]${RESET} $1"; }
+print_warn()  { echo -e "${CYAN}# ${YELLOW}[Warn]${RESET} $1"; }
 
 log() {
   local ts msg
@@ -57,13 +58,10 @@ banner() {
   echo -e "${BOLD}${GRAD1}╔════════════════════════════════════════════════╗"
   echo -e "${GRAD2}║                      CATMI                   ║"
   echo -e "${GRAD3}╚════════════════════════════════════════════════╝${RESET}"
-
   echo -e "                       ${CYAN}|\\__/,|   (\\\\${RESET}"
   echo -e "                     ${CYAN}_.|o o  |_   ) )${RESET}"
   echo -e "       ${CYAN}-------------(((---(((-------------------${RESET}"
 }
-
-
 
 # =========================
 # Root 检查
@@ -83,6 +81,7 @@ touch "$LOG_FILE" 2>/dev/null || {
 chmod 600 "$LOG_FILE" 2>/dev/null || true
 
 banner
+
 # =========================
 # 自动安装 nftables（跨发行版）
 # =========================
@@ -92,7 +91,6 @@ install_nftables_if_missing() {
   fi
 
   echo -e "${YELLOW}检测到系统未安装 nftables，正在自动安装...${RESET}"
-
   if command -v apt >/dev/null 2>&1; then
     apt update -y
     apt install -y nftables
@@ -109,7 +107,6 @@ install_nftables_if_missing() {
     print_error "nftables 安装失败，请检查系统包管理器"
     exit 1
   fi
-
   print_info "nftables 安装成功"
 }
 
@@ -124,48 +121,63 @@ need_cmd() {
     exit 1
   }
 }
-
-
 need_cmd ss
 need_cmd systemctl
 
 # =========================
-# 检测 SSH 端口（安全版）
+# 检测当前 SSH 监听端口（多端口支持）
 # =========================
-detect_ssh_port() {
-  local port line
-  port=""
+get_current_ssh_ports() {
+  local ports=()
+  local line port
 
-  # 尝试从 ss 中找 sshd
-  line="$(ss -tnlp 2>/dev/null | grep sshd || true)"
-  if [[ -n "$line" ]]; then
-    port="$(echo "$line" | awk '{print $4}' | sed 's/.*://g' | head -n1 || true)"
-  fi
+  # 1. 从 ss 中获取所有 sshd 监听端口
+  while IFS= read -r line; do
+    port="$(echo "$line" | awk '{print $4}' | sed 's/.*://g')"
+    if [[ -n "$port" && "$port" =~ ^[0-9]+$ ]]; then
+      ports+=("$port")
+    fi
+  done < <(ss -tnlp 2>/dev/null | grep sshd || true)
 
-  # 尝试从 sshd_config 中找 Port
-  if [[ -z "$port" && -f /etc/ssh/sshd_config ]]; then
-    port="$(grep -iE '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -n1 || true)"
+  # 2. 从 sshd_config 补充（可能监听但未在 ss 中显示）
+  if [[ -f /etc/ssh/sshd_config ]]; then
+    while IFS= read -r line; do
+      port="$(echo "$line" | grep -iE '^Port ' | awk '{print $2}')"
+      if [[ -n "$port" && "$port" =~ ^[0-9]+$ ]]; then
+        # 避免重复添加
+        if [[ ! " ${ports[*]} " =~ " ${port} " ]]; then
+          ports+=("$port")
+        fi
+      fi
+    done < <(grep -iE '^Port ' /etc/ssh/sshd_config 2>/dev/null || true)
   fi
 
   # 默认 22
-  [[ -z "$port" ]] && port="22"
-  echo "$port"
+  if [[ ${#ports[@]} -eq 0 ]]; then
+    ports=(22)
+  fi
+
+  # 去重、排序
+  printf '%s\n' "${ports[@]}" | sort -nu | tr '\n' ' '
 }
 
-SSH_PORT="$(detect_ssh_port)"
-
 # =========================
-# nftables 基础规则（方案 C：更宽松）
+# 生成基础规则文件（包含所有 SSH 端口）
 # =========================
 generate_base_rules() {
-cat > "$NFT_RULE_FILE" <<EOF
+  local ssh_ports="$1"
+  local ssh_accept_rules=""
+  for port in $ssh_ports; do
+    ssh_accept_rules+="    tcp dport $port accept\n"
+  done
+
+  cat > "$NFT_RULE_FILE" <<EOF
 table inet filter {
   chain input {
     type filter hook input priority 0; policy accept;
 
-    # 永不锁死 SSH
-    tcp dport $SSH_PORT accept
-
+    # 动态 SSH 端口（永不锁死）
+$(echo -e "$ssh_accept_rules")
     # 基础安全
     ct state established,related accept
     iif lo accept
@@ -183,10 +195,52 @@ EOF
 }
 
 # =========================
+# 获取当前规则中实际开放的 SSH 端口
+# =========================
+get_rules_ssh_ports() {
+  nft list chain inet filter input 2>/dev/null \
+    | grep -E 'tcp dport [0-9]+ accept' \
+    | awk '{print $4}' | sort -nu | tr '\n' ' '
+}
+
+# =========================
+# 同步 SSH 端口规则（更新内存+文件，会清空动态规则）
+# =========================
+sync_ssh_ports() {
+  local current_ports new_ports
+  current_ports="$(get_rules_ssh_ports)"
+  new_ports="$(get_current_ssh_ports)"
+
+  if [[ "$current_ports" == "$new_ports" ]]; then
+    print_info "SSH 端口规则已是最新: $new_ports"
+    return 0
+  fi
+
+  print_warn "当前规则中的 SSH 端口: $current_ports"
+  print_warn "实际监听的 SSH 端口: $new_ports"
+  echo -e "${YELLOW}是否需要更新防火墙规则？更新后将清除所有动态添加的端口规则（只保留 SSH 和基础规则）。${RESET}"
+  read -r -p "确认更新？(y/N): " confirm
+  if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    print_info "取消同步"
+    return 0
+  fi
+
+  loading "正在重新生成 SSH 端口规则..."
+  generate_base_rules "$new_ports"
+  if safe_nft_load; then
+    print_info "SSH 端口规则已更新为: $new_ports"
+    log "SSH 端口规则同步: $new_ports"
+  else
+    print_error "规则加载失败，请检查 $NFT_RULE_FILE"
+    return 1
+  fi
+}
+
+# =========================
 # systemd 自动加载服务
 # =========================
 generate_systemd_service() {
-cat > "$NFT_SERVICE" <<EOF
+  cat > "$NFT_SERVICE" <<EOF
 [Unit]
 Description=Load nftables rules for UFW Panel Replacement
 After=network.target
@@ -199,7 +253,6 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-
   systemctl daemon-reload || true
   systemctl enable "$(basename "$NFT_SERVICE")" 2>/dev/null || true
 }
@@ -224,15 +277,15 @@ if [[ ! -f "$INIT_FLAG" ]]; then
   print_info "首次运行，正在初始化 nftables..."
 
   mkdir -p /etc/nftables.d
-
-  generate_base_rules
+  SSH_PORTS="$(get_current_ssh_ports)"
+  generate_base_rules "$SSH_PORTS"
   generate_systemd_service
 
   loading "正在加载 nftables 规则..."
   safe_nft_load || print_error "首次加载规则失败，请检查 $NFT_RULE_FILE"
 
   touch "$INIT_FLAG"
-  print_info "初始化完成，nftables 已启用并独立管理规则"
+  print_info "初始化完成，SSH 端口已设置为: $SSH_PORTS"
 fi
 
 # =========================
@@ -336,8 +389,7 @@ port_menu() {
     echo "╚══════════════════════════════════════╝"
     echo -e "${RESET}"
 
-    print_info "请选择操作："
-    read -r sub || break
+    read -r -p "请选择操作：" sub || break
 
     case "$sub" in
       0) break ;;
@@ -488,22 +540,23 @@ show_logs() {
 }
 
 # =========================
-# 清空规则（保留 SSH）
+# 清空规则（保留 SSH + 基础网络）
 # =========================
 reset_rules() {
-  print_error "你确定要清空所有规则吗？（YES 确认）"
+  print_error "你确定要清空所有动态规则吗？（YES 确认）"
   read -r confirm || return
   if [[ "${confirm^^}" != "YES" ]]; then
     print_info "取消操作"
     return
   fi
 
-  loading "正在清空规则..."
-  generate_base_rules
+  loading "正在重置规则..."
+  local ssh_ports="$(get_current_ssh_ports)"
+  generate_base_rules "$ssh_ports"
   safe_nft_load || print_error "重载规则失败"
 
-  print_info "所有规则已清空（SSH + 基础网络已保留）"
-  log "规则已重置"
+  print_info "所有动态规则已清空，SSH 端口 ($ssh_ports) 及基础网络已保留"
+  log "规则已重置，SSH 端口: $ssh_ports"
 }
 
 # =========================
@@ -544,6 +597,7 @@ restore_rules() {
   print_info "规则已从备份恢复"
   log "从备份恢复规则：$file"
 }
+
 # =========================
 # 删除 nftables（卸载 / 清除 / 禁用）
 # =========================
@@ -608,6 +662,14 @@ delete_nftables() {
 # 主菜单
 # =========================
 while true; do
+  # 每次循环检查 SSH 端口一致性（仅警告）
+  current_rules_ports="$(get_rules_ssh_ports)"
+  actual_ports="$(get_current_ssh_ports)"
+  if [[ "$current_rules_ports" != "$actual_ports" ]]; then
+    print_warn "检测到 SSH 端口不一致！规则中: $current_rules_ports, 实际监听: $actual_ports"
+    echo -e "   请使用主菜单选项 ${BLUE}12${RESET} 同步 SSH 端口规则"
+  fi
+
   RAW_STATUS="$(systemctl is-active "$(basename "$NFT_SERVICE")" 2>/dev/null || true)"
 
   if [[ "$RAW_STATUS" == "active" ]]; then
@@ -628,7 +690,7 @@ while true; do
   PADDED_STATUS="$(printf "%*s%s" "$LEFT_PAD" "" "$STATUS_TEXT")"
 
   echo -e "${BOLD}${GRAD1}╔════════════════════════════════════════════════╗"
-  echo -e "${GRAD2}║           nftables 防火墙管理面板 v8.1         ║"
+  echo -e "${GRAD2}║           nftables 防火墙管理面板 v9.0         ║"
   echo -e "${GRAD3}╠════════════════════════════════════════════════╣${RESET}"
   echo -e "║${STATUS_COLOR}${PADDED_STATUS}${RESET}║"
   echo "╠════════════════════════════════════════════════╣"
@@ -636,7 +698,7 @@ while true; do
   echo -e "║ ${BLUE}1)${RESET} 开放关闭端口管理"
   echo -e "║ ${BLUE}2)${RESET} 查看当前已开放端口"
   echo -e "║ ${BLUE}3)${RESET} 查看防火墙日志"
-  echo -e "║ ${BLUE}4)${RESET} 清空所有规则（保留 SSH）"
+  echo -e "║ ${BLUE}4)${RESET} 清空所有动态规则（保留 SSH）"
   echo -e "║ ${BLUE}5)${RESET} ${TOGGLE_TEXT}"
   echo -e "║ ${BLUE}6)${RESET} 查看端口占用情况"
   echo -e "║ ${BLUE}7)${RESET} 备份规则"
@@ -644,13 +706,10 @@ while true; do
   echo -e "║ ${BLUE}9)${RESET} Web 服务管理（Nginx/Caddy）"
   echo -e "║ ${BLUE}10)${RESET} 自动开放所有被程序占用的端口"
   echo -e "║ ${BLUE}11)${RESET} 删除 nftables（卸载/清除）"
+  echo -e "║ ${BLUE}12)${RESET} 同步 SSH 端口规则（解决改端口问题）"
   echo "╚════════════════════════════════════════════════╝"
 
-  print_info "请选择操作："
-  if ! read -r choice; then
-    echo
-    exit 0
-  fi
+  read -r -p "请选择操作：" choice || { echo; exit 0; }
 
   case "$choice" in
     0) print_info "退出脚本"; exit 0 ;;
@@ -693,6 +752,7 @@ while true; do
     9) web_service_menu ;;
     10) auto_open_used_ports ;;
     11) delete_nftables ;;
-     *) print_error "无效选择" ;;
+    12) sync_ssh_ports ;;
+    *) print_error "无效选择" ;;
   esac
 done
