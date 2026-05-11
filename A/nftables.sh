@@ -218,6 +218,9 @@ remove_ssh_rules() {
 # =========================
 # 同步 SSH 端口规则（只更新 SSH 相关规则，不清除其他动态端口）
 # =========================
+# =========================
+# 安全同步 SSH 端口规则（先添加新端口，再删除旧端口，避免失联）
+# =========================
 sync_ssh_ports() {
   local current_ports new_ports
   current_ports="$(get_rules_ssh_ports)"
@@ -230,39 +233,52 @@ sync_ssh_ports() {
 
   print_warn "当前规则中的 SSH 端口: ${current_ports:-无}"
   print_warn "实际监听的 SSH 端口: $new_ports"
-  echo -e "${YELLOW}是否更新 SSH 端口规则？此操作不会影响其他已开放的端口。${RESET}"
+  echo -e "${YELLOW}⚠️ 安全同步将："
+  echo "   1. 先添加所有新端口的允许规则"
+  echo "   2. 再删除旧端口的规则（仅针对带 'UFW_PANEL_SSH' 注释且不在新端口列表中的规则）"
+  echo "   3. 不会影响您当前已经开放的其它端口"
+  echo -e "   这样可确保您的 SSH 连接不会中断。${RESET}"
   read -r -p "确认更新？(y/N): " confirm
   if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     print_info "取消同步"
     return 0
   fi
 
-  loading "正在更新 SSH 端口规则..."
+  loading "正在安全更新 SSH 端口规则..."
 
-  # 1. 删除所有旧的带注释的 SSH 规则
-  remove_ssh_rules
-
-  # 2. 添加新的 SSH 端口规则（带注释）
+  # 第一步：添加所有新的 SSH 端口规则（带注释）
   for port in $new_ports; do
-    nft add rule inet filter input tcp dport "$port" accept comment "\"UFW_PANEL_SSH\"" 2>/dev/null || true
-    log "添加 SSH 规则: $port/tcp (同步)"
+    # 检查规则是否已存在（避免重复添加）
+    if ! nft list chain inet filter input 2>/dev/null | grep -q "tcp dport $port accept.*comment \"UFW_PANEL_SSH\""; then
+      nft add rule inet filter input tcp dport "$port" accept comment "UFW_PANEL_SSH" 2>/dev/null
+      log "添加新 SSH 规则: 端口 $port"
+    else
+      log "规则已存在，跳过: 端口 $port"
+    fi
   done
 
-  # 3. 可选：更新规则文件中的基础部分（保持文件与运行时一致）
-  # 这一步是为了保证下次重启或服务加载时，规则文件中的 SSH 端口也是最新的
-  # 但注意：规则文件只应包含基础规则（SSH + 80/443），不应包含动态添加的端口
-  # 因此，我们只更新规则文件中的 SSH 部分，而不覆盖整个文件（避免丢失动态端口）
-  # 更简单的方法：重新生成基础规则文件，但保持当前运行的动态规则不变
-  # 下面采用重新生成基础规则文件，但不执行 nft -f（因为当前运行时规则已包含动态端口，重新加载会清空）
-  # 为了规则文件的持久性，我们还是重新生成文件，但不会影响当前运行规则
-  local ssh_ports="$new_ports"
+  # 等待规则生效（可选，通常无需等待）
+  sleep 1
+
+  # 第二步：删除旧的 SSH 规则（这些规则带有注释，且端口不在 new_ports 中）
+  nft -a list chain inet filter input 2>/dev/null \
+    | grep 'comment "UFW_PANEL_SSH"' \
+    | while read -r line; do
+        # 提取端口号
+        port=$(echo "$line" | sed -n 's/.*dport \([0-9]\+\).*/\1/p')
+        # 提取 handle 号
+        handle=$(echo "$line" | grep -o 'handle [0-9]\+' | awk '{print $2}')
+        if [[ -n "$port" && -n "$handle" ]] && [[ ! " $new_ports " =~ " $port " ]]; then
+          nft delete rule inet filter input handle "$handle" 2>/dev/null
+          log "删除旧 SSH 规则: 端口 $port (handle $handle)"
+        fi
+      done
+
+  # 第三步：同步规则文件（基础规则，仅用于系统重启后自动加载）
   local ssh_accept_rules=""
-  for port in $ssh_ports; do
+  for port in $new_ports; do
     ssh_accept_rules+="    tcp dport $port accept comment \"UFW_PANEL_SSH\"\n"
   done
-
-  # 备份旧规则文件，然后生成新文件（仅基础部分）
-  cp "$NFT_RULE_FILE" "${NFT_RULE_FILE}.bak" 2>/dev/null || true
   cat > "$NFT_RULE_FILE" <<EOF
 table inet filter {
   chain input {
@@ -285,10 +301,9 @@ $(echo -e "$ssh_accept_rules")
 }
 EOF
 
-  print_info "SSH 端口规则已更新为: $new_ports（运行时规则已生效，规则文件已同步）"
-  log "SSH 端口规则同步: $new_ports"
+  print_info "SSH 端口规则已安全更新为: $new_ports"
+  log "SSH 端口规则安全同步: $new_ports"
 }
-
 # =========================
 # systemd 自动加载服务
 # =========================
