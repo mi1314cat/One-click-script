@@ -665,24 +665,18 @@ exit_program() {
 # 快捷方式设置函数
 create_shortcut() {
     local shortcut_path="/usr/local/bin/catmiup"
-    local script_path="/root/catmi/Ubuntu.sh"
+    
 
     echo "创建快捷方式：${shortcut_path}"
 
-    # 先下载脚本到本地
-    mkdir -p /root/catmi
-    curl -fsSL -o "$script_path" \
+    
+    curl -fsSL -o "$shortcut_path" \
         https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/Ubuntu.sh
 
-    chmod +x "$script_path"
-
-    # 写入快捷方式脚本
-    cat > "$shortcut_path" <<EOF
-#!/usr/bin/env bash
-bash "$script_path" "\$@"
-EOF
-
     chmod +x "$shortcut_path"
+
+    
+
 
     echo -e "${GREEN}快捷方式创建成功！直接运行 'catmiup' 启动面板。${PLAIN}"
 }
