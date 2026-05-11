@@ -168,7 +168,7 @@ generate_base_rules() {
   local ssh_ports="$1"
   local ssh_accept_rules=""
   for port in $ssh_ports; do
-    ssh_accept_rules+="    tcp dport $port accept\n"
+    ssh_accept_rules+="    tcp dport $port accept comment \"UFW_PANEL_SSH\"\n"
   done
 
   cat > "$NFT_RULE_FILE" <<EOF
@@ -193,18 +193,30 @@ $(echo -e "$ssh_accept_rules")
 }
 EOF
 }
-
 # =========================
 # 获取当前规则中实际开放的 SSH 端口
 # =========================
 get_rules_ssh_ports() {
   nft list chain inet filter input 2>/dev/null \
-    | grep -E 'tcp dport [0-9]+ accept' \
-    | awk '{print $4}' | sort -nu | tr '\n' ' '
+    | grep -E 'tcp dport [0-9]+ accept comment "UFW_PANEL_SSH"' \
+    | sed -n 's/.*dport \([0-9]\+\).*/\1/p' \
+    | sort -nu | tr '\n' ' '
 }
 
 # =========================
-# 同步 SSH 端口规则（更新内存+文件，会清空动态规则）
+# 删除所有带注释的 SSH 规则（仅删除标记为 UFW_PANEL_SSH 的规则）
+# =========================
+remove_ssh_rules() {
+  # 获取所有带 UFW_PANEL_SSH 注释的规则 handle 并删除
+  nft -a list chain inet filter input 2>/dev/null \
+    | grep 'comment "UFW_PANEL_SSH"' \
+    | grep -o 'handle [0-9]\+' | awk '{print $2}' \
+    | while read -r handle; do
+        nft delete rule inet filter input handle "$handle" 2>/dev/null || true
+      done
+}
+# =========================
+# 同步 SSH 端口规则（只更新 SSH 相关规则，不清除其他动态端口）
 # =========================
 sync_ssh_ports() {
   local current_ports new_ports
@@ -216,24 +228,65 @@ sync_ssh_ports() {
     return 0
   fi
 
-  print_warn "当前规则中的 SSH 端口: $current_ports"
+  print_warn "当前规则中的 SSH 端口: ${current_ports:-无}"
   print_warn "实际监听的 SSH 端口: $new_ports"
-  echo -e "${YELLOW}是否需要更新防火墙规则？更新后将清除所有动态添加的端口规则（只保留 SSH 和基础规则）。${RESET}"
+  echo -e "${YELLOW}是否更新 SSH 端口规则？此操作不会影响其他已开放的端口。${RESET}"
   read -r -p "确认更新？(y/N): " confirm
   if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     print_info "取消同步"
     return 0
   fi
 
-  loading "正在重新生成 SSH 端口规则..."
-  generate_base_rules "$new_ports"
-  if safe_nft_load; then
-    print_info "SSH 端口规则已更新为: $new_ports"
-    log "SSH 端口规则同步: $new_ports"
-  else
-    print_error "规则加载失败，请检查 $NFT_RULE_FILE"
-    return 1
-  fi
+  loading "正在更新 SSH 端口规则..."
+
+  # 1. 删除所有旧的带注释的 SSH 规则
+  remove_ssh_rules
+
+  # 2. 添加新的 SSH 端口规则（带注释）
+  for port in $new_ports; do
+    nft add rule inet filter input tcp dport "$port" accept comment "\"UFW_PANEL_SSH\"" 2>/dev/null || true
+    log "添加 SSH 规则: $port/tcp (同步)"
+  done
+
+  # 3. 可选：更新规则文件中的基础部分（保持文件与运行时一致）
+  # 这一步是为了保证下次重启或服务加载时，规则文件中的 SSH 端口也是最新的
+  # 但注意：规则文件只应包含基础规则（SSH + 80/443），不应包含动态添加的端口
+  # 因此，我们只更新规则文件中的 SSH 部分，而不覆盖整个文件（避免丢失动态端口）
+  # 更简单的方法：重新生成基础规则文件，但保持当前运行的动态规则不变
+  # 下面采用重新生成基础规则文件，但不执行 nft -f（因为当前运行时规则已包含动态端口，重新加载会清空）
+  # 为了规则文件的持久性，我们还是重新生成文件，但不会影响当前运行规则
+  local ssh_ports="$new_ports"
+  local ssh_accept_rules=""
+  for port in $ssh_ports; do
+    ssh_accept_rules+="    tcp dport $port accept comment \"UFW_PANEL_SSH\"\n"
+  done
+
+  # 备份旧规则文件，然后生成新文件（仅基础部分）
+  cp "$NFT_RULE_FILE" "${NFT_RULE_FILE}.bak" 2>/dev/null || true
+  cat > "$NFT_RULE_FILE" <<EOF
+table inet filter {
+  chain input {
+    type filter hook input priority 0; policy accept;
+
+    # 动态 SSH 端口（永不锁死）
+$(echo -e "$ssh_accept_rules")
+    # 基础安全
+    ct state established,related accept
+    iif lo accept
+  }
+
+  chain output {
+    type filter hook output priority 0; policy accept;
+  }
+
+  chain forward {
+    type filter hook forward priority 0; policy accept;
+  }
+}
+EOF
+
+  print_info "SSH 端口规则已更新为: $new_ports（运行时规则已生效，规则文件已同步）"
+  log "SSH 端口规则同步: $new_ports"
 }
 
 # =========================
@@ -262,6 +315,9 @@ EOF
 # =========================
 safe_nft_load() {
   if [[ -f "$NFT_RULE_FILE" ]]; then
+    # 先清空整个 filter 表（避免规则累积/重复）
+    nft flush table inet filter 2>/dev/null || true
+    # 再加载规则文件
     nft -f "$NFT_RULE_FILE" >/dev/null 2>&1 || {
       print_error "加载 nftables 规则失败，检查语法：$NFT_RULE_FILE"
       return 1
@@ -664,11 +720,12 @@ delete_nftables() {
 while true; do
   # 每次循环检查 SSH 端口一致性（仅警告）
   current_rules_ports="$(get_rules_ssh_ports)"
-  actual_ports="$(get_current_ssh_ports)"
-  if [[ "$current_rules_ports" != "$actual_ports" ]]; then
-    print_warn "检测到 SSH 端口不一致！规则中: $current_rules_ports, 实际监听: $actual_ports"
+actual_ports="$(get_current_ssh_ports)"
+display_rules="${current_rules_ports:-无}"
+if [[ "$current_rules_ports" != "$actual_ports" ]]; then
+    print_warn "检测到 SSH 端口不一致！规则中: $display_rules, 实际监听: $actual_ports"
     echo -e "   请使用主菜单选项 ${BLUE}12${RESET} 同步 SSH 端口规则"
-  fi
+fi
 
   RAW_STATUS="$(systemctl is-active "$(basename "$NFT_SERVICE")" 2>/dev/null || true)"
 
