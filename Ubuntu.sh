@@ -307,7 +307,7 @@ EOF
         7) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/ssl.sh) ;;
         8) web_service_menu ;;
         9) fail_menu ;;
-        10) install_argo ;;
+        10) select_argo_script ;;
         11) install_gost ;;
         99) catmi-xx ;;
         0) exit_program ;;
@@ -348,12 +348,38 @@ install_hysteria() {
     main_menu
 }
 
-install_argo() {
-    echo -e "${CYAN}开始安装 Argo...${PLAIN}"
-    bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/urlargo.sh) || { echo "Argo 安装失败"; return; }
-    read -p "安装完成，按回车返回主菜单..."
-    main_menu
+select_argo_script() {
+    echo "=============================="
+    echo "  Argo 脚本选择菜单"
+    echo "=============================="
+    echo "1) URL Argo 脚本"
+    echo "2) Token Panel 脚本"
+    echo "3) XCF2 脚本"
+    echo "0) 退出"
+    echo "=============================="
+    read -rp "请选择要运行的脚本: " choice
+
+    case "$choice" in
+        1)
+            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/urlargo.sh)
+            ;;
+        2)
+            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/token_panel.sh)
+            ;;
+        3)
+            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/xcf2.sh)
+            ;;
+        0)
+            echo "已退出"
+            return 0
+            ;;
+        *)
+            echo "无效选择，请重新输入"
+            select_argo_script
+            ;;
+    esac
 }
+
 
 install_gost() {
     echo -e "${CYAN}开始安装 Gost...${PLAIN}"
