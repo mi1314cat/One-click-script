@@ -354,7 +354,8 @@ select_argo_script() {
     echo "=============================="
     echo "1) URL Argo 脚本"
     echo "2) Token Panel 脚本"
-    echo "3) XCF2 脚本"
+    echo "3) argo加速 "
+    echo "4) argo看门狗"   
     echo "0) 退出"
     echo "=============================="
     read -rp "请选择要运行的脚本: " choice
@@ -369,6 +370,9 @@ select_argo_script() {
         3)
             bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/xcf2.sh)
             ;;
+        4)
+            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/argoxcfWatchdog.sh)
+            ;;
         0)
             echo "已退出"
             return 0
@@ -379,7 +383,6 @@ select_argo_script() {
             ;;
     esac
 }
-
 
 install_gost() {
     echo -e "${CYAN}开始安装 Gost...${PLAIN}"
