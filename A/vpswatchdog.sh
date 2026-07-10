@@ -9,7 +9,6 @@ SERVICE=/etc/systemd/system/super-watchdog.service
 TIMER=/etc/systemd/system/super-watchdog.timer
 
 echo "Installing Super Watchdog into $BASE ..."
-
 mkdir -p $BASE
 
 ##############################################
@@ -97,7 +96,6 @@ run_checks() {
     check_gateway || return 1
 
     check_dns || log "DNS failed (repair only)"
-
     check_conntrack || log "Conntrack abnormal (not fatal)"
 
     check_exit_broken && return 1
@@ -166,39 +164,82 @@ EOF
 chmod +x $SCRIPT
 
 ##############################################
-# 控制面板：super-watchdogctl
+# 控制面板：super-watchdogctl（面板版）
 ##############################################
 cat > $CTL << 'EOF'
 #!/bin/bash
 
 BASE=/root/catmi/super-watchdog
 STATE_FILE=$BASE/super-watchdog.state
-LOG=$BASE/super-watchdog.log
+LOG_FILE=$BASE/super-watchdog.log
+SERVICE=super-watchdog.timer
+
+load_state() {
+    source "$STATE_FILE" 2>/dev/null
+    FAIL=${FAIL:-0}
+    REBOOT_COUNT=${REBOOT_COUNT:-0}
+}
+
+is_running() {
+    systemctl is-active --quiet $SERVICE
+}
+
+get_next_run_time() {
+    NEXT=$(systemctl list-timers --all | grep super-watchdog | awk '{print $5" "$6}')
+    echo "${NEXT:-未知}"
+}
+
+get_network_status() {
+    ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1 && echo "正常" && return
+    echo "出口故障（Ping/TCP/HTTP 全失败）"
+}
+
+panel() {
+    load_state
+
+    echo "========================================="
+
+    if is_running; then
+        echo "状态：🟢 运行中"
+    else
+        echo "状态：🔴 未运行"
+    fi
+
+    echo "下次执行时间：$(get_next_run_time)"
+    echo "连续重启失败次数：$REBOOT_COUNT 次 (上限 3)"
+    echo "当前 FAIL：$FAIL"
+    echo "当前网络状态：$(get_network_status)"
+
+    echo "========================================="
+    echo "操作："
+    echo "  super-watchdogctl start     启动"
+    echo "  super-watchdogctl stop      停止"
+    echo "  super-watchdogctl restart   重启"
+    echo "  super-watchdogctl log       查看日志"
+    echo "========================================="
+}
 
 case "$1" in
     status)
-        echo "===== Watchdog Status ====="
-        systemctl is-active super-watchdog.timer
-        echo
-        cat "$STATE_FILE"
+        panel
         ;;
     start)
-        systemctl start super-watchdog.timer
-        echo "Watchdog started."
+        systemctl start $SERVICE
+        echo "Watchdog 已启动"
         ;;
     stop)
-        systemctl stop super-watchdog.timer
-        echo "Watchdog stopped."
+        systemctl stop $SERVICE
+        echo "Watchdog 已停止"
         ;;
     restart)
-        systemctl restart super-watchdog.timer
-        echo "Watchdog restarted."
+        systemctl restart $SERVICE
+        echo "Watchdog 已重启"
         ;;
     log)
-        tail -n 50 "$LOG"
+        tail -n 50 "$LOG_FILE"
         ;;
     *)
-        echo "Usage: super-watchdogctl {status|start|stop|restart|log}"
+        panel
         ;;
 esac
 EOF
