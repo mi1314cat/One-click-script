@@ -13,7 +13,7 @@ echo "Installing Super Watchdog into $BASE ..."
 mkdir -p $BASE
 
 ##############################################
-# 主程序：super-watchdog.sh
+# 主程序：super-watchdog.sh（出口真实检测，网关失败不致命）
 ##############################################
 cat > $SCRIPT << 'EOF'
 #!/bin/bash
@@ -33,33 +33,6 @@ log() {
     echo "$(date '+%F %T') - $1" >> $LOG
 }
 
-get_main_iface() {
-    ip route | awk '/default/ {print $5}'
-}
-
-check_nic() {
-    IFACE=$(get_main_iface)
-    [ -z "$IFACE" ] && return 1
-    ip link show "$IFACE" | grep -q "state UP"
-}
-
-check_ip() {
-    ip -4 addr show "$(get_main_iface)" | grep -q "inet "
-}
-
-check_route() {
-    ip route show default >/dev/null 2>&1
-}
-
-check_gateway() {
-    GW=$(ip route | awk '/default/ {print $3}')
-    ping -c 2 -W 1 "$GW" >/dev/null 2>&1
-}
-
-check_dns() {
-    getent hosts cloudflare.com >/dev/null 2>&1 || resolvectl query cloudflare.com >/dev/null 2>&1
-}
-
 check_ping_multi() {
     for ip in 1.1.1.1 8.8.8.8 9.9.9.9; do
         ping -c 2 -W 1 "$ip" >/dev/null 2>&1 && return 0
@@ -77,32 +50,18 @@ check_http204() {
     return 1
 }
 
-check_conntrack() {
-    command -v conntrack >/dev/null 2>&1 || return 0
-    CT=$(conntrack -C 2>/dev/null)
-    [ "$CT" -lt 500000 ]
-}
-
-check_exit_broken() {
-    ! check_ping_multi && ! check_tcp443 && ! check_http204
-}
-
 run_checks() {
     log "Running full system health check..."
 
-    check_nic || return 1
-    check_ip || return 1
-    check_route || return 1
-    check_gateway || return 1
-
-    check_dns || log "DNS failed (repair only)"
-    check_conntrack || log "Conntrack abnormal (not fatal)"
-
-    check_exit_broken && return 1
+    # 出口完全断判定：ping + TCP 443 + HTTP 204 全部失败
+    check_ping_multi || return 1
+    check_tcp443 || return 1
+    check_http204 || return 1
 
     return 0
 }
 
+# 网络恢复
 if run_checks; then
     log "All checks passed → FAIL=0, REBOOT_COUNT=0"
     FAIL=0
@@ -112,33 +71,14 @@ if run_checks; then
     exit 0
 fi
 
+# 网络失败
 FAIL=$((FAIL+1))
 log "Health check failed → FAIL=$FAIL"
 
 echo "FAIL=$FAIL" > "$STATE_FILE"
 echo "REBOOT_COUNT=$REBOOT_COUNT" >> "$STATE_FILE"
 
-if [ "$FAIL" -eq 1 ]; then
-    log "FAIL=1 → Restarting DNS"
-    systemctl restart systemd-resolved 2>/dev/null
-    systemctl restart resolvconf 2>/dev/null
-fi
-
-if [ "$FAIL" -eq 2 ]; then
-    log "FAIL=2 → Restarting network services"
-    systemctl restart networking 2>/dev/null
-    systemctl restart systemd-networkd 2>/dev/null
-    systemctl restart NetworkManager 2>/dev/null
-fi
-
-if [ "$FAIL" -eq 3 ]; then
-    log "FAIL=3 → Waiting for next cycle"
-fi
-
-if [ "$FAIL" -eq 4 ]; then
-    log "FAIL=4 → Rechecking next cycle"
-fi
-
+# FAIL≥5 → 重启 VPS
 if [ "$FAIL" -ge 5 ]; then
     log "FAIL>=5 → reboot -f"
     sync
@@ -154,7 +94,6 @@ if [ "$FAIL" -ge 5 ]; then
 
     reboot -f
 fi
-
 EOF
 
 chmod +x $SCRIPT
@@ -188,7 +127,15 @@ get_next_run_time() {
 }
 
 get_network_status() {
-    ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1 && echo "正常" && return
+    for ip in 1.1.1.1 8.8.8.8 9.9.9.9; do
+        ping -c 1 -W 1 "$ip" >/dev/null 2>&1 && echo "正常" && return
+    done
+
+    timeout 2 bash -c "</dev/tcp/1.1.1.1/443" >/dev/null 2>&1 && echo "正常" && return
+
+    curl -m 3 -s -o /dev/null https://cp.cloudflare.com/generate_204 && echo "正常" && return
+    curl -m 3 -s -o /dev/null https://connectivitycheck.gstatic.com/generate_204 && echo "正常" && return
+
     echo "出口故障（Ping/TCP/HTTP 全失败）"
 }
 
@@ -205,13 +152,13 @@ change_interval() {
     read opt
 
     case "$opt" in
-        1)  SEC="1" ;;
-        2)  SEC="10" ;;
-        3)  SEC="30" ;;
-        4)  SEC="60" ;;
-        5)  SEC="300" ;;
-        0)  return ;;
-        *)  echo "无效选项"; sleep 1; return ;;
+        1) SEC="1" ;;
+        2) SEC="10" ;;
+        3) SEC="30" ;;
+        4) SEC="60" ;;
+        5) SEC="300" ;;
+        0) return ;;
+        *) echo "无效选项"; sleep 1; return ;;
     esac
 
     cat > $TIMER_FILE << EOF2
@@ -346,7 +293,7 @@ EOF
 chmod +x $CTL
 
 ##############################################
-# systemd service + timer
+# systemd service + timer（默认 1 分钟）
 ##############################################
 cat > $SERVICE << EOF
 [Unit]
@@ -370,7 +317,7 @@ WantedBy=timers.target
 EOF
 
 ##############################################
-# 默认日志轮转配置（保留 7 天）
+# 默认日志轮转（保留 7 天）
 ##############################################
 cat > $LOGROTATE << EOF
 /root/catmi/super-watchdog/super-watchdog.log {
