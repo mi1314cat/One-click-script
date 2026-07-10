@@ -7,6 +7,7 @@ STATE=$BASE/super-watchdog.state
 LOG=$BASE/super-watchdog.log
 SERVICE=/etc/systemd/system/super-watchdog.service
 TIMER=/etc/systemd/system/super-watchdog.timer
+LOGROTATE=/etc/logrotate.d/super-watchdog
 
 echo "Installing Super Watchdog into $BASE ..."
 mkdir -p $BASE
@@ -159,7 +160,7 @@ EOF
 chmod +x $SCRIPT
 
 ##############################################
-# 控制面板：单次刷新 + 操作后刷新 + 实时日志 + 退出选项
+# 控制面板：可修改检查间隔 + 日志保留天数 + 清空日志
 ##############################################
 cat > $CTL << 'EOF'
 #!/bin/bash
@@ -168,6 +169,8 @@ BASE=/root/catmi/super-watchdog
 STATE_FILE=$BASE/super-watchdog.state
 LOG_FILE=$BASE/super-watchdog.log
 SERVICE=super-watchdog.timer
+TIMER_FILE=/etc/systemd/system/super-watchdog.timer
+LOGROTATE=/etc/logrotate.d/super-watchdog
 
 load_state() {
     source "$STATE_FILE" 2>/dev/null
@@ -187,6 +190,83 @@ get_next_run_time() {
 get_network_status() {
     ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1 && echo "正常" && return
     echo "出口故障（Ping/TCP/HTTP 全失败）"
+}
+
+change_interval() {
+    clear
+    echo "选择新的检查间隔："
+    echo "1) 1 秒"
+    echo "2) 10 秒"
+    echo "3) 30 秒"
+    echo "4) 1 分钟"
+    echo "5) 5 分钟"
+    echo "0) 返回面板"
+    echo -n "请输入编号："
+    read opt
+
+    case "$opt" in
+        1)  SEC="1" ;;
+        2)  SEC="10" ;;
+        3)  SEC="30" ;;
+        4)  SEC="60" ;;
+        5)  SEC="300" ;;
+        0)  return ;;
+        *)  echo "无效选项"; sleep 1; return ;;
+    esac
+
+    cat > $TIMER_FILE << EOF2
+[Unit]
+Description=Run super watchdog every interval
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=$SEC
+
+[Install]
+WantedBy=timers.target
+EOF2
+
+    systemctl daemon-reload
+    systemctl restart super-watchdog.timer
+
+    echo "检查间隔已更新为：$SEC 秒"
+    sleep 1
+}
+
+change_log_days() {
+    clear
+    echo "选择日志保留天数："
+    echo "1) 1 天"
+    echo "2) 3 天"
+    echo "3) 7 天"
+    echo "4) 14 天"
+    echo "5) 30 天"
+    echo "0) 返回面板"
+    echo -n "请输入编号："
+    read opt
+
+    case "$opt" in
+        1) DAYS=1 ;;
+        2) DAYS=3 ;;
+        3) DAYS=7 ;;
+        4) DAYS=14 ;;
+        5) DAYS=30 ;;
+        0) return ;;
+        *) echo "无效选项"; sleep 1; return ;;
+    esac
+
+    cat > $LOGROTATE << EOF3
+/root/catmi/super-watchdog/super-watchdog.log {
+    daily
+    rotate $DAYS
+    compress
+    missingok
+    notifempty
+}
+EOF3
+
+    echo "日志保留天数已更新为：$DAYS 天"
+    sleep 1
 }
 
 draw_panel() {
@@ -216,6 +296,9 @@ draw_panel() {
     echo "  2. 停止 watchdog"
     echo "  3. 重启 watchdog"
     echo "  4. 查看完整日志"
+    echo "  5. 修改检查间隔"
+    echo "  6. 修改日志保留天数"
+    echo "  7. 清空日志"
     echo "  0. 退出面板"
     echo "========================================="
 }
@@ -227,21 +310,22 @@ panel_loop() {
         read key
 
         case "$key" in
-            1)
-                systemctl start $SERVICE
-                ;;
-            2)
-                systemctl stop $SERVICE
-                ;;
-            3)
-                systemctl restart $SERVICE
-                ;;
+            1) systemctl start $SERVICE ;;
+            2) systemctl stop $SERVICE ;;
+            3) systemctl restart $SERVICE ;;
             4)
                 clear
                 tail -n 200 "$LOG_FILE"
                 echo ""
                 echo "按任意键返回面板..."
                 read -n 1
+                ;;
+            5) change_interval ;;
+            6) change_log_days ;;
+            7)
+                echo "" > "$LOG_FILE"
+                echo "日志已清空"
+                sleep 1
                 ;;
             0)
                 clear
@@ -283,6 +367,19 @@ OnUnitActiveSec=60
 
 [Install]
 WantedBy=timers.target
+EOF
+
+##############################################
+# 默认日志轮转配置（保留 7 天）
+##############################################
+cat > $LOGROTATE << EOF
+/root/catmi/super-watchdog/super-watchdog.log {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+}
 EOF
 
 systemctl daemon-reload
