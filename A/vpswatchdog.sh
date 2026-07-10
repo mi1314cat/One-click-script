@@ -159,7 +159,7 @@ EOF
 chmod +x $SCRIPT
 
 ##############################################
-# 控制面板：super-watchdogctl（完整面板）
+# 控制面板：单次刷新 + 操作后刷新 + 实时日志 + 退出选项
 ##############################################
 cat > $CTL << 'EOF'
 #!/bin/bash
@@ -189,11 +189,11 @@ get_network_status() {
     echo "出口故障（Ping/TCP/HTTP 全失败）"
 }
 
-panel() {
+draw_panel() {
+    clear
     load_state
 
     echo "========================================="
-
     if is_running; then
         echo "状态：🟢 运行中"
     else
@@ -204,39 +204,59 @@ panel() {
     echo "连续重启失败次数：$REBOOT_COUNT 次 (上限 3)"
     echo "当前 FAIL：$FAIL"
     echo "当前网络状态：$(get_network_status)"
-
     echo "========================================="
+
+    echo "实时日志（最近 10 行）："
+    echo "-----------------------------------------"
+    tail -n 10 "$LOG_FILE"
+    echo "-----------------------------------------"
+
     echo "操作："
-    echo "  super-watchdogctl start     启动"
-    echo "  super-watchdogctl stop      停止"
-    echo "  super-watchdogctl restart   重启"
-    echo "  super-watchdogctl log       查看日志"
+    echo "  1. 启动 watchdog"
+    echo "  2. 停止 watchdog"
+    echo "  3. 重启 watchdog"
+    echo "  4. 查看完整日志"
+    echo "  0. 退出面板"
     echo "========================================="
 }
 
-case "$1" in
-    status)
-        panel
-        ;;
-    start)
-        systemctl start $SERVICE
-        echo "Watchdog 已启动"
-        ;;
-    stop)
-        systemctl stop $SERVICE
-        echo "Watchdog 已停止"
-        ;;
-    restart)
-        systemctl restart $SERVICE
-        echo "Watchdog 已重启"
-        ;;
-    log)
-        tail -n 50 "$LOG_FILE"
-        ;;
-    *)
-        panel
-        ;;
-esac
+panel_loop() {
+    while true; do
+        draw_panel
+        echo -n "请输入操作编号："
+        read key
+
+        case "$key" in
+            1)
+                systemctl start $SERVICE
+                ;;
+            2)
+                systemctl stop $SERVICE
+                ;;
+            3)
+                systemctl restart $SERVICE
+                ;;
+            4)
+                clear
+                tail -n 200 "$LOG_FILE"
+                echo ""
+                echo "按任意键返回面板..."
+                read -n 1
+                ;;
+            0)
+                clear
+                echo "退出面板"
+                exit 0
+                ;;
+            *)
+                echo "无效选项"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+panel_loop
 EOF
 
 chmod +x $CTL
@@ -269,5 +289,7 @@ systemctl daemon-reload
 systemctl enable --now super-watchdog.timer
 
 echo "Installation complete."
-echo "Use: $CTL status"
-echo "Use: $CTL log"
+echo "Launching panel..."
+sleep 1
+
+bash $CTL
