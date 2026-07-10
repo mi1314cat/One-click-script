@@ -21,7 +21,6 @@ BASE=/root/catmi/super-watchdog
 LOG=$BASE/super-watchdog.log
 STATE_FILE=$BASE/super-watchdog.state
 
-# 初始化状态文件
 if [ ! -f "$STATE_FILE" ]; then
     echo "FAIL=0" > "$STATE_FILE"
     echo "REBOOT_COUNT=0" >> "$STATE_FILE"
@@ -103,7 +102,6 @@ run_checks() {
     return 0
 }
 
-# 网络恢复 → 清零所有计数
 if run_checks; then
     log "All checks passed → FAIL=0, REBOOT_COUNT=0"
     FAIL=0
@@ -113,14 +111,12 @@ if run_checks; then
     exit 0
 fi
 
-# 网络失败
 FAIL=$((FAIL+1))
 log "Health check failed → FAIL=$FAIL"
 
 echo "FAIL=$FAIL" > "$STATE_FILE"
 echo "REBOOT_COUNT=$REBOOT_COUNT" >> "$STATE_FILE"
 
-# 修复流程
 if [ "$FAIL" -eq 1 ]; then
     log "FAIL=1 → Restarting DNS"
     systemctl restart systemd-resolved 2>/dev/null
@@ -149,7 +145,6 @@ if [ "$FAIL" -ge 5 ]; then
     echo "FAIL=0" > "$STATE_FILE"
     echo "REBOOT_COUNT=$REBOOT_COUNT" >> "$STATE_FILE"
 
-    # 连续 3 次重启仍失败 → 停止 watchdog
     if [ "$REBOOT_COUNT" -ge 3 ]; then
         log "REBOOT_COUNT >= 3 → watchdog disabled"
         systemctl stop super-watchdog.timer
@@ -164,7 +159,7 @@ EOF
 chmod +x $SCRIPT
 
 ##############################################
-# 控制面板：super-watchdogctl（面板版）
+# 控制面板：super-watchdogctl（完整面板）
 ##############################################
 cat > $CTL << 'EOF'
 #!/bin/bash
