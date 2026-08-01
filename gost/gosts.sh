@@ -339,34 +339,74 @@ delete_all() {
     print_ok "已删除所有服务端隧道"
 }
 
+# ==================== 查看客户端配置（无交互，直接输出链接） ====================
+show_client_config() {
+    list_tunnels
+    printf "请输入要查看客户端配置的隧道编号: " >&2
+    read -r num
+    num=$(clean_input "$num")
+    id2=$(printf "%02d" "$num")
+    conf="$CONF_DIR/server-$id2.env"
+    if [ ! -f "$conf" ]; then
+        print_error "配置不存在: $conf"
+        return
+    fi
+    source "$conf"
+
+    local domain="${DOMAIN:-yourdomain.com}"
+    local remote_port="${REMOTE_PORT:-443}"
+    local protocol="wss"
+    if [ "${PROTOCOL:-}" = "ws" ]; then
+        protocol="ws"
+    fi
+
+    # 生成完整链接
+    local link="${protocol}://${domain}:${remote_port}?path=${WS_PATH}&auth=${AUTH_USER}:${AUTH_PASS}&host=${domain}"
+
+    echo -e "\n${BOLD}========== 客户端配置 (隧道 #$num) ==========${RESET}" >&2
+    echo -e "服务端地址: ${CYAN}${protocol}://${domain}:${remote_port}${WS_PATH}${RESET}" >&2
+    echo -e "认证用户名: ${GREEN}${AUTH_USER}${RESET}" >&2
+    echo -e "认证密码:   ${GREEN}${AUTH_PASS}${RESET}" >&2
+    echo ""
+    echo -e "${BOLD}▶ 格式示例 (请替换 your.domain 和端口):${RESET}" >&2
+    echo -e "  relay+wss://your.domain:443?path=/xxx&auth=user:pass&host=your.domain" >&2
+    echo ""
+    echo -e "${BOLD}▶ 您的实际链接 (可直接复制，注意替换域名和端口):${RESET}" >&2
+    echo -e "  ${GREEN}relay+${link}${RESET}" >&2
+    echo ""
+    echo -e "${YELLOW}提示：您也可以编辑 ${conf} 中的 DOMAIN 和 REMOTE_PORT 永久修改默认值。${RESET}" >&2
+}
+
 menu() {
     while true; do
         print_title "XGost 服务端隧道面板 (v3 + 认证)"
-        echo "1) 查看隧道列表 (含认证信息)" >&2
-        echo "2) 新增隧道 (自动启用认证)" >&2
-        echo "3) 查看隧道运行状态" >&2
-        echo "4) 查看某个隧道日志" >&2
-        echo "5) 停止某个隧道" >&2
-        echo "6) 启动某个隧道" >&2
-        echo "7) 重启某个隧道" >&2
-        echo "8) 删除某个隧道" >&2
-        echo "9) 删除所有隧道" >&2
-        echo "0) 退出" >&2
+        echo " 1) 查看隧道列表 (含认证信息)" >&2
+        echo " 2) 新增隧道 (自动启用认证)" >&2
+        echo " 3) 查看隧道运行状态" >&2
+        echo " 4) 查看某个隧道日志" >&2
+        echo " 5) 停止某个隧道" >&2
+        echo " 6) 启动某个隧道" >&2
+        echo " 7) 重启某个隧道" >&2
+        echo " 8) 删除某个隧道" >&2
+        echo " 9) 删除所有隧道" >&2
+        echo "10) 查看客户端配置 (生成连接命令)" >&2
+        echo " 0) 退出" >&2
         printf "请选择: " >&2
-        read c
+        read -r c
         c=$(clean_input "$c")
         case "$c" in
-            1) list_tunnels; printf "按回车继续..." >&2; read ;;
-            2) add_tunnel;   printf "按回车继续..." >&2; read ;;
-            3) status_tunnels; printf "按回车继续..." >&2; read ;;
-            4) view_logs;    printf "按回车继续..." >&2; read ;;
-            5) stop_tunnel;  printf "按回车继续..." >&2; read ;;
-            6) start_tunnel; printf "按回车继续..." >&2; read ;;
-            7) restart_tunnel; printf "按回车继续..." >&2; read ;;
-            8) delete_tunnel; printf "按回车继续..." >&2; read ;;
-            9) delete_all;   printf "按回车继续..." >&2; read ;;
+            1) list_tunnels; printf "\n按回车继续..." >&2; read -r ;;
+            2) add_tunnel;   printf "\n按回车继续..." >&2; read -r ;;
+            3) status_tunnels; printf "\n按回车继续..." >&2; read -r ;;
+            4) view_logs;    printf "\n按回车继续..." >&2; read -r ;;
+            5) stop_tunnel;  printf "\n按回车继续..." >&2; read -r ;;
+            6) start_tunnel; printf "\n按回车继续..." >&2; read -r ;;
+            7) restart_tunnel; printf "\n按回车继续..." >&2; read -r ;;
+            8) delete_tunnel; printf "\n按回车继续..." >&2; read -r ;;
+            9) delete_all;   printf "\n按回车继续..." >&2; read -r ;;
+            10) show_client_config; printf "\n按回车继续..." >&2; read -r ;;
             0) exit 0 ;;
-            *) print_error "无效选项"; printf "按回车继续..." >&2; read ;;
+            *) print_error "无效选项"; printf "\n按回车继续..." >&2; read -r ;;
         esac
     done
 }
