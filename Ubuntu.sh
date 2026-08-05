@@ -11,10 +11,28 @@ CYAN="\033[96m"
 PLAIN="\033[0m"
 BOLD="\033[1m"
 
+# 带颜色提示
+print_info() {
+    echo -e "${GREEN}[Info]${PLAIN} $1"
+}
+print_error() {
+    echo -e "${RED}[Error]${PLAIN} $1"
+}
+
 line() { echo -e "${BLUE}──────────────────────────────────────────────────────────────${PLAIN}"; }
 
+# 子菜单统一风格
+menu_header() {
+    echo -e "${CYAN}┌──────────────────────────────────────────────────────────────┐${PLAIN}"
+    echo -e "  ${BOLD}${GREEN}$1${PLAIN}"
+    echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+}
+menu_footer() {
+    echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
+}
+
 # ===========================
-#   渐变标题（轻量不卡顿）
+#   渐变标题(轻量不卡顿)
 # ===========================
 gradient() {
     text="$1"
@@ -29,20 +47,26 @@ gradient() {
 }
 
 # ===========================
-#   加载动画（优化版 0.2 秒）
+#   加载动画(优化版)
 # ===========================
 loading() {
     bar=""
     for i in {1..20}; do
         bar="${bar}█"
         printf "\r\033[38;5;87m加载中 [%-20s]\033[0m" "$bar"
-        sleep 0.015   # 更快
+        sleep 0.015
     done
     printf "\r\033[K"
 }
 
 # ===========================
-#   系统信息（一次采集）
+#   面板 URL 与快捷方式路径
+# ===========================
+PANEL_URL="https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/Ubuntu.sh"
+SHORTCUT_PATH="/usr/local/bin/catmiup"
+
+# ===========================
+#   系统信息(一次采集)
 # ===========================
 HOSTNAME_SHOW=$(hostname)
 OS_VERSION=$(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"')
@@ -71,7 +95,7 @@ DISK_TOTAL=$(df -h / | awk 'NR==2 {print $2}')
 DISK_PERCENT=$(df -h / | awk 'NR==2 {print $5}')
 
 # ===========================
-#   服务检测（精准版）
+#   服务检测(精准版)
 # ===========================
 service_exists() {
     systemctl list-unit-files | grep -qw "$1.service"
@@ -102,7 +126,7 @@ svc_enabled() {
 }
 
 # ===========================
-#   UFW（特殊处理）
+#   UFW(特殊处理)
 # ===========================
 check_ufw() {
     if command -v ufw >/dev/null 2>&1; then
@@ -125,7 +149,7 @@ check_ufw() {
 }
 
 # ===========================
-#   nftables（精准）
+#   nftables(精准)
 # ===========================
 check_nft() {
     if command -v nft >/dev/null 2>&1; then
@@ -227,168 +251,171 @@ refresh_services() {
 }
 
 # ===========================
-#   主菜单（极速版）
+#   主菜单(极速版 + 循环)
 # ===========================
 main_menu() {
-    clear
-    echo -e "${GREEN}"
-    cat << "EOF"
+    while true; do
+        refresh_services
+        clear
+        echo -e "${GREEN}"
+        cat << "EOF"
                         |\__/,|   (\
                       _.|o o  |_   ) )
         -------------(((---(((-------------------
 EOF
-    echo -e "${PLAIN}"
+        echo -e "${PLAIN}"
 
-    gradient "                         Catmiup 面板 v3"
-    line
-    echo -e "${CYAN}┌────────────────────────── 系统信息 ─────────────────────────┐${PLAIN}"
-    echo -e "  主机名:        ${GREEN}${HOSTNAME_SHOW}${PLAIN}"
-    echo -e "  系统版本:      ${GREEN}${OS_VERSION}${PLAIN}"
-    echo -e "  Linux版本:     ${GREEN}${KERNEL_VERSION}${PLAIN}"
-    echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
-    echo -e "  CPU架构:       ${GREEN}${ARCH}${PLAIN}"
-    echo -e "  CPU型号:       ${GREEN}${CPU_MODEL}${PLAIN}"
-    echo -e "  CPU核心数:     ${GREEN}${CPU_CORES}${PLAIN}"
-    echo -e "  CPU频率:       ${GREEN}${CPU_FREQ}${PLAIN}"
-    echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
-    echo -e "  CPU占用:       ${GREEN}${CPU_USAGE}${PLAIN}"
-    echo -e "  系统负载:      ${GREEN}${LOAD_AVG}${PLAIN}"
-    echo -e "  TCP|UDP连接数: ${GREEN}${TCP_CONN}|${UDP_CONN}${PLAIN}"
-    echo -e "  物理内存:      ${GREEN}${MEM_USED}/${MEM_TOTAL} (${MEM_PERCENT})${PLAIN}"
-    echo -e "  虚拟内存:      ${GREEN}${SWAP_USED}/${SWAP_TOTAL}${PLAIN}"
-    echo -e "  硬盘占用:      ${GREEN}${DISK_USED}/${DISK_TOTAL} (${DISK_PERCENT})${PLAIN}"
-    echo -e "${CYAN}├────────────────────────── 服务状态 ─────────────────────────┤${PLAIN}"
+        gradient "                         Catmiup 面板 v3"
+        line
+        echo -e "${CYAN}┌────────────────────────── 系统信息 ─────────────────────────┐${PLAIN}"
+        echo -e "  主机名:        ${GREEN}${HOSTNAME_SHOW}${PLAIN}"
+        echo -e "  系统版本:      ${GREEN}${OS_VERSION}${PLAIN}"
+        echo -e "  Linux版本:     ${GREEN}${KERNEL_VERSION}${PLAIN}"
+        echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+        echo -e "  CPU架构:       ${GREEN}${ARCH}${PLAIN}"
+        echo -e "  CPU型号:       ${GREEN}${CPU_MODEL}${PLAIN}"
+        echo -e "  CPU核心数:     ${GREEN}${CPU_CORES}${PLAIN}"
+        echo -e "  CPU频率:       ${GREEN}${CPU_FREQ}${PLAIN}"
+        echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+        echo -e "  CPU占用:       ${GREEN}${CPU_USAGE}${PLAIN}"
+        echo -e "  系统负载:      ${GREEN}${LOAD_AVG}${PLAIN}"
+        echo -e "  TCP|UDP连接数: ${GREEN}${TCP_CONN}|${UDP_CONN}${PLAIN}"
+        echo -e "  物理内存:      ${GREEN}${MEM_USED}/${MEM_TOTAL} (${MEM_PERCENT})${PLAIN}"
+        echo -e "  虚拟内存:      ${GREEN}${SWAP_USED}/${SWAP_TOTAL}${PLAIN}"
+        echo -e "  硬盘占用:      ${GREEN}${DISK_USED}/${DISK_TOTAL} (${DISK_PERCENT})${PLAIN}"
+        echo -e "${CYAN}├────────────────────────── 服务状态 ─────────────────────────┤${PLAIN}"
 
-    echo -e "  Docker:         ${docker_installed} | 状态: ${docker_running}"
-    echo -e "  Nginx:          ${nginx_installed}  | 状态: ${nginx_running}"
-    echo -e "  Caddy:          ${caddy_installed}  | 状态: ${caddy_running}"
-    echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+        echo -e "  Docker:         ${docker_installed} | 状态: ${docker_running}"
+        echo -e "  Nginx:          ${nginx_installed}  | 状态: ${nginx_running}"
+        echo -e "  Caddy:          ${caddy_installed}  | 状态: ${caddy_running}"
+        echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
 
-    echo -e "  UFW:            ${ufw_installed} | 状态: ${ufw_running} | 启动: ${ufw_enabled}"
-    echo -e "  nftables:       ${nft_installed} | 状态: ${nft_running} | 启动: ${nft_enabled}"
-    echo -e "  Fail2ban:       ${fail2ban_installed} | 状态: ${fail2ban_running}"
-    echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+        echo -e "  UFW:            ${ufw_installed} | 状态: ${ufw_running} | 启动: ${ufw_enabled}"
+        echo -e "  nftables:       ${nft_installed} | 状态: ${nft_running} | 启动: ${nft_enabled}"
+        echo -e "  Fail2ban:       ${fail2ban_installed} | 状态: ${fail2ban_running}"
+        echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
 
-    echo -e "  Xray:           ${xray_installed} | 状态: ${xray_running} | 启动: ${xray_enabled}"
-    echo -e "  Mihomo:         ${mihomo_installed} | 状态: ${mihomo_running} | 启动: ${mihomo_enabled}"
-    echo -e "  Sing-box:       ${sing_box_installed} | 状态: ${sing_box_running} | 启动: ${sing_box_enabled}"
-    echo -e "  Hysteria2:      ${hysteria_server_installed} | 状态: ${hysteria_server_running} | 启动: ${hysteria_server_enabled}"
-    echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
+        echo -e "  Xray:           ${xray_installed} | 状态: ${xray_running} | 启动: ${xray_enabled}"
+        echo -e "  Mihomo:         ${mihomo_installed} | 状态: ${mihomo_running} | 启动: ${mihomo_enabled}"
+        echo -e "  Sing-box:       ${sing_box_installed} | 状态: ${sing_box_running} | 启动: ${sing_box_enabled}"
+        echo -e "  Hysteria2:      ${hysteria_server_installed} | 状态: ${hysteria_server_running} | 启动: ${hysteria_server_enabled}"
+        echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
 
-    # 菜单主体（Box-drawing 风格）
-    echo -e "${CYAN}┌────────────────────────── 功能菜单 ─────────────────────────┐${PLAIN}"
-    echo -e "  ${YELLOW}00${PLAIN}) 安装基础依赖"
-    echo -e "  ${YELLOW}1 ${PLAIN}) 安装 Kejilion 工具箱"
-    echo -e "  ${YELLOW}2 ${PLAIN}) 安装 Hysteria2"
-    echo -e "  ${YELLOW}3 ${PLAIN}) 安装 warp"
-    echo -e "  ${YELLOW}4 ${PLAIN}) 安装 Sing-box"
-    echo -e "  ${YELLOW}5 ${PLAIN}) 安装 xray"
-    echo -e "  ${YELLOW}6 ${PLAIN}) 安装 mihomo"
-    echo -e "  ${YELLOW}7 ${PLAIN}) 申请 SSL 证书"
-    echo -e "  ${YELLOW}8 ${PLAIN}) Web 服务"
-    echo -e "  ${YELLOW}9 ${PLAIN}) 防火墙"
-    echo -e "  ${YELLOW}10${PLAIN}) 安装 Argo"
-    echo -e "  ${YELLOW}11${PLAIN}) 安装 Gost"
-    echo -e "  ${YELLOW}99${PLAIN}) 节点信息"
-    echo -e "  ${YELLOW}0 ${PLAIN}) 退出面板"
-    echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
-    echo
-    echo -ne "${GREEN}请选择操作: ${PLAIN}"
-    read choice
+        echo -e "${CYAN}┌────────────────────────── 功能菜单 ─────────────────────────┐${PLAIN}"
+        echo -e "  ${YELLOW}00${PLAIN}) 安装基础依赖"
+        echo -e "  ${YELLOW}1 ${PLAIN}) 安装 Kejilion 工具箱"
+        echo -e "  ${YELLOW}2 ${PLAIN}) 安装 Hysteria2"
+        echo -e "  ${YELLOW}3 ${PLAIN}) 安装 warp"
+        echo -e "  ${YELLOW}4 ${PLAIN}) 安装 Sing-box"
+        echo -e "  ${YELLOW}5 ${PLAIN}) 安装 xray"
+        echo -e "  ${YELLOW}6 ${PLAIN}) 安装 mihomo"
+        echo -e "  ${YELLOW}7 ${PLAIN}) 申请 SSL 证书"
+        echo -e "  ${YELLOW}8 ${PLAIN}) Web 服务"
+        echo -e "  ${YELLOW}9 ${PLAIN}) 防火墙"
+        echo -e "  ${YELLOW}10${PLAIN}) 安装 Argo"
+        echo -e "  ${YELLOW}11${PLAIN}) 安装 Gost"
+        echo -e "  ${YELLOW}12${PLAIN}) VPS 实用工具"
+        echo -e "  ${YELLOW}88${PLAIN}) 更新面板"
+        echo -e "  ${YELLOW}99${PLAIN}) 节点信息"
+        echo -e "  ${YELLOW}0 ${PLAIN}) 退出面板"
+        echo -e "${CYAN}└──────────────────────────────────────────────────────────────┘${PLAIN}"
+        echo
+        echo -ne "${GREEN}请选择操作: ${PLAIN}"
+        read choice
 
-    case $choice in
-        00) initialize_dependencies ;;
-        1) install_toolbox ;;
-        2) install_hysteria ;;
-        3) install_warp ;;
-        4) install_singbox ;;
-        5) install_xray ;;
-        6) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/ts.sh) ;;
-        7) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/ssl.sh) ;;
-        8) web_service_menu ;;
-        9) fail_menu ;;
-        10) select_argo_script ;;
-        11) install_gost ;;
-        99) catmi-xx ;;
-        0) exit_program ;;
-        *)
-            echo -e "${RED}无效选项，请重新选择。${PLAIN}"
-            read -p "按回车返回主菜单..."
-            main_menu
-            ;;
-    esac
+        case $choice in
+            00) initialize_dependencies ;;
+            1) install_toolbox ;;
+            2) install_hysteria ;;
+            3) install_warp ;;
+            4) install_singbox ;;
+            5) install_xray ;;
+            6) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/ts.sh) ;;
+            7) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/ssl.sh) ;;
+            8) web_service_menu ;;
+            9) fail_menu ;;
+            10) select_argo_script ;;
+            11) install_gost ;;
+            12) vps_tools_menu ;;
+            88) update_panel ;;
+            99) catmi-xx ;;
+            0) exit_program ;;
+            *)
+                print_error "无效选项,请重新选择。"
+                sleep 1
+                ;;
+        esac
+    done
 }
 
 # 基础依赖检查和安装
 initialize_dependencies() {
-    echo -e "${CYAN}检查并安装基础依赖...${PLAIN}"
+    print_info "检查并安装基础依赖..."
     apt update
     apt upgrade -y
     apt install ufw -y
     apt install uuid-runtime -y
     apt install -y curl socat git cron openssl gzip nano sudo wget xxd
-    echo -e "${GREEN}基础依赖安装完成。${PLAIN}"
-    read -p "安装完成，按回车返回主菜单..."
-    main_menu
+    print_info "基础依赖安装完成。"
+    read -p "安装完成,按回车返回主菜单..."
 }
 
 # 安装工具函数
 install_toolbox() {
-    echo -e "${CYAN}开始安装 Kejilion 工具箱...${PLAIN}"
-    curl -sS -O https://raw.githubusercontent.com/kejilion/sh/main/kejilion.sh || { echo "工具箱下载失败"; return; }
-    chmod +x kejilion.sh && ./kejilion.sh
-    read -p "安装完成，按回车返回主菜单..."
-    main_menu
+    print_info "开始安装 Kejilion 工具箱..."
+    if curl -sS -O https://raw.githubusercontent.com/kejilion/sh/main/kejilion.sh; then
+        chmod +x kejilion.sh && ./kejilion.sh
+    else
+        print_error "工具箱下载失败"
+        return
+    fi
+    read -p "安装完成,按回车返回主菜单..."
 }
 
 install_hysteria() {
-    echo -e "${CYAN}开始安装 Hysteria2...${PLAIN}"
-    bash <(curl -fsSL https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/main/hy2-panel.sh) || { echo "Hysteria2 安装失败"; return; }
-    read -p "安装完成，按回车返回主菜单..."
-    main_menu
+    print_info "开始安装 Hysteria2..."
+    if ! bash <(curl -fsSL https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/main/hy2-panel.sh); then
+        print_error "Hysteria2 安装失败"
+        return
+    fi
+    read -p "安装完成,按回车返回主菜单..."
 }
 
+# ===========================
+#   Argo 脚本选择(循环版,0 返回主菜单)
+# ===========================
 select_argo_script() {
-    echo "=============================="
-    echo "  Argo 脚本选择菜单"
-    echo "=============================="
-    echo "1) URL Argo 脚本"
-    echo "2) Token Panel 脚本"
-    echo "3) argo加速 "
-    echo "4) argo看门狗"   
-    echo "0) 退出"
-    echo "=============================="
-    read -rp "请选择要运行的脚本: " choice
+    while true; do
+        clear
+        menu_header "Argo 脚本选择"
+        echo -e "  ${YELLOW}1${PLAIN}) URL Argo 脚本"
+        echo -e "  ${YELLOW}2${PLAIN}) Token Panel 脚本"
+        echo -e "  ${YELLOW}3${PLAIN}) argo 加速"
+        echo -e "  ${YELLOW}4${PLAIN}) argo 看门狗"
+        echo -e "  ${YELLOW}0${PLAIN}) 返回主菜单"
+        menu_footer
+        echo
+        read -rp "请选择要运行的脚本: " choice
 
-    case "$choice" in
-        1)
-            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/urlargo.sh)
-            ;;
-        2)
-            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/token_panel.sh)
-            ;;
-        3)
-            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/xcf2.sh)
-            ;;
-        4)
-            bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/argoxcfWatchdog.sh)
-            ;;
-        0)
-            echo "已退出"
-            return 0
-            ;;
-        *)
-            echo "无效选择，请重新输入"
-            select_argo_script
-            ;;
-    esac
+        case "$choice" in
+            1) bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/urlargo.sh) ;;
+            2) bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/token_panel.sh) ;;
+            3) bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/xcf2.sh) ;;
+            4) bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/argo/argoxcfWatchdog.sh) ;;
+            0) return ;;
+            *) print_error "无效选择,请重新输入"; sleep 1 ;;
+        esac
+        read -p "操作完成,按回车继续..."
+    done
 }
 
 install_gost() {
-    echo -e "${CYAN}开始安装 Gost...${PLAIN}"
-    bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/gost/Xgost_panel.sh) || { echo "Gost 安装失败"; return; }
-    read -p "安装完成，按回车返回主菜单..."
-    main_menu
+    print_info "开始安装 Gost..."
+    if ! bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/gost/Xgost_panel.sh); then
+        print_error "Gost 安装失败"
+        return
+    fi
+    read -p "安装完成,按回车返回主菜单..."
 }
 
 get_web_status() {
@@ -406,155 +433,175 @@ get_web_status() {
     fi
 }
 
+# ===========================
+#   Web 服务面板(循环版)
+# ===========================
 web_service_menu() {
-    clear
-    get_web_status
-    echo "====== Web 服务面板 ======"
-    echo -e "Nginx 状态：$nginx_status_text"
-    echo -e "Caddy 状态：$caddy_status_text"
-    echo "--------------------------"
-    echo "1) 重启 Nginx"
-    echo "2) 重启 Caddy"
-    echo "3) Reload Nginx"
-    echo "4) Reload Caddy"
-    echo "5) 卸载 Web 服务"
-    echo "0) 返回主菜单"
-    echo "=========================="
-    read -p "请选择: " choice
+    while true; do
+        clear
+        get_web_status
+        menu_header "Web 服务面板"
+        echo -e "  Nginx 状态:  $nginx_status_text"
+        echo -e "  Caddy 状态:  $caddy_status_text"
+        echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+        echo -e "  ${YELLOW}1${PLAIN}) 重启 Nginx"
+        echo -e "  ${YELLOW}2${PLAIN}) 重启 Caddy"
+        echo -e "  ${YELLOW}3${PLAIN}) Reload Nginx"
+        echo -e "  ${YELLOW}4${PLAIN}) Reload Caddy"
+        echo -e "  ${YELLOW}5${PLAIN}) 卸载 Web 服务"
+        echo -e "  ${YELLOW}0${PLAIN}) 返回主菜单"
+        menu_footer
+        echo
+        read -p "请选择: " choice
 
-    case "$choice" in
-        1) restart_nginx ;;
-        2) restart_caddy ;;
-        3) reload_nginx ;;
-        4) reload_caddy ;;
-        5) uninstall_menu ;;
-        0) main_menu ;;
-        *) echo "无效选择"; sleep 1; web_service_menu ;;
-    esac
+        case "$choice" in
+            1) restart_nginx ;;
+            2) restart_caddy ;;
+            3) reload_nginx ;;
+            4) reload_caddy ;;
+            5) uninstall_menu ;;
+            0) return ;;
+            *) print_error "无效选择"; sleep 1 ;;
+        esac
+    done
 }
 
 restart_nginx() {
     systemctl restart nginx
-    echo -e "${GREEN}Nginx 已重启${PLAIN}"
+    print_info "Nginx 已重启"
     sleep 1
-    web_service_menu
 }
 
 restart_caddy() {
     systemctl restart caddy
-    echo -e "${GREEN}Caddy 已重启${PLAIN}"
+    print_info "Caddy 已重启"
     sleep 1
-    web_service_menu
 }
 
 reload_nginx() {
     systemctl reload nginx
-    echo -e "${GREEN}Nginx 配置已重新加载${PLAIN}"
+    print_info "Nginx 配置已重新加载"
     sleep 1
-    web_service_menu
 }
 
 reload_caddy() {
     systemctl reload caddy
-    echo -e "${GREEN}Caddy 配置已重新加载${PLAIN}"
+    print_info "Caddy 配置已重新加载"
     sleep 1
-    web_service_menu
 }
 
+# ===========================
+#   卸载 Web 服务(循环版,0 返回上级)
+# ===========================
 uninstall_menu() {
-    clear
-    get_web_status
-    echo "====== 卸载 Web 服务 ======"
-    echo -e "Nginx 状态：$nginx_status_text"
-    echo -e "Caddy 状态：$caddy_status_text"
-    echo "---------------------------"
-    echo "1) 卸载 Nginx"
-    echo "2) 卸载 Caddy"
-    echo "0) 返回上级菜单"
-    echo "==========================="
-    read -p "请选择: " choice
+    while true; do
+        clear
+        get_web_status
+        menu_header "卸载 Web 服务"
+        echo -e "  Nginx 状态:  $nginx_status_text"
+        echo -e "  Caddy 状态:  $caddy_status_text"
+        echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+        echo -e "  ${YELLOW}1${PLAIN}) 卸载 Nginx"
+        echo -e "  ${YELLOW}2${PLAIN}) 卸载 Caddy"
+        echo -e "  ${YELLOW}0${PLAIN}) 返回上级菜单"
+        menu_footer
+        echo
+        read -p "请选择: " choice
 
-    case "$choice" in
-        1) u_nginx ;;
-        2) u_caddy ;;
-        0) web_service_menu ;;
-        *) echo "无效选择"; sleep 1; uninstall_menu ;;
-    esac
+        case "$choice" in
+            1) u_nginx ;;
+            2) u_caddy ;;
+            0) return ;;
+            *) print_error "无效选择"; sleep 1 ;;
+        esac
+    done
 }
 
 u_nginx() {
-    echo "=== 停止并卸载 Nginx ==="
+    print_info "停止并卸载 Nginx..."
     systemctl stop nginx 2>/dev/null
     systemctl disable nginx 2>/dev/null
     apt purge -y nginx nginx-common nginx-full
     apt autoremove -y
-    echo "Nginx 已卸载完成"
+    print_info "Nginx 已卸载完成"
     read -p "按回车返回..."
-    uninstall_menu
 }
 
 u_caddy() {
-    echo "=== 停止并卸载 Caddy ==="
+    print_info "停止并卸载 Caddy..."
     systemctl stop caddy 2>/dev/null
     systemctl disable caddy 2>/dev/null
     apt purge -y caddy
     apt autoremove -y
-    echo "=== 删除 Caddy 配置与数据目录 ==="
+    print_info "删除 Caddy 配置与数据目录..."
     rm -rf /etc/caddy
     rm -rf /var/lib/caddy
     rm -rf /var/www/html
-    echo "=== 删除 Caddy APT 仓库源 ==="
+    print_info "删除 Caddy APT 仓库源..."
     rm -f /etc/apt/sources.list.d/caddy-stable.list
     rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg
     apt update -y
-    echo "Caddy 已卸载完成"
+    print_info "Caddy 已卸载完成"
     read -p "按回车返回..."
-    uninstall_menu
 }
 
+# ===========================
+#   安装 Warp(循环版,0 返回主菜单)
+# ===========================
 install_warp() {
-    echo "开始安装 warp..."
-    echo "选择 Warp 安装源:"
-    echo "0) 返回主菜单"
-    echo "1) 官方 warp 脚本"
-    echo "2) warp-go"
-    echo "3) 勇哥 warp"
-    read -p "请输入选项 [0-3]: " wchoice
+    while true; do
+        clear
+        menu_header "安装 Warp"
+        echo -e "  ${YELLOW}0${PLAIN}) 返回主菜单"
+        echo -e "  ${YELLOW}1${PLAIN}) 官方 warp 脚本"
+        echo -e "  ${YELLOW}2${PLAIN}) warp-go"
+        echo -e "  ${YELLOW}3${PLAIN}) 勇哥 warp"
+        menu_footer
+        echo
+        read -p "请输入选项 [0-3]: " wchoice
 
-    case $wchoice in
-        0) main_menu; return ;;
-        1) wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh; sed -i "s#WIREGUARD_GO_ENABLE=0#WIREGUARD_GO_ENABLE=1#g" menu.sh; bash menu.sh ;;
-        2) wget -N https://gitlab.com/fscarmen/warp/-/raw/main/warp-go.sh && bash warp-go.sh ;;
-        3) bash <(wget -qO- https://raw.githubusercontent.com/yonggekkk/warp-yg/main/CFwarp.sh) ;;
-        *) echo "无效选项，返回主菜单"; main_menu; return ;;
-    esac
-
-    read -p "安装完成，按回车返回主菜单..."
-    main_menu
+        case $wchoice in
+            0) return ;;
+            1) wget -N https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh; sed -i "s#WIREGUARD_GO_ENABLE=0#WIREGUARD_GO_ENABLE=1#g" menu.sh; bash menu.sh ;;
+            2) wget -N https://gitlab.com/fscarmen/warp/-/raw/main/warp-go.sh && bash warp-go.sh ;;
+            3) bash <(wget -qO- https://raw.githubusercontent.com/yonggekkk/warp-yg/main/CFwarp.sh) ;;
+            *) print_error "无效选项,请重新输入"; sleep 1; continue ;;
+        esac
+        read -p "安装完成,按回车继续..."
+    done
 }
 
+# ===========================
+#   安装 Sing-box(循环版,0 返回主菜单)
+# ===========================
 install_singbox() {
-    echo "选择 Sing-box 安装源:"
-    echo "0) 返回主菜单"
-    echo "1) 使用 catmi 2"
-    echo "2) 使用 catmising-box 6"
-    echo "3) 使用 catmising-box 4"
-    echo "4) 使用 sb (fscarmen)"
-    read -p "请输入选项 [0-4]: " choice
+    while true; do
+        clear
+        menu_header "安装 Sing-box"
+        echo -e "  ${YELLOW}0${PLAIN}) 返回主菜单"
+        echo -e "  ${YELLOW}1${PLAIN}) 使用 catmi 2"
+        echo -e "  ${YELLOW}2${PLAIN}) 使用 catmising-box 6"
+        echo -e "  ${YELLOW}3${PLAIN}) 使用 catmising-box 4"
+        echo -e "  ${YELLOW}4${PLAIN}) 使用 sb (fscarmen)"
+        menu_footer
+        echo
+        read -p "请输入选项 [0-4]: " choice
 
-    case $choice in
-        0) main_menu; return ;;
-        1) bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/install.sh) ;;
-        2) bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/singbox.sh) ;;
-        3) bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/nsb.sh) ;;
-        4) bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh) ;;
-        *) echo "无效选项，返回主菜单"; main_menu; return ;;
-    esac
-
-    read -p "安装完成，按回车返回主菜单..."
-    main_menu
+        case $choice in
+            0) return ;;
+            1) bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/install.sh) ;;
+            2) bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/singbox.sh) ;;
+            3) bash <(curl -fsSL https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/nsb.sh) ;;
+            4) bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh) ;;
+            *) print_error "无效选项,请重新输入"; sleep 1; continue ;;
+        esac
+        read -p "安装完成,按回车继续..."
+    done
 }
 
+# ===========================
+#   Xray 管理(循环版,0 返回主菜单)
+# ===========================
 install_xray() {
     while true; do
         xrayls_server_status=$(systemctl is-active xrayls 2>/dev/null || echo "inactive")
@@ -564,46 +611,95 @@ install_xray() {
             xray_status_text="${RED}未运行${PLAIN}"
         fi
         clear
-        echo "====== Xray 管理 ======"
-        echo -e "服务状态: ${xray_status_text}"
-        echo "--------------------------------"
-        echo "0) 返回主菜单"
-        echo "1) 安装 / 重装 xray"
-        echo "2) 更新 xray-core"
-        echo "3) 重启 xray 服务"
-        echo "4) 查看日志"
-        echo "========================"
+        menu_header "Xray 管理"
+        echo -e "  服务状态: $xray_status_text"
+        echo -e "${CYAN}├──────────────────────────────────────────────────────────────┤${PLAIN}"
+        echo -e "  ${YELLOW}0${PLAIN}) 返回主菜单"
+        echo -e "  ${YELLOW}1${PLAIN}) 安装 / 重装 xray"
+        echo -e "  ${YELLOW}2${PLAIN}) 更新 xray-core"
+        echo -e "  ${YELLOW}3${PLAIN}) 重启 xray 服务"
+        echo -e "  ${YELLOW}4${PLAIN}) 查看日志"
+        menu_footer
+        echo
         read -p "请选择: " vchoice
 
         case $vchoice in
-            0) main_menu; return ;;
+            0) return ;;
             1) bash <(curl -fsSL https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xray-panel.sh) ;;
             2) bash <(curl -fsSL https://github.com/mi1314cat/xary-core/raw/refs/heads/main/unused/xray_install.sh); systemctl daemon-reload; systemctl enable xrayls; systemctl restart xrayls ;;
             3) systemctl restart xrayls; systemctl status xrayls --no-pager ;;
-            4) echo "1) access.log  2) error.log"; read log_choice; case $log_choice in 1) tail -f /root/catmi/xray/log/access.log;; 2) tail -f /root/catmi/xray/log/error.log;; *) echo "无效";; esac ;;
-            *) echo "无效选项" ;;
+            4) echo "1) access.log  2) error.log"; read log_choice; case $log_choice in 1) tail -f /root/catmi/xray/log/access.log;; 2) tail -f /root/catmi/xray/log/error.log;; *) print_error "无效";; esac ;;
+            *) print_error "无效选项"; sleep 1 ;;
         esac
-        read -p "操作完成，按回车继续..."
+        read -p "操作完成,按回车继续..."
     done
 }
 
+# ===========================
+#   防火墙 / 安全工具(循环版,0 返回主菜单)
+# ===========================
 fail_menu() {
-    echo "选择防火墙/安全工具:"
-    echo "0) 返回主菜单"
-    echo "1) 安装 UFW"
-    echo "2) 安装 nftables"
-    echo "3) 安装 Fail2ban"
-    read -p "请输入选项 [0-3]: " choice
+    while true; do
+        clear
+        menu_header "防火墙 / 安全工具"
+        echo -e "  ${YELLOW}0${PLAIN}) 返回主菜单"
+        echo -e "  ${YELLOW}1${PLAIN}) 安装 UFW"
+        echo -e "  ${YELLOW}2${PLAIN}) 安装 nftables"
+        echo -e "  ${YELLOW}3${PLAIN}) 安装 Fail2ban"
+        menu_footer
+        echo
+        read -p "请输入选项 [0-3]: " choice
 
-    case $choice in
-        0) main_menu; return ;;
-        1) bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/ufw.sh) ;;
-        2) bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/nftables.sh) ;;
-        3) bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/fail2ban.sh) ;;
-        *) echo "无效选项"; main_menu; return ;;
-    esac
-    read -p "安装完成，按回车返回主菜单..."
-    main_menu
+        case $choice in
+            0) return ;;
+            1) bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/ufw.sh) ;;
+            2) bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/nftables.sh) ;;
+            3) bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/fail2ban.sh) ;;
+            *) print_error "无效选项,请重新输入"; sleep 1; continue ;;
+        esac
+        read -p "安装完成,按回车继续..."
+    done
+}
+
+# ===========================
+#   VPS 实用工具(循环版,0 返回主菜单)
+# ===========================
+vps_tools_menu() {
+    while true; do
+        clear
+        menu_header "VPS 实用工具"
+        echo -e "  ${YELLOW}1${PLAIN}) 网络看门狗 (VPS Watchdog)"
+        echo -e "  ${YELLOW}0${PLAIN}) 返回主菜单"
+        menu_footer
+        echo
+        read -p "请选择: " choice
+
+        case "$choice" in
+            1)
+                print_info "开始运行网络看门狗脚本..."
+                bash <(curl -fsSL https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/vpswatchdog.sh)
+                ;;
+            0) return ;;
+            *) print_error "无效选项,请重新输入"; sleep 1 ;;
+        esac
+        read -p "操作完成,按回车继续..."
+    done
+}
+
+# ===========================
+#   更新面板(同步 GitHub 最新版到本地快捷方式)
+# ===========================
+update_panel() {
+    clear
+    print_info "正在下载面板最新版本..."
+    if curl -fsSL -o "$SHORTCUT_PATH" "$PANEL_URL" && chmod +x "$SHORTCUT_PATH"; then
+        print_info "面板更新成功,正在启动最新版本..."
+        sleep 1
+        exec bash "$SHORTCUT_PATH"
+    else
+        print_error "面板更新失败,请检查网络后重试"
+        read -p "按回车返回主菜单..."
+    fi
 }
 
 cat_out_files() {
@@ -616,7 +712,7 @@ cat_out_files() {
             echo "====== ${ext^^} 文件内容 ======"
             for file in "${files[@]}"; do
                 [ -f "$file" ] || continue
-                echo ">>> 文件：$(basename "$file")"
+                echo ">>> 文件:$(basename "$file")"
                 cat "$file"
                 echo
                 found=1
@@ -637,58 +733,56 @@ show_file() {
     echo
 }
 
+# ===========================
+#   节点信息(美化版)
+# ===========================
 catmi-xx() {
     clear
-    echo -e "${CYAN}========== 配置文件 ==========${PLAIN}\n"
+    menu_header "配置文件"
     for file in /root/catmi/hy2/config.yaml /root/catmi/mihomo/clash-meta.yaml /root/catmi/singbox/clash-meta.yaml; do
         show_file "$file"
     done
     echo "------ /root/catmi/xray/out ------"
     cat_out_files /root/catmi/xray/out
     echo
-    echo "*********************************"
-    echo -e "${CYAN}========== V2Ray 文件 ==========${PLAIN}\n"
+    menu_header "V2Ray 文件"
     for file in /root/catmi/singbox/v2ray.txt /root/catmi/mihomo/v2ray.txt /root/catmi/xray/v2ray.txt; do
         show_file "$file"
     done
-    echo "*********************************"
-    echo -e "${CYAN}========== xhttp.json ==========${PLAIN}\n"
+    echo
+    menu_header "xhttp.json"
     show_file /root/catmi/xray/xhttp.json
     echo
     read -p "按回车返回主菜单..."
-    main_menu
 }
 
 exit_program() {
-    echo -e "${CYAN}退出面板 Catmiup 面板！${PLAIN}"
+    echo -e "${CYAN}退出面板 Catmiup 面板!${PLAIN}"
     clear
     exit 0
 }
 
-# 快捷方式设置函数
+# ===========================
+#   快捷方式(已存在则跳过; 更新请用菜单 88)
+# ===========================
 create_shortcut() {
-    local shortcut_path="/usr/local/bin/catmiup"
-    
-
-    echo "创建快捷方式：${shortcut_path}"
-
-    
-    curl -fsSL -o "$shortcut_path" \
-        https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/Ubuntu.sh
-
-    chmod +x "$shortcut_path"
-
-    
-
-
-    echo -e "${GREEN}快捷方式创建成功！直接运行 'catmiup' 启动面板。${PLAIN}"
+    if [[ -x "$SHORTCUT_PATH" ]]; then
+        print_info "快捷方式已存在: $SHORTCUT_PATH"
+        return 0
+    fi
+    print_info "创建快捷方式: $SHORTCUT_PATH"
+    if curl -fsSL -o "$SHORTCUT_PATH" "$PANEL_URL" && chmod +x "$SHORTCUT_PATH"; then
+        print_info "快捷方式创建成功!直接运行 'catmiup' 启动面板。"
+    else
+        print_error "快捷方式创建失败,请检查网络。"
+    fi
 }
 
-
-# 主函数
+# ===========================
+#   主函数
+# ===========================
 main() {
     loading
-    refresh_services
     create_shortcut
     main_menu
 }
