@@ -126,6 +126,27 @@ svc_enabled() {
 }
 
 # ===========================
+#   Docker 容器状态检测
+# ===========================
+docker_container_state() {
+    # $1 = 容器名关键词(子串匹配)
+    local keyword="$1"
+    command -v docker >/dev/null 2>&1 || { echo "none"; return; }
+    local lines
+    lines=$(docker ps -a --format '{{.Names}}|{{.State}}' 2>/dev/null)
+    [[ -z "$lines" ]] && { echo "none"; return; }
+    local match
+    match=$(echo "$lines" | grep -i "$keyword")
+    if [[ -z "$match" ]]; then
+        echo "none"
+    elif echo "$match" | grep -qi "|running"; then
+        echo "running"
+    else
+        echo "stopped"
+    fi
+}
+
+# ===========================
 #   UFW(特殊处理)
 # ===========================
 check_ufw() {
@@ -149,13 +170,21 @@ check_ufw() {
 }
 
 # ===========================
-#   nftables(精准)
+#   nftables(精准 + 启动项更准确)
 # ===========================
 check_nft() {
     if command -v nft >/dev/null 2>&1; then
         nft_installed="${GREEN}已安装${PLAIN}"
-        nft_running=$(svc_running nftables)
-        nft_enabled=$(svc_enabled nftables)
+        if systemctl is-active --quiet nftables; then
+            nft_running="${GREEN}运行中${PLAIN}"
+        else
+            nft_running="${RED}未运行${PLAIN}"
+        fi
+        # enabled/static/indirect 都视为开机自启
+        case "$(systemctl is-enabled nftables 2>/dev/null)" in
+            enabled|static|indirect) nft_enabled="${GREEN}已启用${PLAIN}" ;;
+            *) nft_enabled="${YELLOW}未启用${PLAIN}" ;;
+        esac
     else
         nft_installed="${RED}未安装${PLAIN}"
         nft_running="${RED}未运行${PLAIN}"
@@ -223,6 +252,19 @@ refresh_services() {
     check_svc_fast fail2ban
     check_svc_fast sing-box
     check_svc_fast hysteria-server
+
+    # --- Docker 中的 Web 服务(systemd 未识别时补充检测) ---
+    nginx_docker_state=$(docker_container_state nginx)
+    case "$nginx_docker_state" in
+        running)  nginx_installed="${GREEN}已安装(Docker)${PLAIN}"; nginx_running="${GREEN}运行中${PLAIN}" ;;
+        stopped)  nginx_installed="${GREEN}已安装(Docker)${PLAIN}"; nginx_running="${RED}未运行${PLAIN}" ;;
+    esac
+
+    caddy_docker_state=$(docker_container_state caddy)
+    case "$caddy_docker_state" in
+        running)  caddy_installed="${GREEN}已安装(Docker)${PLAIN}"; caddy_running="${GREEN}运行中${PLAIN}" ;;
+        stopped)  caddy_installed="${GREEN}已安装(Docker)${PLAIN}"; caddy_running="${RED}未运行${PLAIN}" ;;
+    esac
 
     check_ufw
     check_nft
