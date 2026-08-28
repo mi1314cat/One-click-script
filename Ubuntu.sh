@@ -177,6 +177,8 @@ collect_system_info() {
     CPU_USAGE=$(awk -v a="$s1" -v b="$s2" 'BEGIN{split(a,x," ");split(b,y," ");dt=y[1]-x[1];di=y[2]-x[2];if(dt<=0)print "未知";else printf "%.1f%%", 100-di*100/dt}')
     LOAD_AVG=$(awk '{print $1", "$2", "$3}' /proc/loadavg 2>/dev/null)
     [[ -z "$LOAD_AVG" ]] && LOAD_AVG="未知"
+    LOAD_1M=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
+    [[ -z "$LOAD_1M" ]] && LOAD_1M="-"
 
     TCP_CONN=$(grep -c '^ *[0-9]' /proc/net/tcp 2>/dev/null)
     UDP_CONN=$(grep -c '^ *[0-9]' /proc/net/udp 2>/dev/null)
@@ -411,85 +413,98 @@ refresh_services() {
 }
 
 # ===========================
-#   主菜单绘制
+#   主菜单绘制(紧凑版)
 # ===========================
-info_row() {  # $1=标签 $2=内容
-    echo -e "  ${CYAN}$(pad_disp "$1" 10)${PLAIN}  ${GREEN}${2}${PLAIN}"
-}
-
-svc_line() {  # $1=名称 $2=安装状态 $3=运行状态 $4=自启状态(可空)
-    local n
-    n=$(pad_disp "$1" 11)
-    if [[ -n "${4:-}" ]]; then
-        echo -e "  ${CYAN}${n}${PLAIN} ${2} ${GRAY}·${PLAIN} ${3} ${GRAY}·${PLAIN} 自启 ${4}"
+info2() {  # 双列信息: $1=标签 $2=内容 $3=标签2(可空) $4=内容2
+    if [[ -n "${3:-}" ]]; then
+        local v1
+        v1=$(pad_disp "$2" 24)
+        echo -e "  ${CYAN}$(pad_disp "$1" 7)${PLAIN} ${GREEN}${v1}${PLAIN}  ${CYAN}${3}${PLAIN}  ${GREEN}${4}${PLAIN}"
     else
-        echo -e "  ${CYAN}${n}${PLAIN} ${2} ${GRAY}·${PLAIN} ${3}"
+        echo -e "  ${CYAN}$(pad_disp "$1" 7)${PLAIN} ${GREEN}${2}${PLAIN}"
     fi
 }
 
-menu_row() {  # 双列菜单: $1=编号1 $2=标题1 $3=编号2 $4=标题2
-    local c1 n1 n2
-    c1=$(pad_disp "$2" 24)
-    n1=$(printf '%-2s' "$1")
-    n2=$(printf '%-2s' "$3")
-    echo -e "  ${YELLOW}${n1}${PLAIN}) ${c1}  ${YELLOW}${n2}${PLAIN}) ${4}"
+# 服务状态条目(定宽, 便于左右两列对齐):
+#   已安装未运行 → 黄○  未安装 → 红○  运行中 → 绿●  开机自启 → 追加 绿✓
+# 输出存入全局 SVC_ENTRY, 总宽恒为 22 列
+svc_entry() {  # $1=名称 $2=安装状态 $3=运行状态 $4=自启状态(可空)
+    local n dot state mark
+    n=$(pad_disp "$1" 10)
+    if [[ "$2" == *未安装* ]]; then
+        dot="${RED}○";    state="${RED}未安装"
+    elif [[ "$3" == *运行中* ]]; then
+        dot="${GREEN}●";  state="${GREEN}运行中"
+    else
+        dot="${YELLOW}○"; state="${YELLOW}未运行"
+    fi
+    if [[ -n "${4:-}" && "$4" == *已启用* ]]; then
+        mark=" ${GREEN}✓${PLAIN}"
+    else
+        mark="  ${PLAIN}"
+    fi
+    SVC_ENTRY="${n} ${dot} ${state}${mark}"
+}
+
+svc_row() {  # 双列服务: $1-4 左列(名称/安装/运行/自启)  $5-8 右列
+    local e1 e2
+    svc_entry "$1" "$2" "$3" "${4:-}"; e1="$SVC_ENTRY"
+    svc_entry "$5" "$6" "$7" "${8:-}"; e2="$SVC_ENTRY"
+    echo -e "  ${e1}    ${e2}"
+}
+
+menu3() {  # 三列菜单: (编号, 标题, 分类色)×3 — 分类用彩色◆标记
+    local n1 n2 n3 t1 t2
+    n1=$(printf '%-2s' "$1"); n2=$(printf '%-2s' "$4"); n3=$(printf '%-2s' "$7")
+    t1=$(pad_disp "$2" 14);   t2=$(pad_disp "$5" 14)
+    echo -e "  ${YELLOW}${n1}${PLAIN} ${3}◆${PLAIN}${t1} ${YELLOW}${n2}${PLAIN} ${6}◆${PLAIN}${t2} ${YELLOW}${n3}${PLAIN} ${9}◆${PLAIN}${8}"
 }
 
 draw_main_menu() {
     clear
     echo -e "${GREEN}"
-    cat << "EOF"
+    cat << 'EOF'
                         |\__/,|   (\
-                      _.|o o  |_   ) )
+EOF
+    echo -e "${GREEN}                      _.|o o  |_   ) )${PLAIN}     $(gradient 'Catmiup 面板 v3')"
+    cat << 'EOF'
         -------------(((---(((-------------------
 EOF
     echo -e "${PLAIN}"
 
-    gradient "                         Catmiup 面板 v3"
-    line
-
     box_top "系统信息"
-    info_row "主机名"    "$HOSTNAME_SHOW"
-    info_row "系统版本"  "$OS_VERSION"
-    info_row "内核版本"  "$KERNEL_VERSION"
-    info_row "IPv4 地址" "$IPV4_SHOW"
-    info_row "IPv6 地址" "$IPV6_SHOW"
+    info2 "主机名" "$HOSTNAME_SHOW"
+    info2 "系统"   "$OS_VERSION"
+    info2 "内核"   "$KERNEL_VERSION"
+    info2 "IPv4"   "$IPV4_SHOW"
+    info2 "IPv6"   "$IPV6_SHOW"
     box_mid "硬件资源"
-    info_row "CPU型号"   "$CPU_MODEL"
-    info_row "CPU架构"   "${ARCH}   核心: ${CPU_CORES}   频率: ${CPU_FREQ}"
-    info_row "CPU占用"   "${CPU_USAGE}   负载: ${LOAD_AVG}"
-    info_row "TCP|UDP"   "${TCP_CONN} | ${UDP_CONN}"
-    info_row "物理内存"  "${MEM_USED} / ${MEM_TOTAL} (${MEM_PERCENT})"
-    info_row "虚拟内存"  "${SWAP_USED} / ${SWAP_TOTAL}"
-    info_row "硬盘占用"  "${DISK_USED} / ${DISK_TOTAL} (${DISK_PERCENT})"
-    box_mid "Web 与容器"
-    svc_line "Docker" "$docker_installed" "$docker_running"
-    svc_line "Nginx"  "$nginx_installed"  "$nginx_running"
-    svc_line "Caddy"  "$caddy_installed"  "$caddy_running"
-    box_mid "安全防护"
-    svc_line "UFW"      "$ufw_installed"      "$ufw_running"      "$ufw_enabled"
-    svc_line "nftables" "$nft_installed"      "$nft_running"      "$nft_enabled"
-    svc_line "Fail2ban" "$fail2ban_installed" "$fail2ban_running"
-    box_mid "代理核心"
-    svc_line "Xray"      "$xray_installed"           "$xray_running"           "$xray_enabled"
-    svc_line "Mihomo"    "$mihomo_installed"         "$mihomo_running"         "$mihomo_enabled"
-    svc_line "Sing-box"  "$sing_box_installed"       "$sing_box_running"       "$sing_box_enabled"
-    svc_line "Hysteria2" "$hysteria_server_installed" "$hysteria_server_running" "$hysteria_server_enabled"
+    info2 "CPU"    "$CPU_MODEL"
+    info2 ""       "${ARCH} · ${CPU_CORES} 核 · ${CPU_FREQ} · 占用 ${CPU_USAGE} · 负载 ${LOAD_1M}"
+    info2 "内存"   "${MEM_USED} / ${MEM_TOTAL} (${MEM_PERCENT})" "Swap" "${SWAP_USED} / ${SWAP_TOTAL}"
+    info2 "硬盘"   "${DISK_USED} / ${DISK_TOTAL} (${DISK_PERCENT})" "连接" "TCP ${TCP_CONN} | UDP ${UDP_CONN}"
+    box_mid "服务状态"
+    svc_row "Docker" "$docker_installed" "$docker_running" "" \
+            "UFW"       "$ufw_installed"             "$ufw_running"             "$ufw_enabled"
+    svc_row "Nginx" "$nginx_installed" "$nginx_running" "" \
+            "nftables"  "$nft_installed"             "$nft_running"             "$nft_enabled"
+    svc_row "Caddy" "$caddy_installed" "$caddy_running" "" \
+            "Fail2ban"  "$fail2ban_installed"        "$fail2ban_running"        ""
+    svc_row "Xray"   "$xray_installed"    "$xray_running"    "$xray_enabled" \
+            "Sing-box"  "$sing_box_installed"        "$sing_box_running"        "$sing_box_enabled"
+    svc_row "Mihomo" "$mihomo_installed"  "$mihomo_running"  "$mihomo_enabled" \
+            "Hysteria2" "$hysteria_server_installed" "$hysteria_server_running" "$hysteria_server_enabled"
     box_bot
 
     box_top "功能菜单"
-    menu_row "00" "安装基础依赖"    "8"  "Web 服务"
-    menu_row "1"  "Kejilion 工具箱" "9"  "防火墙"
-    menu_row "2"  "Hysteria2"       "10" "安装 Argo"
-    menu_row "3"  "warp"            "11" "安装 Gost"
-    menu_row "4"  "Sing-box"        "12" "VPS 实用工具"
-    menu_row "5"  "xray"            "88" "更新面板"
-    menu_row "6"  "mihomo"          "99" "节点信息"
-    menu_row "7"  "申请 SSL 证书"   "0"  "退出面板"
+    menu3 "00" "安装基础依赖" "$CYAN"    "01" "Kejilion工具箱" "$CYAN"    "02" "Hysteria2" "$GREEN"
+    menu3 "03" "warp"         "$GREEN"   "04" "Sing-box"       "$GREEN"   "05" "xray"      "$GREEN"
+    menu3 "06" "mihomo"       "$GREEN"   "07" "申请 SSL 证书"  "$MAGENTA" "08" "Web 服务"  "$MAGENTA"
+    menu3 "09" "防火墙"        "$MAGENTA" "10" "安装 Argo"     "$CYAN"    "11" "安装 Gost" "$CYAN"
+    menu3 "12" "VPS 实用工具"  "$CYAN"    "88" "更新面板"       "$YELLOW"  "99" "节点信息"  "$YELLOW"
+    echo -e "  ${YELLOW}0 ${PLAIN} ${RED}◆退出面板${PLAIN}"
     box_bot
 
-    echo
-    
     echo
     echo -ne "${GREEN}  请选择操作: ${PLAIN}"
 }
@@ -518,15 +533,15 @@ main_menu() {
 
         case "$choice" in
             00) initialize_dependencies; pause_return; need_refresh=1 ;;
-            1)  install_toolbox;  pause_return; need_refresh=1 ;;
-            2)  install_hysteria; pause_return; need_refresh=1 ;;
-            3)  install_warp;     need_refresh=1 ;;
-            4)  install_singbox;  need_refresh=1 ;;
-            5)  install_xray;     need_refresh=1 ;;
-            6)  run_remote "https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/ts.sh"; pause_return; need_refresh=1 ;;
-            7)  run_remote "https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/ssl.sh"; pause_return; need_refresh=1 ;;
-            8)  web_service_menu; need_refresh=1 ;;
-            9)  fail_menu;        need_refresh=1 ;;
+            1|01)  install_toolbox;  pause_return; need_refresh=1 ;;
+            2|02)  install_hysteria; pause_return; need_refresh=1 ;;
+            3|03)  install_warp;     need_refresh=1 ;;
+            4|04)  install_singbox;  need_refresh=1 ;;
+            5|05)  install_xray;     need_refresh=1 ;;
+            6|06)  run_remote "https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/ts.sh"; pause_return; need_refresh=1 ;;
+            7|07)  run_remote "https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/ssl.sh"; pause_return; need_refresh=1 ;;
+            8|08)  web_service_menu; need_refresh=1 ;;
+            9|09)  fail_menu;        need_refresh=1 ;;
             10) select_argo_script; need_refresh=1 ;;
             11) install_gost;     pause_return; need_refresh=1 ;;
             12) vps_tools_menu;   need_refresh=1 ;;
