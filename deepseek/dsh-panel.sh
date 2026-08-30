@@ -175,6 +175,12 @@ PID_FILE="$PANEL_DIR/dsh-web.pid"
 LOG_FILE="$PANEL_DIR/dsh-web.log"
 SVC_NAME="dsh-web"
 
+# DSH 插件 profile 位置 (与官方一致: $DSH_HOME/profiles/web)
+DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
+WEB_PROFILE_DIR="$DSH_HOME_DIR/profiles/web"
+WEB_MANIFEST="$WEB_PROFILE_DIR/package.json"
+PLUGIN_OUT="$PANEL_DIR/last-plugin-install.log"
+
 PORT="3080"
 WORKSPACE=""
 
@@ -494,22 +500,178 @@ plugin_guard() {
     return 0
 }
 
-plugin_add() {
-    plugin_guard || return 1
-    print_info "安装插件: $1"
-    if step dsh plugin --profile web add "$1"; then
-        print_info "插件安装完成, 重启 DSH 后生效。"
+# ---- 插件注册状态校验 (读取 $DSH_HOME/profiles/web/package.json) ----
+profile_state() {  # 输出两行: BUNDLES:逗号列表 / DEPS:逗号列表
+    node -e '
+const fs = require("fs");
+let b = [], d = [];
+try {
+    const m = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    b = ((m.dsh || {}).profile || {}).bundles || [];
+    d = Object.keys(m.dependencies || {});
+} catch (e) {}
+process.stdout.write("BUNDLES:" + b.join(",") + "\nDEPS:" + d.join(",") + "\n");
+' "$WEB_MANIFEST" 2>/dev/null
+}
+
+bundle_has() {  # $1=逗号列表 $2=包名 → 在列表中?
+    [[ ",$1," == *",$2,"* ]]
+}
+
+spec_pkg_guess() {  # github:user/repo#ref → repo (作为 pnpm 构建白名单 key 的兜底)
+    local s="$1"
+    if [[ "$s" == github:* ]]; then
+        s="${s##*/}"
+        s="${s%%#*}"
+        s="${s%.git}"
+    fi
+    printf '%s' "$s"
+}
+
+allow_build_add() {  # $1=包名 → 写入 profile 的 pnpm-workspace.yaml allowBuilds
+    local f="$WEB_PROFILE_DIR/pnpm-workspace.yaml"
+    mkdir -p "$WEB_PROFILE_DIR"
+    if [[ -f "$f" ]] && grep -qE '^[[:space:]]*allowBuilds[[:space:]]*:' "$f"; then
+        if ! grep -qE "^[[:space:]]*-[[:space:]]*${1}[[:space:]]*$" "$f"; then
+            awk -v key="$1" '
+                { print }
+                /^[[:space:]]*allowBuilds[[:space:]]*:/ && !done { print "  - " key; done=1 }
+            ' "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
+        fi
     else
-        print_error "安装失败。若是首次使用, 请先启动一次 DSH(菜单 2) 再安装插件。"
+        printf '\nallowBuilds:\n  - %s\n' "$1" >> "$f"
     fi
 }
 
-plugin_remove() {
+fix_build_block() {  # $1=安装输出文件 $2=包spec → rc0=已写入白名单
+    local keys="" k added=0 line
+    # ① pnpm "Ignored build scripts: a, b" 字样
+    while IFS= read -r line; do
+        line="${line#*:}"
+        line="${line//,/ }"
+        line="${line//\"/}"
+        line="${line#.}"
+        for k in $line; do
+            k="${k%%(*}"
+            [[ " $keys " == *" $k "* ]] || keys="$keys $k"
+        done
+    done < <(grep -oE 'Ignored build scripts?:[^.]+' "$1" 2>/dev/null)
+    # ② prepare/build script of <name> 字样
+    while IFS= read -r k; do
+        k="${k##* }"; k="${k//\"/}"
+        [[ " $keys " == *" $k "* ]] || keys="$keys $k"
+    done < <(grep -oE '(prepare|build) script of [^ ,.]+' "$1" 2>/dev/null | awk '{print $NF}')
+    # ③ 兜底: 用包 spec 推导
+    k=$(spec_pkg_guess "$2")
+    [[ " $keys " == *" $k "* ]] || keys="$keys $k"
+
+    for k in $keys; do
+        case "$k" in ''|*[!A-Za-z0-9@/._-]*) continue ;; esac
+        allow_build_add "$k"
+        print_info "已将 $k 加入 pnpm 构建白名单 (allowBuilds)"
+        added=1
+    done
+    return $(( 1 - added ))
+}
+
+plugin_add() {  # $1=包spec — 安装 + 自动处理构建拦截 + 校验真实注册
     plugin_guard || return 1
-    local name
+    local pkg="$1" state before_b before_d rc nb nd dep new_dep="" ok=1
+    print_info "安装插件: $pkg"
+    print_info "完整安装输出已保存到: $PLUGIN_OUT"
+
+    state=$(profile_state)
+    before_b="${state%%$'\n'*}"; before_b="${before_b#BUNDLES:}"
+    before_d="${state#*$'\n'}";  before_d="${before_d#DEPS:}"
+
+    run_plugin_add() {
+        set -o pipefail
+        dsh plugin --profile web add "$pkg" 2>&1 | tee "$PLUGIN_OUT"
+        rc=$?
+        set +o pipefail
+    }
+    run_plugin_add
+
+    if (( rc != 0 )); then
+        print_warn "安装命令失败(退出码 $rc), 检测 pnpm 构建脚本拦截并自动处理..."
+        if fix_build_block "$PLUGIN_OUT" "$pkg"; then
+            print_info "白名单已更新, 重试安装..."
+            run_plugin_add
+        fi
+    fi
+
+    # ---- 校验: 新依赖是否真的进入了 dsh.profile.bundles ----
+    state=$(profile_state)
+    nb="${state%%$'\n'*}"; nb="${nb#BUNDLES:}"
+    nd="${state#*$'\n'}";  nd="${nd#DEPS:}"
+
+    for dep in ${nd//,/ }; do
+        [[ ",$before_d," == *",$dep,"* ]] && continue
+        new_dep="$dep"
+        if bundle_has "$nb" "$dep"; then
+            print_info "✔ $dep 已注册进加载层 (dsh.profile.bundles)"
+        else
+            print_warn "✘ $dep 已安装, 但未声明 dsh.bundle — 它不是 DSH 插件, 不会被加载"
+            ok=0
+        fi
+    done
+
+    if (( rc != 0 )); then
+        print_error "插件安装失败, 请查看上方输出。"
+        print_error "若提示 allowBuilds: 手动编辑 $WEB_PROFILE_DIR/pnpm-workspace.yaml 后重试。"
+        return 1
+    fi
+
+    if [[ -z "$new_dep" ]]; then
+        if [[ -n "$nb" ]]; then
+            print_info "未检测到新依赖 (可能此前已安装)。当前已注册插件: ${nb//,/、}"
+        else
+            print_warn "未检测到任何已注册插件, 请确认包名是否为 DSH 插件 (需声明 dsh.bundle)。"
+        fi
+        return 0
+    fi
+
+    if (( ok )); then
+        print_info "插件安装并注册成功。"
+        if is_running; then
+            print_info "检测到服务正在运行, 自动重启以加载新插件..."
+            do_restart
+        else
+            print_info "下次启动 DSH 时自动加载。"
+        fi
+    fi
+    return 0
+}
+
+plugin_remove() {  # 移除 + 校验加载层确实缩小
+    plugin_guard || return 1
+    local name state before_b after_b rc
     read_choice "请输入要移除的插件包名: " name
     [[ -z "$name" ]] && { print_info "已取消。"; return 0; }
-    step dsh plugin --profile web remove "$name" && print_info "已移除(如有提示按其输出为准)。"
+    state=$(profile_state)
+    before_b="${state%%$'\n'*}"; before_b="${before_b#BUNDLES:}"
+
+    set -o pipefail
+    dsh plugin --profile web remove "$name" 2>&1 | tee "$PLUGIN_OUT"
+    rc=$?
+    set +o pipefail
+    if (( rc != 0 )); then
+        print_error "移除失败, 请查看输出。"
+        return 1
+    fi
+
+    state=$(profile_state)
+    after_b="${state%%$'\n'*}"; after_b="${after_b#BUNDLES:}"
+    if [[ "$before_b" != "$after_b" ]]; then
+        print_info "已移除并更新加载层。当前插件: ${after_b:-无}"
+        if is_running; then
+            print_info "检测到服务正在运行, 自动重启以生效..."
+            do_restart
+        fi
+    else
+        print_info "移除完成 (该包此前不在加载层, 或仅是普通依赖)。"
+    fi
+    return 0
 }
 
 plugin_menu() {
