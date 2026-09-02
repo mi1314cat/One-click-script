@@ -39,6 +39,7 @@ fi
 print_info()  { echo -e "${CYAN}# ${GREEN}[Info]${RESET} $1"; }
 print_warn()  { echo -e "${CYAN}# ${YELLOW}[Warn]${RESET} $1"; }
 print_error() { echo -e "${CYAN}# ${RED}[Error]${RESET} $1"; }
+print_ok()    { echo -e "${CYAN}# ${GREEN}[OK]${RESET} $1"; }
 
 log() {
   local ts msg
@@ -812,9 +813,128 @@ delete_nftables() {
 }
 
 # =========================
+# 接管防火墙(清除第三方侵入, 本脚本为唯一主人)
+# 目标: 移除 kejilion 等第三方通过 iptables 注入的 DROP 规则表
+#       (table ip filter) 及其开机自恢复 (@reboot iptables-restore),
+#       避免新端口被第三方 DROP 表锁死。
+# 安全: 只清理第三方层, 本脚本的 inet filter 表(SSH 规则)绝不动。
+# =========================
+takeover_mode() {
+  print_info "正在接管防火墙(清除第三方 iptables 规则层)..."
+  local changed=false
+
+  # --- 0. 安全检查: 本脚本的 SSH 规则必须存在 ---
+  local ssh_ports
+  ssh_ports="$(get_rules_ssh_ports || true)"
+  if [[ -z "$ssh_ports" ]]; then
+    # 规则缺失: 先本机验证 SSH 可连接再继续(防止接管后失联)
+    print_error "未检测到本脚本的 SSH 规则, 拒绝接管(先运行 12 同步 SSH 端口)"
+    return 1
+  fi
+  print_info "SSH 规则确认存在: $ssh_ports"
+
+  # --- 1. 备份第三方 iptables 规则(可追溯) ---
+  if [[ -f /etc/iptables/rules.v4 ]]; then
+    if [[ ! -f /etc/iptables/rules.v4.kejilion.bak ]]; then
+      cp /etc/iptables/rules.v4 /etc/iptables/rules.v4.kejilion.bak 2>/dev/null
+      print_info "已备份第三方规则 -> /etc/iptables/rules.v4.kejilion.bak"
+    fi
+  fi
+
+  # --- 2. 删除第三方开机自恢复 crontab ---
+  if crontab -l 2>/dev/null | grep -qE "@reboot .*iptables-restore"; then
+    crontab -l 2>/dev/null | grep -vE "@reboot .*iptables-restore" | crontab - 2>/dev/null
+    print_info "已移除开机自恢复规则(@reboot iptables-restore)"
+    changed=true
+  fi
+
+  # --- 3. 清空第三方 iptables INPUT 规则层(IPv4), 保留本机 SSH 端口 ---
+  #     该层来自 kejilion 的 table ip filter(policy DROP)。
+  #     安全顺序(关键): 先把 policy 改为 ACCEPT → 再 flush → 最后重放 SSH
+  #     绝不能在 policy DROP 下 flush INPUT(否则瞬间全部丢弃 = 失联)
+  if iptables -S INPUT 2>/dev/null | grep -qE "^-A INPUT"; then
+    iptables -P INPUT ACCEPT 2>/dev/null || true
+    iptables -F INPUT 2>/dev/null || true
+    for port in $ssh_ports; do
+      iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null
+    done
+    print_info "第三方 iptables INPUT 已清空(policy→ACCEPT), SSH $ssh_ports 已重放"
+    changed=true
+  elif iptables -S INPUT 2>/dev/null | grep -q "policy DROP"; then
+    # 无规则但 policy DROP: 本面板不依赖该层, 但为彻底接管改 ACCEPT
+    iptables -P INPUT ACCEPT 2>/dev/null || true
+    for port in $ssh_ports; do
+      iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null
+    done
+    print_info "第三方 iptables policy 已改为 ACCEPT, SSH 已放行"
+    changed=true
+  fi
+
+  # --- 4. 保存第三方层为干净状态(接下来由本脚本全权管理) ---
+  iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+  print_info "已保存干净 rules.v4"
+
+  if $changed; then
+    print_ok "接管完成: 第三方 DROP 层已清除, 本 nftables 面板为唯一防火墙主人"
+  else
+    print_info "未发现第三方 iptables 规则层, 系统已处于接管状态"
+  fi
+  log "执行接管模式(清除第三方 iptables 层)"
+}
+
+# =========================
+# 接管状态检测(供菜单显示, 探测第三方侵入)
+# =========================
+takeover_status() {
+  local txt="正常(本面板为主)"
+  local ssh_ports
+  ssh_ports="$(get_rules_ssh_ports || true)"
+  if crontab -l 2>/dev/null | grep -qE "@reboot .*iptables-restore"; then
+    txt="⚠ 第三方自恢复在运行(@reboot restore)"
+  elif iptables -S INPUT 2>/dev/null | grep -E "^-A INPUT" | grep -qvE -- "--dport [0-9]+"; then
+    # 存在非端口类规则(如放行IP/封禁链跳转) → 第三方痕迹
+    txt="⚠ 第三方 iptables 规则存在"
+  elif iptables -S INPUT 2>/dev/null | grep -E "^-A INPUT" | grep -E -- "--dport [0-9]+" | grep -qvE -- "--dport ($(echo "$ssh_ports" | tr ' ' '|'))"; then
+    # 存在非 SSH 端口放行 → 第三方痕迹
+    txt="⚠ 第三方 iptables 规则存在"
+  fi
+  echo "$txt"
+}
+
+# =========================
+# 接管守卫(每次进菜单自动清理第三方重新注入)
+# =========================
+takeover_guard() {
+  local changed=false
+  # 防回退1: crontab 重新写入
+  if crontab -l 2>/dev/null | grep -qE "@reboot .*iptables-restore"; then
+    crontab -l 2>/dev/null | grep -vE "@reboot .*iptables-restore" | crontab - 2>/dev/null
+    print_warn "接管守卫: 已清除第三方重新写入的开机自恢复"
+    changed=true
+  fi
+  # 防回退2: 第三方 INPUT 规则被重新注入且非本面板 SSH 规则
+  local ssh_ports
+  ssh_ports="$(get_rules_ssh_ports || true)"
+  local ipt_ssh=""
+  for s in $ssh_ports; do ipt_ssh="$ipt_ssh --dport $s"; done
+  if iptables -S INPUT 2>/dev/null | grep -qE "^-A INPUT" && [[ -n "$ipt_ssh" ]]; then
+    if iptables -S INPUT 2>/dev/null | grep -E "^-A INPUT" | grep -vqE -- "--dport [0-9]+"; then
+      # 存在非端口类规则(如放行IP/封禁), 保守: 仅提示不自动删(避免误删 fail2ban)
+      print_warn "检测到第三方 iptables 非端口规则, 未自动清理(请手动执行 13 接管)"
+    fi
+  fi
+  if $changed; then
+    log "接管守卫: 自动清理第三方 @reboot restore"
+  fi
+}
+
+# =========================
 # 主菜单
 # =========================
 while true; do
+  # 接管守卫: 自动清理第三方重新注入的开机自恢复
+  takeover_guard
+
   # 每次循环检查 SSH 端口一致性(仅警告)
   current_rules_ports="$(get_rules_ssh_ports)"
   actual_ports="$(get_current_ssh_ports)"
@@ -861,6 +981,7 @@ while true; do
   echo -e "║ ${BLUE}10)${RESET} 自动开放所有被程序占用的端口"
   echo -e "║ ${BLUE}11)${RESET} 删除 nftables(卸载/清除)"
   echo -e "║ ${BLUE}12)${RESET} 同步 SSH 端口规则(解决改端口问题)"
+  echo -e "║ ${BLUE}13)${RESET} 接管防火墙(清除第三方iptrules,本面板为主) $(takeover_status)"
   echo "╚════════════════════════════════════════════════╝"
 
   read -r -p "请选择操作:" choice || { echo; exit 0; }
@@ -907,6 +1028,7 @@ while true; do
     10) auto_open_used_ports ;;
     11) delete_nftables ;;
     12) sync_ssh_ports ;;
+    13) takeover_mode ;;
     *) print_error "无效选择" ;;
   esac
 done
