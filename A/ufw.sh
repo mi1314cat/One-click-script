@@ -40,6 +40,7 @@ fi
 print_info()  { echo -e "${CYAN}# ${GREEN}[Info]${RESET} $1"; }
 print_warn()  { echo -e "${CYAN}# ${YELLOW}[Warn]${RESET} $1"; }
 print_error() { echo -e "${CYAN}# ${RED}[Error]${RESET} $1"; }
+print_ok()    { echo -e "${CYAN}# ${GREEN}[OK]${RESET} $1"; }
 
 log() {
   local ts msg
@@ -199,7 +200,7 @@ get_ufw_ssh_ports() {
 # =========================
 rule_exists() {
   local proto="$1" port="$2"
-  ufw status 2>/dev/null | grep -qE "^${port}/${proto} "
+  fw_rule_exists "$proto" "$port"
 }
 
 # =========================
@@ -208,7 +209,7 @@ rule_exists() {
 add_ssh_rule() {
   local port="$1"
   if ! rule_exists tcp "$port"; then
-    ufw allow from any to any port "$port" proto tcp comment "$SSH_COMMENT" >/dev/null
+    fw_allow tcp "$port"
     log "添加 SSH 规则: $port/tcp"
   fi
 }
@@ -264,7 +265,7 @@ sync_ssh_ports() {
     port_proto="$(echo "$line" | awk '{print $1}')"
     port="$(echo "$port_proto" | cut -d'/' -f1)"
     if [[ -n "$port" && ! " $new_ports " =~ " $port " ]]; then
-      ufw delete allow "$port_proto" >/dev/null 2>&1 || true
+      fw_delete tcp "$port"
       log "删除旧 SSH 规则: $port_proto"
     fi
   done
@@ -358,8 +359,8 @@ port_menu() {
         read -r -p "请输入端口号: " port
         valid_port "$port" || { print_error "无效端口号: $port"; continue; }
         loading "正在开放端口..."
-        if ! rule_exists tcp "$port"; then ufw allow "${port}/tcp" >/dev/null; fi
-        if ! rule_exists udp "$port"; then ufw allow "${port}/udp" >/dev/null; fi
+        if ! rule_exists tcp "$port"; then fw_allow tcp "$port"; fi
+        if ! rule_exists udp "$port"; then fw_allow udp "$port"; fi
         log "开放端口: $port (TCP/UDP)"
         print_info "已开放端口 $port"
         ;;
@@ -371,8 +372,8 @@ port_menu() {
           continue
         fi
         loading "正在关闭端口..."
-        ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
-        ufw delete allow "${port}/udp" >/dev/null 2>&1 || true
+        fw_delete tcp "$port"
+        fw_delete udp "$port"
         log "关闭端口: $port (TCP/UDP)"
         print_info "已关闭端口 $port"
         ;;
@@ -380,8 +381,8 @@ port_menu() {
         read -r -p "请输入端口范围(如 5000-6000): " range
         valid_range "$range" || { print_error "无效端口范围: $range (示例 5000-6000)"; continue; }
         loading "正在开放端口范围..."
-        ufw allow "${range}/tcp" >/dev/null
-        ufw allow "${range}/udp" >/dev/null
+        fw_allow tcp "$range"
+        fw_allow udp "$range"
         log "开放端口范围: $range"
         print_info "已开放端口范围 $range"
         ;;
@@ -389,8 +390,8 @@ port_menu() {
         read -r -p "请输入端口范围(如 5000-6000): " range
         valid_range "$range" || { print_error "无效端口范围: $range (示例 5000-6000)"; continue; }
         loading "正在关闭端口范围..."
-        ufw delete allow "${range}/tcp" >/dev/null 2>&1 || true
-        ufw delete allow "${range}/udp" >/dev/null 2>&1 || true
+        fw_delete tcp "$range"
+        fw_delete udp "$range"
         log "关闭端口范围: $range"
         print_info "已关闭端口范围 $range"
         ;;
@@ -506,10 +507,67 @@ show_open_ports() {
 # =========================
 # 自动开放所有被程序占用的端口(排除回环、Docker)
 # =========================
+# 防火墙后端自检: 优先 ufw(若命令正常), 否则回退 iptables 直操作
+# 解决: kejilion 接管后 ufw 命令损坏(problem running ip6tables)导致规则写不进
+# =========================
+fw_backend() {
+  if command -v ufw >/dev/null 2>&1 && ufw status >/dev/null 2>&1; then
+    echo "ufw"
+  else
+    echo "iptables"
+  fi
+}
+
+# 检查端口规则是否存在 (兼容 ufw / iptables 两种后端)
+fw_rule_exists() {
+  local proto="$1" port="$2"
+  local backend
+  backend="$(fw_backend)"
+  if [[ "$backend" == "ufw" ]]; then
+    ufw status 2>/dev/null | grep -qE "^${port}/${proto} "
+  else
+    iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null
+  fi
+}
+
+# 添加端口放行规则 (兼容 ufw / iptables, iptables 时同步保存 rules.v4)
+fw_allow() {
+  local proto="$1" port="$2"
+  local backend
+  backend="$(fw_backend)"
+  if [[ "$backend" == "ufw" ]]; then
+    ufw allow "$port/$proto" >/dev/null 2>&1
+  else
+    iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null || \
+      iptables -I INPUT 1 -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null
+  fi
+}
+
+# 删除端口放行规则 (兼容 ufw / iptables, iptables 时同步保存 rules.v4)
+fw_delete() {
+  local proto="$1" port="$2"
+  local backend
+  backend="$(fw_backend)"
+  if [[ "$backend" == "ufw" ]]; then
+    ufw delete allow "$port/$proto" >/dev/null 2>&1
+  else
+    iptables -D INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null
+  fi
+}
+
+# =========================
 auto_open_used_ports() {
   echo -e "${CYAN}╔════════════════════════════════════════════════╗"
   echo -e "║        自动开放所有被程序占用的端口(TCP/UDP)   ║"
   echo -e "╠════════════════════════════════════════════════╣${RESET}"
+  local backend opened=0
+  backend="$(fw_backend)"
+  print_info "防火墙后端: $backend"
+
   ss -tulnp 2>/dev/null | tail -n +2 | while read -r line; do
     proto="$(echo "$line" | awk '{print $1}')"
     local_addr="$(echo "$line" | awk '{print $5}')"
@@ -520,16 +578,15 @@ auto_open_used_ports() {
     [[ "$local_addr" == ::1* ]] && continue
     [[ "$process" == *docker* ]] && continue
 
-    if [[ "$proto" == "tcp" ]] && ! rule_exists tcp "$port"; then
-      ufw allow "$port/tcp" >/dev/null 2>&1
-    elif [[ "$proto" == "udp" ]] && ! rule_exists udp "$port"; then
-      ufw allow "$port/udp" >/dev/null 2>&1
+    if [[ "$proto" == "tcp" ]] || [[ "$proto" == "udp" ]]; then
+      if ! fw_rule_exists "$proto" "$port"; then
+        fw_allow "$proto" "$port"
+        printf "║ 已开放端口 %-6s 协议 %-4s 进程 %-20s ║\n" "$port" "$proto" "$process"
+      fi
     fi
-
-    printf "║ 已开放端口 %-6s 协议 %-4s 进程 %-20s ║\n" "$port" "$proto" "$process"
   done
   echo -e "${CYAN}╚════════════════════════════════════════════════╝${RESET}"
-  print_info "所有被程序占用的端口已自动开放(已存在的规则自动跳过)"
+  print_info "所有被程序占用的端口已自动开放(已存在的规则自动跳过, 后端=$backend)"
 }
 
 # =========================
@@ -642,9 +699,90 @@ delete_ufw() {
 }
 
 # =========================
+# 接管防火墙(禁用其他脚本规则,以本脚本为主)
+# 解决: kejilion 等第三方脚本通过 @reboot iptables-restore
+#       把 DROP 规则固化, 导致新端口连不上。
+# 效果: 1) 移除开机自动恢复(重启不再锁死)
+#       2) 开放所有 INPUT(接管后由本脚本管理端口)
+#       3) 保留 SSH 防失联
+# =========================
+takeover_mode() {
+  print_info "正在接管防火墙(以本脚本为主)..."
+  local changed=false
+
+  # --- 1. 备份 kejilion 的 rules.v4 (保留痕迹, 可追溯) ---
+  if [[ -f /etc/iptables/rules.v4 ]]; then
+    if [[ ! -f /etc/iptables/rules.v4.kejilion.bak ]]; then
+      cp /etc/iptables/rules.v4 /etc/iptables/rules.v4.kejilion.bak 2>/dev/null
+      print_info "已备份 kejilion 规则 -> /etc/iptables/rules.v4.kejilion.bak"
+    fi
+  fi
+
+  # --- 2. 移除开机自动恢复 (@reboot iptables-restore) ---
+  if crontab -l 2>/dev/null | grep -qE "@reboot .*iptables-restore"; then
+    crontab -l 2>/dev/null | grep -vE "@reboot .*iptables-restore" | crontab - 2>/dev/null
+    print_info "已移除开机自动恢复规则(@reboot iptables-restore)"
+    changed=true
+  else
+    print_info "未发现开机自动恢复规则, 跳过"
+  fi
+
+  # --- 3. 开放 INPUT: 清空所有 INPUT 规则 + policy ACCEPT (IPv4+IPv6) ---
+  iptables -P INPUT ACCEPT 2>/dev/null
+  iptables -F INPUT 2>/dev/null
+  ip6tables -P INPUT ACCEPT 2>/dev/null
+  ip6tables -F INPUT 2>/dev/null
+  print_info "IPv4/IPv6 INPUT 已全部开放(policy ACCEPT)"
+
+  # --- 4. 重新放行 SSH(防失联) ---
+  local ssh_ports
+  ssh_ports="$(get_current_ssh_ports)"
+  for port in $ssh_ports; do
+    iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
+      iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null
+    print_info "SSH 端口已放行: $port/tcp"
+  done
+
+  # --- 5. 保存干净状态到 rules.v4 (kejilion 下次 save 前的开机基线) ---
+  mkdir -p /etc/iptables
+  iptables-save > /etc/iptables/rules.v4 2>/dev/null
+  print_info "已保存规则 -> /etc/iptables/rules.v4 (修改即生效)"
+
+  if $changed; then
+    print_ok "防火墙已接管完成, 重启后不会再被其他脚本锁死"
+  else
+    print_info "接管前状态已是干净状态, 无额外变更"
+  fi
+  log "执行接管防火墙模式"
+}
+
+# =========================
+# 查看接管状态(供菜单显示)
+# =========================
+takeover_status() {
+  local txt="未接管"
+  if crontab -l 2>/dev/null | grep -qE "@reboot .*iptables-restore"; then
+    txt="被第三方接管(@reboot restore)⚠"
+  fi
+  echo "$txt"
+}
+
+# 防回退: 若发现第三方 @reboot restore 重新出现, 自动清除并提示
+takeover_guard() {
+  if crontab -l 2>/dev/null | grep -qE "@reboot .*iptables-restore"; then
+    crontab -l 2>/dev/null | grep -vE "@reboot .*iptables-restore" | crontab - 2>/dev/null
+    print_warn "检测到第三方脚本重新写入了开机恢复规则, 已自动清除(接管保持)"
+    log "接管守卫: 自动清除 @reboot iptables-restore"
+  fi
+}
+
+# =========================
 # 主菜单
 # =========================
 while true; do
+  # 接管守卫: 自动防止第三方脚本重新固化规则
+  takeover_guard
+
   # 检查 SSH 端口一致性(警告)
   current_ssh="$(get_current_ssh_ports)"
   ufw_ssh="$(get_ufw_ssh_ports)"
@@ -689,6 +827,7 @@ while true; do
   echo -e "║ ${BLUE}10)${RESET} 自动开放所有被程序占用的端口"
   echo -e "║ ${BLUE}11)${RESET} 删除 UFW(卸载防火墙)"
   echo -e "║ ${BLUE}12)${RESET} 同步 SSH 端口规则(解决改端口问题)"
+  echo -e "║ ${BLUE}13)${RESET} 接管防火墙(禁用其他脚本规则,本脚本为主) $(takeover_status)"
   echo "╚════════════════════════════════════════════════╝"
 
   read -r -p "请选择操作:" choice || { echo; exit 0; }
@@ -729,6 +868,7 @@ while true; do
     10) auto_open_used_ports ;;
     11) delete_ufw ;;
     12) sync_ssh_ports ;;
+    13) takeover_mode ;;
     *) print_error "无效选择" ;;
   esac
 done
