@@ -328,6 +328,15 @@ if [[ ! -f "$INIT_FLAG" ]]; then
     mkdir -p /etc/ufw
     touch "$INIT_FLAG"
     print_info "UFW 初始化成功,SSH 端口规则已生效"
+    # 互斥: 确认接管后停用对方(nftables 面板), 防止双防火墙冲突
+    if systemctl is-active --quiet nftables-ufw-panel.service 2>/dev/null || \
+       systemctl is-active --quiet nftables.service 2>/dev/null; then
+      systemctl stop nftables-ufw-panel.service 2>/dev/null || true
+      systemctl disable nftables-ufw-panel.service 2>/dev/null || true
+      systemctl stop nftables.service 2>/dev/null || true
+      systemctl disable nftables.service 2>/dev/null || true
+      print_info "已停用对方防火墙: nftables (UFW 接管成功)"
+    fi
   else
     print_error "未确认,已自动回滚"
     exit 1
@@ -708,6 +717,19 @@ delete_ufw() {
 # =========================
 takeover_mode() {
   print_info "正在接管防火墙(以本脚本为主)..."
+
+  # --- 0. 互斥: 停掉对方(nftables 面板)服务, 避免双防火墙冲突 ---
+  if systemctl is-active --quiet nftables-ufw-panel.service 2>/dev/null || \
+     systemctl is-active --quiet nftables.service 2>/dev/null; then
+    systemctl stop nftables-ufw-panel.service 2>/dev/null || true
+    systemctl disable nftables-ufw-panel.service 2>/dev/null || true
+    systemctl stop nftables.service 2>/dev/null || true
+    systemctl disable nftables.service 2>/dev/null || true
+    print_info "已停用对方防火墙: nftables-ufw-panel / nftables (UFW 为本面板唯一主人)"
+  else
+    print_info "对方防火墙(nftables)未运行, 无需停用"
+  fi
+
   local changed=false
 
   # --- 1. 备份 kejilion 的 rules.v4 (保留痕迹, 可追溯) ---
@@ -842,6 +864,15 @@ while true; do
       if [[ "$TOGGLE_ACTION" == "enable" ]]; then
         loading "正在启动防火墙..."
         ufw --force enable && print_info "防火墙已启用" || print_error "启用失败"
+        # 互斥: 启用后停用对方(nftables 面板), 防止双防火墙冲突
+        if systemctl is-active --quiet nftables-ufw-panel.service 2>/dev/null || \
+           systemctl is-active --quiet nftables.service 2>/dev/null; then
+          systemctl stop nftables-ufw-panel.service 2>/dev/null || true
+          systemctl disable nftables-ufw-panel.service 2>/dev/null || true
+          systemctl stop nftables.service 2>/dev/null || true
+          systemctl disable nftables.service 2>/dev/null || true
+          print_info "已停用对方防火墙: nftables (UFW 接管成功)"
+        fi
       else
         loading "正在关闭防火墙..."
         ufw disable && print_info "防火墙已禁用" || print_error "禁用失败"

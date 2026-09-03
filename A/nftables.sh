@@ -256,6 +256,12 @@ safe_nft_load() {
       return 1
     }
   fi
+  # 互斥: 本面板规则加载成功后,停用对方(UFW), 防止双防火墙冲突
+  if systemctl is-active --quiet ufw 2>/dev/null; then
+    systemctl stop ufw 2>/dev/null || true
+    systemctl disable ufw 2>/dev/null || true
+    print_info "已停用对方防火墙: ufw (nftables 面板接管成功)"
+  fi
   return 0
 }
 
@@ -821,6 +827,16 @@ delete_nftables() {
 # =========================
 takeover_mode() {
   print_info "正在接管防火墙(清除第三方 iptables 规则层)..."
+
+  # --- 0. 互斥: 停掉对方(UFW)服务, 避免双防火墙冲突 ---
+  if systemctl is-active --quiet ufw 2>/dev/null; then
+    systemctl stop ufw 2>/dev/null || true
+    systemctl disable ufw 2>/dev/null || true
+    print_info "已停用对方防火墙: ufw (nftables 面板为本唯一主人)"
+  else
+    print_info "对方防火墙(ufw)未运行, 无需停用"
+  fi
+
   local changed=false
 
   # --- 0. 安全检查: 本脚本的 SSH 规则必须存在 ---
