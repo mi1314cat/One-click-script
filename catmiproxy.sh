@@ -116,7 +116,7 @@ info2() {  # 双列信息: $1=标签 $2=内容 $3=标签2(可空) $4=内容2
 
 svc_entry() {  # $1=名称 $2=安装状态 $3=运行状态 $4=自启状态(可空)
     local n dot state mark
-    n=$(pad_disp "$1" 10)
+    n=$(pad_disp "$1" 16)
     if [[ "$2" == *未安装* ]]; then
         dot="${RED}○";    state="${RED}未安装"
     elif [[ "$3" == *运行中* ]]; then
@@ -155,6 +155,11 @@ menu3() {  # 三列菜单: [编号] 标题 (编号黄色, 标题分类色, 空�
         out+="${YELLOW}[${num}]${PLAIN} ${col}${title}${PLAIN}"
     done
     echo -e "$out"
+}
+
+menu_v() {  # 竖排单列菜单: [编号] 标题 (标题用分类色, 清爽对齐)
+    local a="$1" t="$2" c="$3"
+    echo -e "  ${YELLOW}[$a]${PLAIN} ${c}${t}${PLAIN}"
 }
 
 # ===========================
@@ -198,7 +203,7 @@ build_service_status() {
     for svc in mihomo mihomo-core clash; do
         echo "$SYSTEMCTL_ENABLED" | grep -qw "${svc}.service" && { MIHOMO_SVC="$svc"; break; }
     done
-    for svc in hysteria2 hysteria hy2; do
+    for svc in hysteria-server hysteria2 hysteria hy2; do
         echo "$SYSTEMCTL_ENABLED" | grep -qw "${svc}.service" && { HY2_SVC="$svc"; break; }
     done
     for svc in sing-box singbox sb; do
@@ -278,8 +283,12 @@ EOF
     box_bot
 
     box_top "功能菜单"
-    menu3 "1" "Mihomo"     "$GREEN"  "2" "Xray"      "$GREEN"  "3" "Sing-box" "$GREEN"
-    menu3 "4" "Hysteria2"  "$GREEN"  "0" "返回主面板" "$RED"   ""  ""         ""
+    menu_v "1" "Mihomo     - Xray ECH / ML-KEM"      "$GREEN"
+    menu_v "2" "Xray       - VLESS XHTTP/WS"         "$GREEN"
+    menu_v "3" "Sing-box   - 多协议内核"             "$GREEN"
+    menu_v "4" "Hysteria2  - QUIC 高速传输"          "$GREEN"
+    box_mid
+    menu_v "0" "返回主面板"                           "$RED"
     box_bot
 
     echo
