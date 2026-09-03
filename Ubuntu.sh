@@ -239,14 +239,21 @@ detect_ips() {
 #   UFW / nftables 检测
 # ===========================
 check_ufw() {
-    if command -v ufw >/dev/null 2>&1; then
+    if command -v ufw >/dev/null 2>&1 || command -v iptables >/dev/null 2>&1; then
         ufw_installed="${GREEN}已安装${PLAIN}"
-        if ufw status 2>/dev/null | grep -q "Status: active"; then
+        # 真实状态: 规则是否在 kernel 生效 (优化脚本直载规则, systemd 服务可能 inactive)
+        # ufw 正常 / ufw 规则已在 iptables / 面板 nft 规则已加载 → 均视为运行中
+        local ufw_status
+        ufw_status="$(ufw status 2>/dev/null | grep -q "Status: active" && echo active)"
+        if [[ "$ufw_status" == "active" ]] || \
+           iptables -S 2>/dev/null | grep -qE '^-A|ufw' || \
+           nft list table inet filter 2>/dev/null | grep -qE 'ct state|comment "ufw|"ufw' ; then
             ufw_running="${GREEN}运行中${PLAIN}"
         else
-            ufw_running="${RED}未运行${PLAIN}"
+            ufw_running="${YELLOW}未运行${PLAIN}"
         fi
-        if systemctl is-enabled --quiet ufw 2>/dev/null; then
+        if systemctl is-enabled --quiet ufw 2>/dev/null || \
+           [[ "$ufw_status" == "active" ]]; then
             ufw_enabled="${GREEN}已启用${PLAIN}"
         else
             ufw_enabled="${YELLOW}未启用${PLAIN}"
@@ -261,10 +268,13 @@ check_ufw() {
 check_nft() {
     if command -v nft >/dev/null 2>&1; then
         nft_installed="${GREEN}已安装${PLAIN}"
-        if systemctl is-active --quiet nftables 2>/dev/null; then
+        # 真实状态: 优化脚本核心是 nftables-ufw-panel.service (RemainAfterExit, active=exited 即规则已加载)
+        if systemctl is-active --quiet nftables 2>/dev/null || \
+           systemctl is-active --quiet nftables-ufw-panel.service 2>/dev/null || \
+           nft list ruleset 2>/dev/null | grep -qE 'polkadot|ufw-panel|ct state'; then
             nft_running="${GREEN}运行中${PLAIN}"
         else
-            nft_running="${RED}未运行${PLAIN}"
+            nft_running="${YELLOW}未运行${PLAIN}"
         fi
         # enabled/static/indirect 都视为开机自启
         case "$(systemctl is-enabled nftables 2>/dev/null)" in
@@ -432,16 +442,16 @@ svc_entry() {  # $1=名称 $2=安装状态 $3=运行状态 $4=自启状态(可�
     local n dot state mark
     n=$(pad_disp "$1" 10)
     if [[ "$2" == *未安装* ]]; then
-        dot="${RED}○";    state="${RED}未安装"
+        dot="${RED}○";    state="${RED}未安装"; mark="  ${PLAIN}"
     elif [[ "$3" == *运行中* ]]; then
         dot="${GREEN}●";  state="${GREEN}运行中"
+        if [[ -n "${4:-}" && "$4" == *已启用* ]]; then
+            mark=" ${GREEN}✓${PLAIN}"
+        else
+            mark="  ${PLAIN}"
+        fi
     else
-        dot="${YELLOW}○"; state="${YELLOW}未运行"
-    fi
-    if [[ -n "${4:-}" && "$4" == *已启用* ]]; then
-        mark=" ${GREEN}✓${PLAIN}"
-    else
-        mark="  ${PLAIN}"
+        dot="${YELLOW}○"; state="${YELLOW}未运行"; mark="  ${PLAIN}"
     fi
     SVC_ENTRY="${n} ${dot} ${state}${mark}"
 }
