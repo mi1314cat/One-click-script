@@ -139,26 +139,62 @@ pause_return() {
 #   工具清单存储
 # ===========================
 # 清单文件格式(每行): 名称|URL|描述
-# 内置默认工具(版本内置, 可被清单同名覆盖)
+# 默认工具清单(远程 GitHub TXT, 可热更新):
+REMOTE_LIST="$GH/YX/tools.list"
+# 下载超时(秒): 网络不好时快速跳过, 不拖慢面板
+REMOTE_TIMEOUT=4
+# 远程清单缓存(避免每次进菜单都等超时; 10 分钟自动刷新)
+REMOTE_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/catmi-tools-remote.list"
+REMOTE_CACHE_TTL=600
+
+# 内置兜底工具(仅当远程清单下载失败时才用; 正常情况以远程 tools.list 为准)
 declare -A BUILTIN
 BUILTIN[vpswatchdog]="网络看门狗|$GH/A/vpswatchdog.sh|网络状态监控/重启"
 BUILTIN[ssh-manager]="SSH 管理器|$GH/A/ssh-manager.sh|多服务器免密管理"
 
-# 读取清单 → 数组(按顺序: 内置 + 本机追加)
+# 读取清单 → 数组(按顺序: 远程默认 + 内置兜底 + 本机自定义)
 TOOL_NAMES=()  # 名称
 TOOL_URLS=()   # URL
 TOOL_DESCS=()  # 描述
-TOOL_SRC=()    # builtin|local
+TOOL_SRC=()    # remote|builtin|local
 
 load_tools() {
     TOOL_NAMES=(); TOOL_URLS=(); TOOL_DESCS=(); TOOL_SRC=()
-    local name url desc
-    # 内置
-    for key in "${!BUILTIN[@]}"; do
-        IFS='|' read -r name url desc <<< "${BUILTIN[$key]}"
-        TOOL_NAMES+=("$name"); TOOL_URLS+=("$url"); TOOL_DESCS+=("$desc"); TOOL_SRC+=("builtin")
-    done
-    # 本机清单(跳过空行/注释)
+    local name url desc key use_remote=false
+    # 1) 远程默认清单 (YX/tools.list) — 有缓存直接用, 超 TTL 才重新下载
+    local src_file="" cache_age=99999
+    if [[ -f "$REMOTE_CACHE" ]]; then
+        cache_age=$(( $(date +%s) - $(stat -c %Y "$REMOTE_CACHE" 2>/dev/null || echo 0) ))
+    fi
+    if [[ -f "$REMOTE_CACHE" && $cache_age -lt $REMOTE_CACHE_TTL ]]; then
+        src_file="$REMOTE_CACHE"   # 缓存未过期: 直接读
+    else
+        local tmp
+        tmp=$(mktemp /tmp/catmi-tools-remote.XXXXXX) 2>/dev/null
+        if [[ -n "$tmp" ]] && \
+           curl -fsSL --connect-timeout 3 -m "$REMOTE_TIMEOUT" -o "$tmp" "$REMOTE_LIST" 2>/dev/null; then
+            mkdir -p "$(dirname "$REMOTE_CACHE")" 2>/dev/null
+            mv "$tmp" "$REMOTE_CACHE" 2>/dev/null && src_file="$REMOTE_CACHE"
+        fi
+        rm -f "$tmp" 2>/dev/null
+    fi
+    if [[ -n "$src_file" && -f "$src_file" ]]; then
+        local n=0
+        while IFS='|' read -r name url desc; do
+            [[ -z "$name" || "$name" == \#* || -z "$url" ]] && continue
+            TOOL_NAMES+=("$name"); TOOL_URLS+=("$url"); TOOL_DESCS+=("${desc:-}"); TOOL_SRC+=("remote")
+            n=$((n + 1))
+        done < "$src_file"
+        (( n > 0 )) && use_remote=true
+    fi
+    # 2) 内置兜底(仅远程清单不可用/为空时)
+    if ! $use_remote; then
+        for key in "${!BUILTIN[@]}"; do
+            IFS='|' read -r name url desc <<< "${BUILTIN[$key]}"
+            TOOL_NAMES+=("$name"); TOOL_URLS+=("$url"); TOOL_DESCS+=("$desc"); TOOL_SRC+=("builtin")
+        done
+    fi
+    # 3) 本机自定义清单(总是加载: 用户 add 的工具)(跳过空行/注释)
     if [[ -f "$TOOLS_LIST" ]]; then
         while IFS='|' read -r name url desc; do
             [[ -z "$name" || "$name" == \#* ]] && continue
@@ -220,7 +256,11 @@ list_tools() {
     echo -e "${CYAN}========== 工具清单 ==========${PLAIN}"
     for ((i = 0; i < ${#TOOL_NAMES[@]}; i++)); do
         local tag=""
-        [[ "${TOOL_SRC[$i]}" == "builtin" ]] && tag=" ${GRAY}[内置]${PLAIN}" || tag=" ${YELLOW}[自定义]${PLAIN}"
+        case "${TOOL_SRC[$i]}" in
+            remote)  tag=" ${BLUE}[云端]${PLAIN}" ;;
+            builtin) tag=" ${GRAY}[内置]${PLAIN}" ;;
+            *)       tag=" ${YELLOW}[自定义]${PLAIN}" ;;
+        esac
         echo -e "  ${YELLOW}$((i+1))${PLAIN}. ${GREEN}${TOOL_NAMES[$i]}${PLAIN}${tag}"
         echo -e "     ${CYAN}→${PLAIN} ${TOOL_URLS[$i]}"
         [[ -n "${TOOL_DESCS[$i]}" ]] && echo -e "     ${GRAY}${TOOL_DESCS[$i]}${PLAIN}"
