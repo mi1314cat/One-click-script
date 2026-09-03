@@ -1,0 +1,4 @@
+# CatmiTools 默认工具清单
+网络看门狗|https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/vpswatchdog.sh|网络状态监控/重启
+SSH 管理器|https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/ssh-manager.sh|多服务器免密管理
+# 以后加默认工具就在下面加一行: 名称|URL|描述
