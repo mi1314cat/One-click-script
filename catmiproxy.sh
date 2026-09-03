@@ -118,16 +118,16 @@ svc_entry() {  # $1=名称 $2=安装状态 $3=运行状态 $4=自启状态(可�
     local n dot state mark
     n=$(pad_disp "$1" 16)
     if [[ "$2" == *未安装* ]]; then
-        dot="${RED}○";    state="${RED}未安装"
+        dot="${RED}○";    state="${RED}未安装"; mark="  ${PLAIN}"
     elif [[ "$3" == *运行中* ]]; then
         dot="${GREEN}●";  state="${GREEN}运行中"
+        if [[ -n "${4:-}" && "$4" == *已启用* ]]; then
+            mark=" ${GREEN}✓${PLAIN}"
+        else
+            mark="  ${PLAIN}"
+        fi
     else
-        dot="${YELLOW}○"; state="${YELLOW}未运行"
-    fi
-    if [[ -n "${4:-}" && "$4" == *已启用* ]]; then
-        mark=" ${GREEN}✓${PLAIN}"
-    else
-        mark="  ${PLAIN}"
+        dot="${YELLOW}○"; state="${YELLOW}未运行"; mark="  ${PLAIN}"
     fi
     SVC_ENTRY="${n} ${dot} ${state}${mark}"
 }
