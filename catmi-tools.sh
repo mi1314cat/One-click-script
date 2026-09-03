@@ -207,6 +207,17 @@ load_tools() {
 # ===========================
 #   添加工具 (名称 + URL)
 # ===========================
+# URL 规范化: blob 网页链接 → raw 可直接执行的纯文本链接
+normalize_url() {
+    local u="$1"
+    # https://github.com/USER/REPO/blob/BRANCH/path → /USER/REPO/raw/BRANCH/path
+    if [[ "$u" =~ ^https://github\.com/([^/]+/[^/]+)/blob/(.+)$ ]]; then
+        echo "https://github.com/${BASH_REMATCH[1]}/raw/${BASH_REMATCH[2]}"
+    else
+        echo "$u"
+    fi
+}
+
 add_tool() {
     local name="$1" url="$2"
     [[ -z "$name" || -z "$url" ]] && { print_error "用法: catmi-tools.sh add 名称 URL"; return 1; }
@@ -215,6 +226,10 @@ add_tool() {
         print_error "URL 必须以 http:// 或 https:// 开头, 拒绝添加"
         return 1
     fi
+    # blob → raw 自动转换 (避免 GitHub 网页链接执行失败)
+    local orig="$url"
+    url="$(normalize_url "$url")"
+    [[ "$url" != "$orig" ]] && print_info "已自动转换: blob → raw"
     # 重名检查 (内置 + 本机清单都算)
     load_tools
     local i
