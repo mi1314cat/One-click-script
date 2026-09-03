@@ -910,29 +910,10 @@ fail_menu() {
 #   VPS 实用工具(循环版, 0 返回主菜单)
 # ===========================
 vps_tools_menu() {
-    local choice rc
-    while true; do
-        clear
-        box_top "VPS 实用工具"
-        echo -e "  ${YELLOW}1${PLAIN}) 网络看门狗 (VPS Watchdog)"
-        echo -e "  ${YELLOW}0${PLAIN}) 返回主菜单"
-        box_bot
-        echo
-        read_choice "  请选择 [0-1]: " choice
-        rc=$?
-        if (( rc > 128 )); then continue; fi
-        if (( rc != 0 )); then return 0; fi
-        choice="${choice//[[:space:]]/}"
-
-        case "$choice" in
-            1)
-                run_remote "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/vpswatchdog.sh"
-                pause_return
-                ;;
-            0) return 0 ;;
-            *) invalid_input ;;
-        esac
-    done
+    # CatmiTools 动态工具面板: 加新工具只需 catmi-tools.sh add <名称> <URL>
+    # 无需再改本主面板 (vpswatchdog/ssh-manager 等已内置, 也可自定清单追加)
+    run_remote "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/catmi-tools.sh"
+    pause_return
 }
 
 # ===========================
