@@ -453,11 +453,22 @@ svc_row() {  # 双列服务: $1-4 左列(名称/安装/运行/自启)  $5-8 右�
     echo -e "  ${e1}    ${e2}"
 }
 
-menu3() {  # 三列菜单: (编号, 标题, 分类色)×3 — 分类用彩色◆标记
-    local n1 n2 n3 t1 t2
-    n1=$(printf '%-2s' "$1"); n2=$(printf '%-2s' "$4"); n3=$(printf '%-2s' "$7")
-    t1=$(pad_disp "$2" 14);   t2=$(pad_disp "$5" 14)
-    echo -e "  ${YELLOW}${n1}${PLAIN} ${3}◆${PLAIN}${t1} ${YELLOW}${n2}${PLAIN} ${6}◆${PLAIN}${t2} ${YELLOW}${n3}${PLAIN} ${9}◆${PLAIN}${8}"
+menu3() {  # 三列菜单: [编号] 标题 (编号黄色, 标题分类色, 空标题列自动省略)
+    local a1="$1" t1="$2" c1="$3" a2="$4" t2="$5" c2="$6" a3="$7" t3="$8" c3="$9"
+    local parts=() n
+    if [[ -n "$t1" ]]; then parts+=("$(pad_disp "$a1 $t1" 15)"); fi
+    if [[ -n "$t2" ]]; then parts+=("$(pad_disp "$a2 $t2" 15)"); fi
+    if [[ -n "$t3" ]]; then parts+=("$a3 $t3"); fi
+    local out="  " i
+    for ((i = 0; i < ${#parts[@]}; i++)); do
+        [[ $i -gt 0 ]] && out+="  "
+        local num title
+        num="${parts[i]%% *}"; title="${parts[i]#* }"
+        local col="$GREEN"
+        case "$num" in "$a1") col="$c1";; "$a2") col="$c2";; "$a3") col="$c3";; esac
+        out+="${YELLOW}[${num}]${PLAIN} ${col}${title}${PLAIN}"
+    done
+    echo -e "$out"
 }
 
 draw_main_menu() {
@@ -490,19 +501,18 @@ EOF
             "nftables"  "$nft_installed"             "$nft_running"             "$nft_enabled"
     svc_row "Caddy" "$caddy_installed" "$caddy_running" "" \
             "Fail2ban"  "$fail2ban_installed"        "$fail2ban_running"        ""
-    svc_row "Xray"   "$xray_installed"    "$xray_running"    "$xray_enabled" \
-            "Sing-box"  "$sing_box_installed"        "$sing_box_running"        "$sing_box_enabled"
-    svc_row "Mihomo" "$mihomo_installed"  "$mihomo_running"  "$mihomo_enabled" \
-            "Hysteria2" "$hysteria_server_installed" "$hysteria_server_running" "$hysteria_server_enabled"
     box_bot
 
     box_top "功能菜单"
-    menu3 "00" "安装基础依赖" "$CYAN"    "01" "Kejilion工具箱" "$CYAN"    "02" "Hysteria2" "$GREEN"
-    menu3 "03" "warp"         "$GREEN"   "04" "Sing-box"       "$GREEN"   "05" "xray"      "$GREEN"
-    menu3 "06" "mihomo"       "$GREEN"   "07" "申请 SSL 证书"  "$MAGENTA" "08" "Web 服务"  "$MAGENTA"
-    menu3 "09" "防火墙"        "$MAGENTA" "10" "安装 Argo"     "$CYAN"    "11" "安装 Gost" "$CYAN"
-    menu3 "12" "VPS 实用工具"  "$CYAN"    "88" "更新面板"       "$YELLOW"  "99" "节点信息"  "$YELLOW"
-    echo -e "  ${YELLOW}0 ${PLAIN} ${RED}◆退出面板${PLAIN}"
+    echo
+    menu3 "00" "更新脚本"       "$YELLOW"
+    box_mid
+    menu3 "01" "安装基础依赖"   "$CYAN"    "02" "内核管理"       "$GREEN"   "03" "Kejilion工具箱" "$CYAN"
+    menu3 "04" "warp"           "$GREEN"   "05" "申请 SSL 证书"  "$MAGENTA" "06" "Web 服务"      "$MAGENTA"
+    menu3 "07" "防火墙"          "$MAGENTA" "08" "安装 Argo"     "$CYAN"    "09" "安装 Gost"    "$CYAN"
+    menu3 "10" "VPS 实用工具"   "$CYAN"    "99" "节点信息"       "$YELLOW"
+    box_mid
+    echo -e "  ${YELLOW}[0]${PLAIN} ${RED}退出面板${PLAIN}"
     box_bot
 
     echo
@@ -532,18 +542,18 @@ main_menu() {
         choice="${choice//[[:space:]]/}"
 
         case "$choice" in
-            00) initialize_dependencies; pause_return; need_refresh=1 ;;
-            1|01)  install_toolbox;  pause_return; need_refresh=1 ;;
-            2|02)  install_hysteria; pause_return; need_refresh=1 ;;
-            3|03)  install_warp;     need_refresh=1 ;;
-            4|04)  install_singbox;  need_refresh=1 ;;
-            5|05)  install_xray;     need_refresh=1 ;;
-            6|06)  run_remote "https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/ts.sh"; pause_return; need_refresh=1 ;;
-            7|07)  run_remote "https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/ssl.sh"; pause_return; need_refresh=1 ;;
-            8|08)  web_service_menu; need_refresh=1 ;;
-            9|09)  fail_menu;        need_refresh=1 ;;
-            10) select_argo_script; need_refresh=1 ;;
-            11) install_gost;     pause_return; need_refresh=1 ;;
+            00) update_panel ;;
+            1|01)  initialize_dependencies; pause_return; need_refresh=1 ;;
+            2|02)  run_catmiproxy;      pause_return; need_refresh=1 ;;
+            3|03)  install_toolbox;  pause_return; need_refresh=1 ;;
+            4|04)  install_warp;     need_refresh=1 ;;
+            5|05)  run_remote "https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/ssl.sh"; pause_return; need_refresh=1 ;;
+            6|06)  web_service_menu; need_refresh=1 ;;
+            7|07)  fail_menu;        need_refresh=1 ;;
+            8|08)  select_argo_script; need_refresh=1 ;;
+            9|09)  install_gost;     pause_return; need_refresh=1 ;;
+            10) vps_tools_menu;   need_refresh=1 ;;
+            11) vps_tools_menu;   need_refresh=1 ;;
             12) vps_tools_menu;   need_refresh=1 ;;
             88) update_panel ;;
             99) catmi-xx ;;
@@ -573,6 +583,20 @@ run_remote() {
     return $rc
 }
 
+# ===========================
+#   调用 4 内核独立面板 catmiproxy
+#   参数: mihomo | xray | singbox | hysteria (可空=总菜单)
+# ===========================
+run_catmiproxy() {
+    local arg="${1:-}"
+    print_info "正在获取 catmiproxy 内核面板..."
+    if [[ -n "$arg" ]]; then
+        bash <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/catmiproxy.sh") "$arg"
+    else
+        bash <(curl -fsSL "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/catmiproxy.sh")
+    fi
+}
+
 # 运行一条系统命令; 若被 Ctrl+C 中断(退出码 130), 立即中止整个操作
 # 用法: step 命令 参数... || return 130
 step() {
@@ -594,7 +618,6 @@ initialize_dependencies() {
 
 # 安装工具函数
 install_toolbox()   { run_remote "https://raw.githubusercontent.com/kejilion/sh/main/kejilion.sh"; }
-install_hysteria()  { run_remote "https://github.com/mi1314cat/hysteria2-core/raw/refs/heads/main/hy2-panel.sh"; }
 install_gost()      { run_remote "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/gost/Xgost_panel.sh"; }
 
 # ===========================
@@ -825,34 +848,7 @@ install_warp() {
 # ===========================
 #   安装 Sing-box(循环版, 0 返回主菜单)
 # ===========================
-install_singbox() {
-    local choice rc
-    while true; do
-        clear
-        box_top "安装 Sing-box"
-        echo -e "  ${YELLOW}1${PLAIN}) 使用 catmi 2"
-        echo -e "  ${YELLOW}2${PLAIN}) 使用 catmising-box 6"
-        echo -e "  ${YELLOW}3${PLAIN}) 使用 catmising-box 4"
-        echo -e "  ${YELLOW}4${PLAIN}) 使用 sb (fscarmen)"
-        echo -e "  ${YELLOW}0${PLAIN}) 返回主菜单"
-        box_bot
-        echo
-        read_choice "  请输入选项 [0-4]: " choice
-        rc=$?
-        if (( rc > 128 )); then continue; fi
-        if (( rc != 0 )); then return 0; fi
-        choice="${choice//[[:space:]]/}"
 
-        case $choice in
-            0) return 0 ;;
-            1) run_remote "https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/install.sh"; pause_return ;;
-            2) run_remote "https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/singbox.sh"; pause_return ;;
-            3) run_remote "https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/nsb.sh"; pause_return ;;
-            4) run_remote "https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh"; pause_return ;;
-            *) invalid_input ;;
-        esac
-    done
-}
 
 # 查看日志(Ctrl+C 停止后自动回到菜单, 不会退出面板)
 view_log() {
@@ -868,65 +864,7 @@ view_log() {
 # ===========================
 #   Xray 管理(循环版, 0 返回主菜单)
 # ===========================
-install_xray() {
-    local vchoice rc log_choice
-    while true; do
-        if systemctl is-active --quiet xrayls 2>/dev/null; then
-            xray_status_text="${GREEN}运行中${PLAIN}"
-        else
-            xray_status_text="${RED}未运行${PLAIN}"
-        fi
-        clear
-        box_top "Xray 管理"
-        echo -e "  服务状态: $xray_status_text"
-        box_mid
-        echo -e "  ${YELLOW}1${PLAIN}) 安装 / 重装 xray"
-        echo -e "  ${YELLOW}2${PLAIN}) 更新 xray-core"
-        echo -e "  ${YELLOW}3${PLAIN}) 重启 xray 服务"
-        echo -e "  ${YELLOW}4${PLAIN}) 查看日志"
-        echo -e "  ${YELLOW}0${PLAIN}) 返回主菜单"
-        box_bot
-        echo
-        read_choice "  请选择 [0-4]: " vchoice
-        rc=$?
-        if (( rc > 128 )); then continue; fi
-        if (( rc != 0 )); then return 0; fi
-        vchoice="${vchoice//[[:space:]]/}"
 
-        case $vchoice in
-            0) return 0 ;;
-            1)
-                run_remote "https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/xary-core/raw/refs/heads/main/xray-panel.sh"
-                pause_return
-                ;;
-            2)
-                run_remote "https://github.com/mi1314cat/xary-core/raw/refs/heads/main/unused/xray_install.sh"
-                systemctl daemon-reload 2>/dev/null
-                systemctl enable xrayls 2>/dev/null
-                systemctl restart xrayls 2>/dev/null
-                print_info "xray-core 更新流程执行完毕"
-                pause_return
-                ;;
-            3)
-                systemctl restart xrayls 2>/dev/null
-                systemctl status xrayls --no-pager 2>/dev/null || true
-                pause_return
-                ;;
-            4)
-                echo -e "  ${YELLOW}1${PLAIN}) access.log    ${YELLOW}2${PLAIN}) error.log"
-                log_choice=""
-                echo -ne "${GREEN}  请选择日志: ${PLAIN}"
-                read -r log_choice || true
-                case "$log_choice" in
-                    1) view_log "/root/catmi/xray/log/access.log" ;;
-                    2) view_log "/root/catmi/xray/log/error.log" ;;
-                    *) invalid_input ;;
-                esac
-                ;;
-            *) invalid_input ;;
-        esac
-    done
-}
 
 # ===========================
 #   防火墙 / 安全工具(循环版, 0 返回主菜单)
