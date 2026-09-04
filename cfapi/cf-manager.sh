@@ -28,6 +28,52 @@ CF_CACHE_DIR="$CF_BASE_DIR/cache"
 CF_LOG_DIR="$CF_BASE_DIR/logs"
 CF_CERTS_DIR="$CF_BASE_DIR/certs"
 
+# =============================================================
+# 自举 (Bootstrap): 首次安装只有单文件时, 自动从 GitHub 拉取 modules/
+# 触发条件: modules/common.sh 不存在 (且未显式禁用 CF_SKIP_BOOTSTRAP=1)
+# 来源: https://github.com/mi1314cat/One-click-script/tree/main/cfapi
+# 策略: 优先 tarball (单请求, 快), 失败回退逐文件 raw
+# =============================================================
+CF_BOOTSTRAP_REPO="${CF_BOOTSTRAP_REPO:-mi1314cat/One-click-script}"
+CF_BOOTSTRAP_BRANCH="${CF_BOOTSTRAP_BRANCH:-main}"
+if [[ "${CF_SKIP_BOOTSTRAP:-0}" != "1" && ! -f "$CF_MODULES_DIR/common.sh" ]]; then
+    echo "[cf-manager] 检测到缺少 modules/ (首次安装?), 正在自动下载..." >&2
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "[cf-manager] 错误: 需要 curl 才能自动下载 modules/" >&2
+        echo "[cf-manager] 请手动获取完整 cfapi/ 目录 (含 modules/) 或安装 curl 后重试" >&2
+        exit 1
+    fi
+    mkdir -p "$CF_MODULES_DIR"
+    dl_ok=0
+    # 方案1: tarball 一次性拉取整个 cfapi 目录
+    if command -v tar >/dev/null 2>&1; then
+        if curl -fsSL --max-time 60 -o /tmp/cfapi-bootstrap.tgz \
+            "https://codeload.github.com/$CF_BOOTSTRAP_REPO/tar.gz/refs/heads/$CF_BOOTSTRAP_BRANCH" 2>/dev/null \
+            && tar -xzf /tmp/cfapi-bootstrap.tgz -C /tmp \
+            && cp -f /tmp/One-click-script-$CF_BOOTSTRAP_BRANCH/cfapi/modules/*.sh "$CF_MODULES_DIR/" 2>/dev/null; then
+            dl_ok=1
+        fi
+        rm -f /tmp/cfapi-bootstrap.tgz
+        rm -rf "/tmp/One-click-script-$CF_BOOTSTRAP_BRANCH" 2>/dev/null
+    fi
+    # 方案2: 逐文件 raw (tarball 不可用时)
+    if [[ "$dl_ok" != "1" ]]; then
+        for m in common context account zone dns ech ssl origin cert; do
+            curl -fsSL --max-time 20 -o "$CF_MODULES_DIR/$m.sh" \
+                "https://raw.githubusercontent.com/$CF_BOOTSTRAP_REPO/$CF_BOOTSTRAP_BRANCH/cfapi/modules/$m.sh" \
+                || { echo "[cf-manager] 下载失败: modules/$m.sh" >&2; dl_ok=0; break; }
+            dl_ok=1
+        done
+    fi
+    if [[ "$dl_ok" = "1" && -f "$CF_MODULES_DIR/common.sh" ]]; then
+        chmod 644 "$CF_MODULES_DIR"/*.sh 2>/dev/null
+        echo "[cf-manager] 模块自举完成: $CF_MODULES_DIR" >&2
+    else
+        echo "[cf-manager] 模块下载不完整, 请检查网络或手动放置 modules/ 目录" >&2
+        exit 1
+    fi
+fi
+
 # 加载公共库 + 模块
 source "$CF_MODULES_DIR/common.sh" || { echo "缺少 modules/common.sh"; exit 1; }
 for m in context account zone dns ech ssl origin cert; do
@@ -200,8 +246,17 @@ panel_loop() {
         read -r c
         case "$c" in
             1)
-                echo -e "  1)列表 2)添加 3)删除 4)编辑 5)测试 6)设默认"
-                printf "选择: "; read -r a
+                echo
+                echo -e "  ${CYAN}── 账户管理 ──────────────────────${PLAIN}"
+                echo -e "  ${YELLOW}[1]${PLAIN} 查看账号列表"
+                echo -e "  ${YELLOW}[2]${PLAIN} 添加新账号"
+                echo -e "  ${YELLOW}[3]${PLAIN} 删除账号"
+                echo -e "  ${YELLOW}[4]${PLAIN} 编辑账号"
+                echo -e "  ${YELLOW}[5]${PLAIN} 测试凭据"
+                echo -e "  ${YELLOW}[6]${PLAIN} 设为默认账号"
+                echo -e "  ${YELLOW}[0]${PLAIN} 返回"
+                echo
+                printf "  选择: "; read -r a
                 case "$a" in
                     1) cmd_account_list ;;
                     2) cmd_account_add ;;
@@ -209,34 +264,63 @@ panel_loop() {
                     4) printf "账号名: "; read -r n; cmd_account_edit "$n" ;;
                     5) printf "账号名(空=默认): "; read -r n; cmd_account_test "$n" ;;
                     6) printf "账号名: "; read -r n; cmd_account_default "$n" ;;
+                    0) continue ;;
                 esac ;;
             2)
-                echo -e "  1)列出全部 2)查询单域名"
-                printf "选择: "; read -r a
+                echo
+                echo -e "  ${CYAN}── 域名 / Zone ────────────────────${PLAIN}"
+                echo -e "  ${YELLOW}[1]${PLAIN} 列出全部域名"
+                echo -e "  ${YELLOW}[2]${PLAIN} 查询单个域名"
+                echo -e "  ${YELLOW}[0]${PLAIN} 返回"
+                echo
+                printf "  选择: "; read -r a
                 case "$a" in
                     1) cmd_zone_list ;;
                     2) printf "域名: "; read -r d; cmd_zone_info "$d" ;;
+                    0) continue ;;
                 esac ;;
             3)
-                echo -e "  1)DNS状态 2)ensure(建/改) 3)删除"
-                printf "选择: "; read -r a
+                echo
+                echo -e "  ${CYAN}── DNS 管理 ───────────────────────${PLAIN}"
+                echo -e "  ${YELLOW}[1]${PLAIN} 查看 DNS 状态"
+                echo -e "  ${YELLOW}[2]${PLAIN} 创建/修改记录 (ensure)"
+                echo -e "  ${YELLOW}[3]${PLAIN} 删除记录"
+                echo -e "  ${YELLOW}[0]${PLAIN} 返回"
+                echo
+                printf "  选择: "; read -r a
                 case "$a" in
                     1) printf "域名: "; read -r d; cmd_dns_status "$d" ;;
                     2) printf "域名: "; read -r d; printf "IP/值: "; read -r ip; printf "代理(on/off/auto): "; read -r p; cmd_dns_ensure "$d" "$ip" --proxy "${p:-auto}" ;;
                     3) printf "域名: "; read -r d; cmd_dns_delete "$d" --force ;;
+                    0) continue ;;
                 esac ;;
             4)
-                echo -e "  1)开启 2)关闭 3)状态"
-                printf "选择: "; read -r a
+                echo
+                echo -e "  ${CYAN}── ECH 管理 ───────────────────────${PLAIN}"
+                echo -e "  ${YELLOW}[1]${PLAIN} 开启 ECH"
+                echo -e "  ${YELLOW}[2]${PLAIN} 关闭 ECH"
+                echo -e "  ${YELLOW}[3]${PLAIN} 查看 ECH 状态 (中文显示)"
+                echo -e "  ${YELLOW}[0]${PLAIN} 返回"
+                echo
+                printf "  选择: "; read -r a
                 printf "域名: "; read -r d
                 case "$a" in
                     1) cmd_ech_enable "$d" ;;
                     2) cmd_ech_disable "$d" ;;
                     3) cmd_ech_status "$d" ;;
+                    0) continue ;;
                 esac ;;
             5)
-                echo -e "  1)状态 2)模式 3)TLS1.3 4)AlwaysHTTPS 5)HSTS"
-                printf "选择: "; read -r a
+                echo
+                echo -e "  ${CYAN}── SSL/TLS 管理 ───────────────────${PLAIN}"
+                echo -e "  ${YELLOW}[1]${PLAIN} 查看 SSL 状态"
+                echo -e "  ${YELLOW}[2]${PLAIN} 设置模式 (full/strict/flexible/off)"
+                echo -e "  ${YELLOW}[3]${PLAIN} TLS 1.3 (on/off)"
+                echo -e "  ${YELLOW}[4]${PLAIN} Always HTTPS (on/off)"
+                echo -e "  ${YELLOW}[5]${PLAIN} HSTS (on/off)"
+                echo -e "  ${YELLOW}[0]${PLAIN} 返回"
+                echo
+                printf "  选择: "; read -r a
                 printf "域名: "; read -r d
                 case "$a" in
                     1) cmd_ssl_status "$d" ;;
@@ -244,33 +328,57 @@ panel_loop() {
                     3) printf "on/off: "; read -r v; cmd_ssl_tls13 "$d" "$v" ;;
                     4) printf "on/off: "; read -r v; cmd_ssl_always_https "$d" "$v" ;;
                     5) printf "on/off: "; read -r v; cmd_ssl_hsts "$d" "$v" ;;
+                    0) continue ;;
                 esac ;;
             6)
-                echo -e "  1)列表 2)添加端口 3)删除端口"
-                printf "选择: "; read -r a
+                echo
+                echo -e "  ${CYAN}── 回源端口 (Origin Rules) ───────${PLAIN}"
+                echo -e "  ${YELLOW}[1]${PLAIN} 查看回源端口列表"
+                echo -e "  ${YELLOW}[2]${PLAIN} 添加回源端口"
+                echo -e "  ${YELLOW}[3]${PLAIN} 删除回源端口"
+                echo -e "  ${YELLOW}[0]${PLAIN} 返回"
+                echo
+                printf "  选择: "; read -r a
                 printf "域名: "; read -r d
                 case "$a" in
                     1) cmd_origin_port --list "$d" ;;
                     2) printf "端口: "; read -r p; printf "路径(/xxx, 可空): "; read -r pa; cmd_origin_port "$d" "$p" ${pa:+--path "$pa"} ;;
                     3) printf "端口: "; read -r p; cmd_origin_port "$d" "$p" --delete ;;
+                    0) continue ;;
                 esac ;;
             7)
-                echo -e "  需要 ORIGIN_CA_TOKEN 环境变量"
-                echo -e "  1)签发 2)状态 3)续期"
-                printf "选择: "; read -r a
+                echo
+                echo -e "  ${CYAN}── 证书 (Origin CA) ───────────────${PLAIN}"
+                if [[ -z "${ORIGIN_CA_TOKEN:-}" ]]; then
+                    echo -e "  ${YELLOW}!${PLAIN} 需要 ORIGIN_CA_TOKEN 环境变量 (未设置, 证书操作可能失败)"
+                fi
+                echo -e "  ${YELLOW}[1]${PLAIN} 签发证书"
+                echo -e "  ${YELLOW}[2]${PLAIN} 查看证书状态"
+                echo -e "  ${YELLOW}[3]${PLAIN} 续期证书"
+                echo -e "  ${YELLOW}[0]${PLAIN} 返回"
+                echo
+                printf "  选择: "; read -r a
                 printf "域名: "; read -r d
                 case "$a" in
                     1) cmd_cert_issue "$d" ;;
                     2) cmd_cert_status "$d" ;;
                     3) cmd_cert_renew "$d" ;;
+                    0) continue ;;
                 esac ;;
             8)
-                echo -e "  1)清缓存 2)配置 3)日志"
-                printf "选择: "; read -r a
+                echo
+                echo -e "  ${CYAN}── 缓存 / 配置 / 日志 ────────────${PLAIN}"
+                echo -e "  ${YELLOW}[1]${PLAIN} 清空缓存"
+                echo -e "  ${YELLOW}[2]${PLAIN} 查看配置"
+                echo -e "  ${YELLOW}[3]${PLAIN} 查看日志"
+                echo -e "  ${YELLOW}[0]${PLAIN} 返回"
+                echo
+                printf "  选择: "; read -r a
                 case "$a" in
                     1) cf_cache_clear ;;
                     2) cmd_account_list ;;
                     3) tail -n 20 "$CF_LOG_FILE" 2>/dev/null || echo "(无日志)" ;;
+                    0) continue ;;
                 esac ;;
             0) return 0 ;;
         esac
