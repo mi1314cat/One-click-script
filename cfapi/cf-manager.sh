@@ -29,6 +29,44 @@ CF_LOG_DIR="$CF_BASE_DIR/logs"
 CF_CERTS_DIR="$CF_BASE_DIR/certs"
 
 # =============================================================
+# 自归位 (Auto-Home): 无论从 URL/临时文件/任意路径执行,
+# 都自动同步到标准目录后运行, 保证所有调用方 (VLESS.sh/catmiup等)
+# 通过硬编码路径 /root/catmi/cloudflare/cf-manager.sh 永远拿到最新版.
+# 关闭: CF_SKIP_AUTO_HOME=1  (调试/特殊场景)
+# =============================================================
+AUTO_HOME_REPO="${CF_BOOTSTRAP_REPO:-mi1314cat/One-click-script}"
+AUTO_HOME_BRANCH="${CF_BOOTSTRAP_BRANCH:-main}"
+if [[ "${CF_SKIP_AUTO_HOME:-0}" != "1" ]]; then
+    CF_HOME_DIR="${CF_HOME_DIR:-/root/catmi/cloudflare}"
+    CF_HOME_MAIN="$CF_HOME_DIR/cf-manager.sh"
+    SCRIPT_SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+    if [[ "$SCRIPT_SELF" != "$CF_HOME_MAIN" ]]; then
+        # 不在标准目录: 仅当标准目录缺文件时才同步 (已存在则直接用, 避免每次网络请求)
+        _home_need=0
+        [[ ! -f "$CF_HOME_MAIN" ]] && _home_need=1
+        [[ ! -f "$CF_HOME_DIR/modules/common.sh" ]] && _home_need=1
+        if command -v curl >/dev/null 2>&1 && mkdir -p "$CF_HOME_DIR" && [[ "$_home_need" == "1" ]]; then
+            if curl -fsSL --max-time 25 -o "$CF_HOME_MAIN.tmp" \
+                "https://raw.githubusercontent.com/$AUTO_HOME_REPO/$AUTO_HOME_BRANCH/cfapi/cf-manager.sh" 2>/dev/null; then
+                mv -f "$CF_HOME_MAIN.tmp" "$CF_HOME_MAIN"
+                chmod 755 "$CF_HOME_MAIN" 2>/dev/null
+            fi
+            if [[ ! -f "$CF_HOME_DIR/modules/common.sh" ]]; then
+                mkdir -p "$CF_HOME_DIR/modules"
+                for _m in common context account zone dns ech ssl origin cert; do
+                    curl -fsSL --max-time 20 \
+                        "https://raw.githubusercontent.com/$AUTO_HOME_REPO/$AUTO_HOME_BRANCH/cfapi/modules/$_m.sh" \
+                        -o "$CF_HOME_DIR/modules/$_m.sh" 2>/dev/null || true
+                done
+            fi
+        fi
+        if [[ -f "$CF_HOME_MAIN" ]]; then
+            exec bash "$CF_HOME_MAIN" "$@"
+        fi
+    fi
+fi
+
+# =============================================================
 # 自举 (Bootstrap): 首次安装只有单文件时, 自动从 GitHub 拉取 modules/
 # 触发条件: modules/common.sh 不存在 (且未显式禁用 CF_SKIP_BOOTSTRAP=1)
 # 来源: https://github.com/mi1314cat/One-click-script/tree/main/cfapi
