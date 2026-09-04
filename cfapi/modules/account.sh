@@ -5,30 +5,54 @@
 # =============================================================
 
 # 校验凭据有效性 + 自动获取 Account ID
+# 防呆: $4 传 "auto" 时自动回退尝试 (先 Bearer=API Token, 失败再 X-Auth-Key=Global Key)
+# 输出: "acct_id" 或 "acct_id|TYPEGLOB" (auto 模式且是 Global Key 时标注)
 account_verify() {
-    # $1=name $2=email $3=token $4=is_global(0/1) $5=out_var_name(可选)
+    # $1=name $2=email $3=token $4=is_global(0/1 或 auto)
     local name="$1" email="$2" tok="$3" isg="$4"
-    local headers
-    if [[ "$isg" == "1" ]]; then
-        headers=(-H "X-Auth-Email: $email" -H "X-Auth-Key: $tok")
+    local acct_id=""
+    local try_global_first=false
+    [[ "$isg" == "1" ]] && try_global_first=true
+    [[ "$isg" == "auto" ]] && try_global_first=true   # auto 先试 Global(错误类型返回快), 失败回落 Bearer
+
+    local order
+    if $try_global_first; then
+        order="g b"
     else
-        headers=(-H "Authorization: Bearer $tok")
+        order="b g"
     fi
-    local tmp code acct_id
-    tmp=$(mktemp /tmp/cfav.XXXXXX)
-    code=$(curl -sS -4 -o "$tmp" -w '%{http_code}' -X GET \
-        "${headers[@]}" --connect-timeout 8 -m 20 "$CF_API/accounts?per_page=5" 2>/dev/null)
-    if [[ "$code" == "200" ]]; then
-        acct_id=$(python3 -c "
+
+    local m
+    for m in $order; do
+        local headers
+        if [[ "$m" == "g" ]]; then
+            [[ -z "$email" ]] && continue
+            headers=(-H "X-Auth-Email: $email" -H "X-Auth-Key: $tok")
+        else
+            headers=(-H "Authorization: Bearer $tok")
+        fi
+        local tmp code
+        tmp=$(mktemp /tmp/cfav.XXXXXX)
+        code=$(curl -sS -4 -o "$tmp" -w '%{http_code}' -X GET \
+            "${headers[@]}" --connect-timeout 8 -m 20 "$CF_API/accounts?per_page=5" 2>/dev/null)
+        if [[ "$code" == "200" ]]; then
+            acct_id=$(python3 -c "
 import json
 d=json.load(open('$tmp'))
 print((d.get('result') or [{}])[0].get('id','') if d.get('success') else '')
 " 2>/dev/null)
+            rm -f "$tmp"
+            if [[ -n "$acct_id" ]]; then
+                if [[ "$m" == "g" && "$isg" == "auto" ]]; then
+                    echo "$acct_id|TYPEGLOB"
+                else
+                    echo "$acct_id"
+                fi
+                return 0
+            fi
+        fi
         rm -f "$tmp"
-        [[ -n "$acct_id" ]] && { echo "$acct_id"; return 0; }
-        return 1
-    fi
-    rm -f "$tmp"
+    done
     return 1
 }
 
@@ -91,25 +115,43 @@ cmd_account_add() {
         printf "Cloudflare 登录邮箱: " >&2; read -r email
     fi
     if [[ -z "$token" ]]; then
-        printf "API Token 或 Global API Key (key:开头表示 Global Key): " >&2; read -r token
+        print_warn "输入 Token: 若为 Global API Key 可加 key: 前缀, 不加也会自动识别"
+        printf "API Token 或 Global API Key: " >&2; read -r token
     fi
     name=$(echo "$name" | tr -cd '[:alnum:]_-')
     [[ -z "$name" ]] && { print_error "账号名不能为空"; return 1; }
     [[ -z "$token" ]] && { print_error "Token 不能为空"; return 1; }
 
-    # 自动识别 token 类型
+    # 自动识别 token 类型 (防呆: 未带 key: 前缀也自动尝试两种方式)
     local isg=0 tok_plain="$token"
-    [[ "$tok_plain" == key:* ]] && { isg=1; tok_plain="${tok_plain#key:}"; }
+    local detected_glob=false
+    if [[ "$tok_plain" == key:* ]]; then
+        isg=1; tok_plain="${tok_plain#key:}"
+    else
+        # 先按 Bearer 试, 失败自动回退 Global Key (auto)
+        isg="auto"
+    fi
 
     # 验证 + 自动获取 account_id
     print_info "验证凭据..."
     local acct_id
-    acct_id=$(account_verify "$name" "$email" "$tok_plain" "$isg")
-    if [[ -z "$acct_id" ]]; then
+    local vout
+    vout=$(account_verify "$name" "$email" "$tok_plain" "$isg")
+    if [[ -z "$vout" ]]; then
         print_error "凭据验证失败 (Token 无效或无账号访问权限)"
+        print_warn "提示: Cloudflare Token 需在 dash.cloudflare.com 创建; 若用的是 Global API Key 请确认邮箱正确"
         return 1
     fi
-    print_ok "凭据有效, Account ID 已获取: $acct_id"
+    # auto 模式识别出 Global Key → 补回 key: 前缀保存
+    if [[ "$vout" == *"|TYPEGLOB" ]]; then
+        acct_id="${vout%|TYPEGLOB}"
+        detected_glob=true
+        token="key:$tok_plain"
+        print_ok "凭据有效, 已自动识别为 Global API Key (自动加 key: 前缀保存)"
+    else
+        acct_id="$vout"
+        print_ok "凭据有效, Account ID 已获取: $acct_id"
+    fi
 
     if [[ "$save" == "n" ]]; then
         print_warn "未保存 Token (仅本次运行), 请用环境变量 CF_API_TOKEN 传递"
