@@ -20,7 +20,7 @@ _cmd_ech_common() {
         if [[ "$json" == "true" ]]; then
             printf '{"ok":true,"domain":"%s","ech":"%s"}\n' "$CF_DOMAIN" "$cur"
         else
-            echo -e "  ECH: $([[ "$cur" == "on" ]] && echo -e "${GREEN}ENABLED${PLAIN}" || echo -e "${YELLOW}DISABLED${PLAIN}")"
+            echo -e "  ECH: $([[ "$cur" == "on" ]] && echo -e "${GREEN}✅ 已开启 (ENABLED)${PLAIN}" || echo -e "${YELLOW}❌ 已关闭 (DISABLED)${PLAIN}")"
         fi
         return 0
     fi
@@ -34,7 +34,7 @@ _cmd_ech_common() {
         if [[ "$json" == "true" ]]; then
             printf '{"ok":true,"action":"already-%sd","domain":"%s","ech":"%s"}\n' "$action" "$CF_DOMAIN" "$cur"
         else
-            print_ok "ECH already $([ "$action" == "enable" ] && echo enabled || echo disabled)"
+            print_ok "ECH 已经是$([ "$action" == "enable" ] && echo 开启 || echo 关闭)状态, 无需操作"
         fi
         return 0
     fi

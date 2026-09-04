@@ -64,7 +64,11 @@ cmd_account_list() {
         echo -e "  ${YELLOW}${n}${PLAIN}. ${BOLD}${name}${PLAIN}${tag}"
         echo -e "     Email: ${email}"
         echo -e "     Token: $(mask_token "$tok")"
-        echo -e "     Account ID: ${acctid:-}(未获取)"
+        if [[ -n "${acctid:-}" ]]; then
+            echo -e "     Account ID: ${acctid}"
+        else
+            echo -e "     Account ID: (未获取)"
+        fi
     done < <(account_load_all)
 }
 
