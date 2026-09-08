@@ -881,6 +881,11 @@ dns_release() {
         else
             warn "state 记录的备份不存在, resolv.conf 保持现状 (手动检查 $RESOLV)"
         fi
+        # 兜底校验: 若还原后仍指向本地回环且 dnsmasq 已停 → 整机 DNS 死, 写公共 DNS 救场
+        # (resolvconf 服务会在还原后重写 resolv.conf, 已多次实测复现)
+        if ! systemctl is-active dnsmasq >/dev/null 2>&1 && grep -q "^nameserver 127" "$RESOLV" 2>/dev/null; then
+            printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > "$RESOLV" 2>/dev/null                 && ok "resolv.conf 兜底为公共 DNS (检测到本地 DNS 已失效)"
+        fi
         # 恢复准确性校验
         if [[ -n "$orig" && "$orig" != "unknown-premanaged" ]]; then
             now=$(sha256sum "$RESOLV" 2>/dev/null | awk "{print $1}")
@@ -979,15 +984,9 @@ fw_up() { # fw_up <iface>
     #   (Xray sockopt.mark / Mihomo routing-mark / connmark restore / 任何 SO_MARK socket)
     iptables  -t mangle -N CATMI3-OUT 2>/dev/null; iptables  -t mangle -F CATMI3-OUT
     ip6tables -t mangle -N CATMI3-OUT 2>/dev/null; ip6tables -t mangle -F CATMI3-OUT
-    # 代理服务进程出站 native (cgroup v2 匹配, 链最前): 节点转发流量不经 WARP。
-    # 用户实测铁证: 服务暂停(native 出站)时全部节点可用, WARP 出站时仅 xray 链式节点可用。
-    # 只排除本机代理服务进程, 系统/脚本自身的 WARP 出站不受影响。
-    local svc3
-    for svc3 in hysteria-server.service hysteria-relayclient.service mihomo.service xrayls.service sing-box.service; do
-        [[ -d /sys/fs/cgroup/system.slice/$svc3 ]] || continue
-        iptables  -t mangle -A CATMI3-OUT -m cgroup --path "$svc3" -j RETURN 2>/dev/null
-        ip6tables -t mangle -A CATMI3-OUT -m cgroup --path "$svc3" -j RETURN 2>/dev/null
-    done
+    # 节点服务(hy2服务端)出站按设计走 WARP — 用户确认的根本目标(2026-09-08 子代理回归确认)。
+    # (历史 native 方案的 owner/cgroup 排除块已删除: cgroup --path 需 system.slice/ 前缀否则
+    #  Invalid argument 且被静默吞掉; 且其"节点不经WARP"语义与最终需求相反)
     iptables  -t mangle -A CATMI3-OUT -m mark ! --mark 0 -j RETURN
     ip6tables -t mangle -A CATMI3-OUT -m mark ! --mark 0 -j RETURN
     # connmark 方向记忆 (RN 事故教训 2026-09-07, 两次实测校准):
@@ -1181,7 +1180,7 @@ fw_down_silent() {
         if [[ "$f" == "6" ]]; then cmd="ip -6"; else cmd="ip -4"; fi
         while read -r p; do
             [[ -n "$p" ]] && $cmd rule del prio "$p" 2>/dev/null
-        done < <($cmd rule show | grep -E "fwmark $fd_mk (table|lookup) $TABLE_NAME|fwmark 0xc350 lookup (main|$TABLE_NAME)|fwmark 0x$IMARK (table|lookup) main|oif $IFACE (table|lookup) $TABLE_NAME" | grep -oE '^[0-9]+')
+        done < <($cmd rule show | grep -E "fwmark $fd_mk (table|lookup) $TABLE_NAME|fwmark 0xc350 lookup (main|$TABLE_NAME)|fwmark 0x$IMARK(/[0-9a-fxA-F]+)? (table|lookup) main|oif $IFACE (table|lookup) $TABLE_NAME" | grep -oE '^[0-9]+')
         if [[ "$f" == "6" ]]; then
             # 原生 v6 上游地址段的入站保护规则 (from 段 → main) 也一并清理
             local fd_up fd_a fd_seg
@@ -2295,6 +2294,7 @@ uninstall_module() {
 selftest() {
     local pass=0 failn=0
     _t() { if eval "$2"; then ((pass++)); else ((failn++)); echo "FAIL: $1" >&2; fi; }
+    FAIL() { ((failn++)); echo "FAIL: $1" >&2; }  # 供 'cmd && _t x || FAIL y' 形态, 修复失败被吞假绿
 
     # 域名与回显服务
     _t "valid domain" 'valid_domain "google.com"'
@@ -2342,6 +2342,8 @@ selftest() {
     local _gsave="$_gt"
     _gt=0
     rm -f "$TDIR/gd.conf" "$TDIR/gd.link"
+    # gen dns 断言需要确定性规则状态 (前面的 rule_* 测试改写过 google/youtube)
+    printf 'google.com|warp|1|selftest\nbaidu.com|native|1|selftest\n' > "$RULES"
     DEFAULT_OUTBOUND_V4="native" DEFAULT_OUTBOUND_V6="native" UPSTREAMS="9.9.9.9" \
         GEN_DNS_REAL="$TDIR/gd.conf" GEN_DNS_LINK="$TDIR/gd.link" gen_dnsmasq_conf >/dev/null 2>&1
     grep -q "ipset=/google.com/cw3-warp4,cw3-warp6" "$TDIR/gd.conf" 2>/dev/null \
