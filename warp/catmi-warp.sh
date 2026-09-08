@@ -43,6 +43,8 @@ KA_TS="$STATE/.ka-ts"
 ACCOUNT_JSON="$STATE/account.json"
 
 MARK="3"                       # fwmark 0x3 (与 V2 的 0x2 正交; main.conf 可覆盖)
+IMARK="4"                      # fwmark 0x4 = 入站回程标记: 入站连接(he/eth0)的回包走 main,
+                               # 源=入站接口地址 — 防止 UDP 通配 socket 回包被 C 规则抓进 WARP 源漂移
 TABLE_NAME="cw3"               # 表名 (253) — 与 V2 的 catmi-warp(250) 正交
 TABLE_ID="253"
 UPSTREAMS="1.1.1.1 8.8.8.8"
@@ -188,7 +190,7 @@ warp_source() { # 识别 WARP 来源 (§4: 上层接口统一)
             else
                 echo "fscarmen wg-quick (内核 WG)"
             fi ;;
-        WARP)      echo "fscarmen warp-go (用户态)" ;;
+        WARP)      echo "fscarmen warp-go (用户态回退)" ;;
         CloudflareWARP) echo "warp-cli (CloudflareWARP)" ;;
         wgcf)      echo "wgcf (内核 WG)" ;;
         *)         echo "未知" ;;
@@ -511,7 +513,7 @@ install_warp() {
         log_op "install" "OK fresh register"
         return 0
     fi
-    err "安装失败 (诊断见上) — 备选: fscarmen 用户态: bash <(curl -sSL https://gitlab.com/fscarmen/warp/-/raw/main/warp-go.sh) n"
+    err "安装失败 (诊断见上) — 备选 (用户态回退, v6 受限): fscarmen warp-go: bash <(curl -sSL https://gitlab.com/fscarmen/warp/-/raw/main/warp-go.sh) n"
     log_op "install" "FAILED"
     return 1
 }
@@ -522,18 +524,18 @@ start_warp() {
         return 0
     fi
     # 来源感知: 只启动与现有凭据对应的【一个】服务 (绝不再逐一尝试多个实现)
-    if [[ -s /opt/warp-go/warp.conf || -s /opt/warp-go/wgcf.conf || -f /lib/systemd/system/warp-go.service ]]; then
-        systemctl start warp-go >/dev/null 2>&1
-        sleep 1
-        detect_iface && { ok "warp-go 已启动 (接口 $IFACE)"; return 0; }
-        err "warp-go 启动失败 (journalctl -u warp-go -n 5)"
-        return 1
-    fi
+    # 优先级: 内核 WG (性能/双栈 v6 完整) > warp-go (用户态回退; v6 受限)
     if [[ -s /etc/wireguard/warp.conf ]]; then
         systemctl start wg-quick@warp >/dev/null 2>&1
         sleep 1
         detect_iface && { ok "wg-quick@warp 已启动 (接口 $IFACE)"; return 0; }
         err "wg-quick@warp 启动失败 — catmi-warp3 install 看诊断"
+    fi
+    if [[ -s /opt/warp-go/warp.conf || -s /opt/warp-go/wgcf.conf || -f /lib/systemd/system/warp-go.service ]]; then
+        systemctl start warp-go >/dev/null 2>&1
+        sleep 1
+        detect_iface && { ok "warp-go 已启动 (接口 $IFACE, 用户态回退)"; return 0; }
+        err "warp-go 启动失败 (journalctl -u warp-go -n 5)"
         return 1
     fi
     err "未找到 WARP 凭据/服务 — catmi-warp3 install 或 fscarmen 安装"
@@ -977,6 +979,15 @@ fw_up() { # fw_up <iface>
     #   (Xray sockopt.mark / Mihomo routing-mark / connmark restore / 任何 SO_MARK socket)
     iptables  -t mangle -N CATMI3-OUT 2>/dev/null; iptables  -t mangle -F CATMI3-OUT
     ip6tables -t mangle -N CATMI3-OUT 2>/dev/null; ip6tables -t mangle -F CATMI3-OUT
+    # 代理服务进程出站 native (cgroup v2 匹配, 链最前): 节点转发流量不经 WARP。
+    # 用户实测铁证: 服务暂停(native 出站)时全部节点可用, WARP 出站时仅 xray 链式节点可用。
+    # 只排除本机代理服务进程, 系统/脚本自身的 WARP 出站不受影响。
+    local svc3
+    for svc3 in hysteria-server.service hysteria-relayclient.service mihomo.service xrayls.service sing-box.service; do
+        [[ -d /sys/fs/cgroup/system.slice/$svc3 ]] || continue
+        iptables  -t mangle -A CATMI3-OUT -m cgroup --path "$svc3" -j RETURN 2>/dev/null
+        ip6tables -t mangle -A CATMI3-OUT -m cgroup --path "$svc3" -j RETURN 2>/dev/null
+    done
     iptables  -t mangle -A CATMI3-OUT -m mark ! --mark 0 -j RETURN
     ip6tables -t mangle -A CATMI3-OUT -m mark ! --mark 0 -j RETURN
     # connmark 方向记忆 (RN 事故教训 2026-09-07, 两次实测校准):
@@ -984,6 +995,11 @@ fw_up() { # fw_up <iface>
     #   ESTABLISHED RETURN: 只命中"无 connmark 的入站流回包" → main 原路 (护 SSH/nginx/HY2)
     iptables  -t mangle -A CATMI3-OUT -j CONNMARK --restore-mark --nfmask 0x3 --ctmask 0x3
     ip6tables -t mangle -A CATMI3-OUT -j CONNMARK --restore-mark --nfmask 0x3 --ctmask 0x3 2>/dev/null
+    # 入站回程保护: 入站连接的回包 → packet mark 0x4 → RETURN (不打 0x3), 决策由 fwmark 0x4→main 接管
+    iptables  -t mangle -A CATMI3-OUT -m connmark --mark 0x$IMARK/0x$IMARK -j MARK --set-xmark 0x$IMARK
+    ip6tables -t mangle -A CATMI3-OUT -m connmark --mark 0x$IMARK/0x$IMARK -j MARK --set-xmark 0x$IMARK 2>/dev/null
+    iptables  -t mangle -A CATMI3-OUT -m mark --mark 0x$IMARK/0x$IMARK -j RETURN
+    ip6tables -t mangle -A CATMI3-OUT -m mark --mark 0x$IMARK/0x$IMARK -j RETURN 2>/dev/null
     iptables  -t mangle -A CATMI3-OUT -m mark ! --mark 0 -j RETURN
     ip6tables -t mangle -A CATMI3-OUT -m mark ! --mark 0 -j RETURN
     iptables  -t mangle -A CATMI3-OUT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
@@ -1091,6 +1107,18 @@ fw_up() { # fw_up <iface>
         || echo "$TABLE_ID $TABLE_NAME" >> /etc/iproute2/rt_tables
     ip -4 rule show | grep -q "^$RT_ANCHOR:.*fwmark 0x$MARK lookup $TABLE_NAME" || ip -4 rule add prio "$RT_ANCHOR" fwmark "$MARK" table "$TABLE_NAME"
     ip -6 rule show | grep -q "^$RT_ANCHOR:.*fwmark 0x$MARK lookup $TABLE_NAME" || ip -6 rule add prio "$RT_ANCHOR" fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null
+    # 入站连接打 connmark 0x4 (仅标记, 不改包): 回包经上面 OUTPUT 检查走 main, 保住入站源地址
+    local up4 up6
+    up4=$(ip -4 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
+    up6=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
+    if [[ -n "$up4" ]]; then
+        iptables  -t mangle -C INPUT -i "$up4" -j CONNMARK --set-xmark 0x$IMARK/0x$IMARK 2>/dev/null \
+            || iptables  -t mangle -I INPUT 1 -i "$up4" -j CONNMARK --set-xmark 0x$IMARK/0x$IMARK
+    fi
+    if [[ -n "$up6" ]]; then
+        ip6tables -t mangle -C INPUT -i "$up6" -j CONNMARK --set-xmark 0x$IMARK/0x$IMARK 2>/dev/null \
+            || ip6tables -t mangle -I INPUT 1 -i "$up6" -j CONNMARK --set-xmark 0x$IMARK/0x$IMARK
+    fi
     # 例外集合清空: 默认方向切换后, 旧方向的集合成员含义反转 (残留会误触发 MARK/RETURN)
     # 清空后由 dnsmasq 按当前 per-family 方向重填 (apply 的预热步骤)
     local _ips
@@ -1105,7 +1133,10 @@ fw_up() { # fw_up <iface>
             ok "cw3 v6 表默认路由已部署 (v6 出站 → WARP)"
             # 连通性自检: WARP 隧道的 v6 出站真实可用才保留路由 (netstack 不支持 v6 时撤回, 兜底原生)
             local v6ok
-            v6ok=$(timeout 10 curl -6 -s --interface "$ifc" https://ifconfig.me 2>/dev/null)
+            # 自检用 ICMP (无 DNS/connmark 时序干扰): ping CF 的 v6 DNS, 走 wg 加密通道
+            v6ok=$(ping -6 -c1 -W3 -I "$ifc" 2606:4700:4700::1111 2>/dev/null | grep -c '1 received')
+            if [[ "$v6ok" != "1" ]]; then sleep 3
+                v6ok=$(ping -6 -c1 -W3 -I "$ifc" 2606:4700:4700::1111 2>/dev/null | grep -c '1 received'); fi
             if [[ -n "$v6ok" ]]; then
                 ok "v6 补栈连通性 OK (出口 $v6ok)"
             else
@@ -1141,6 +1172,30 @@ fw_down_silent() {
     ip6tables -t nat -D POSTROUTING -m mark --mark "$MARK" -j MASQUERADE 2>/dev/null
     ip -4 rule del fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null
     ip -6 rule del fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null
+    # catmi 前置规则 (suppress_takeover 动态加的 oif/fwmark/not 系列) 全量清理, 求完全无痕
+    local fd f cmd fd_mk
+    fd_mk="$MARK"; [[ "$fd_mk" != 0x* ]] && fd_mk="0x$fd_mk"
+    iptables  -t mangle -D INPUT -j CONNMARK --set-xmark 0x$IMARK/0x$IMARK 2>/dev/null
+    ip6tables -t mangle -D INPUT -j CONNMARK --set-xmark 0x$IMARK/0x$IMARK 2>/dev/null
+    for f in 4 6; do
+        if [[ "$f" == "6" ]]; then cmd="ip -6"; else cmd="ip -4"; fi
+        while read -r p; do
+            [[ -n "$p" ]] && $cmd rule del prio "$p" 2>/dev/null
+        done < <($cmd rule show | grep -E "fwmark $fd_mk (table|lookup) $TABLE_NAME|fwmark 0xc350 lookup (main|$TABLE_NAME)|fwmark 0x$IMARK (table|lookup) main|oif $IFACE (table|lookup) $TABLE_NAME" | grep -oE '^[0-9]+')
+        if [[ "$f" == "6" ]]; then
+            # 原生 v6 上游地址段的入站保护规则 (from 段 → main) 也一并清理
+            local fd_up fd_a fd_seg
+            fd_up=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
+            if [[ -n "$fd_up" && "$fd_up" != "$ifc" ]]; then
+                for fd_a in $(ip -6 addr show dev "$fd_up" scope global 2>/dev/null | awk '{print $2}' | cut -d/ -f1); do
+                    fd_seg="$(cut -d: -f1-4 <<<"$fd_a")::/64"
+                    while read -r p; do
+                        [[ -n "$p" ]] && $cmd rule del prio "$p" 2>/dev/null
+                    done < <($cmd rule show | grep -F "from $fd_seg lookup main" | grep -oE '^[0-9]+')
+                done
+            fi
+        fi
+    done
     # warp 默认模式部件: bind 保护规则 + native 例外集合
     ip -4 rule del priority 50 2>/dev/null
     ip -6 rule del priority 50 2>/dev/null
@@ -1185,24 +1240,66 @@ cmd_forward() {
     [[ -n "$snap" ]]
 }
 
-# 动态压制外部全接管规则: fscarmen warp-go (AllowedIPs 启用后) 在(重)启时注入
-# "not fwmark 0xc350 lookup 50000" (所有无标流量→它的 WARP 表), 且注入优先级动态变化
-# (实测一次 32765、一次 39)。策略: 读其真实优先级, 把 catmi 的 fwmark 路由与
-# "非 0xc350 → main" 压到它之前 (0xc350 是 fscarmen 自用防环 mark, 不受影响)。
+# 动态压制外部全接管 + 前置路由规则:
+# fscarmen warp-go (重)启时会注入 "not fwmark 0xc350 lookup 50000" (无标流量→其 WARP 表)
+# 和一组 "from <源> lookup main" 保护规则, 且优先级每次动态变化 (实测 32765/39/36/33/31)。
+# 内核 WG 的 PostUp 也会注入 from→main。catmi 需要把三类规则压在它们之前:
+#   A: oif $IFACE → cw3        (bind WARP 接口 = 显式要求走 WARP; wg-quick/warp-go 共用)
+#   B: fwmark $MARK → cw3      (链打标流量; 必须先于 from→main, 否则 reroute 后被 from 规则送回)
+#   C: not fwmark 0xc350 → main (未打标流量归原生; 0xc350 是 fscarmen 自用防环 mark, 不受影响)
 suppress_takeover() {
-    local f fk cmd
+    local f cmd need minp fk p mk
+    # MARK 可能是 "3" 或 "0x3" (内核 rule show 一律显示 0x 前缀) — 规范化后用于 grep
+    mk="$MARK"; [[ "$mk" != 0x* ]] && mk="0x$mk"
     for f in 4 6; do
         if [[ "$f" == "6" ]]; then cmd="ip -6"; else cmd="ip -4"; fi
+        # 按内容清理本族全部旧 catmi 前置 (防动态优先级残留堆积)
+        while read -r p; do
+            [[ -n "$p" ]] && $cmd rule del prio "$p" 2>/dev/null
+        done < <($cmd rule show | grep -E "fwmark $mk (table|lookup) $TABLE_NAME|fwmark 0xc350 lookup (main|$TABLE_NAME)|oif $IFACE (table|lookup) $TABLE_NAME" | grep -oE '^[0-9]+')
+        # 需要压在谁之前: fscarmen 接管规则 与 from→main 保护规则, 取最小优先级
+        need=""
         fk=$($cmd rule show | grep 'fwmark 0xc350 lookup 50000' | grep -oE '^[0-9]+' | head -1)
-        [[ -z "$fk" ]] && continue
-        local p0=$((fk - 2)) p1=$((fk - 1))
-        $cmd rule del prio 40 fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null
-        $cmd rule del prio 41 not fwmark 0xc350 lookup main 2>/dev/null
-        $cmd rule del prio "$p0" fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null
-        $cmd rule del prio "$p1" not fwmark 0xc350 lookup main 2>/dev/null
-        $cmd rule add prio "$p0" fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null \
-            && $cmd rule add prio "$p1" not fwmark 0xc350 lookup main 2>/dev/null \
-            && ok "压制外部接管 (fam$f): prio $p0/$p1 < $fk — 路由归 catmi"
+        [[ -n "$fk" ]] && need="$fk"
+        minp=$($cmd rule show | grep 'lookup main' | grep -vE 'fwmark|oif' | grep -oE '^[0-9]+' | sort -n | head -1)
+        if [[ -n "$minp" && ( -z "$need" || "$minp" -lt "$need" ) ]]; then need="$minp"; fi
+        # 无人需要压制时仍保留 oif 规则 (bind WARP 接口显式走 cw3)
+        if [[ -z "$need" ]]; then
+            [[ -n "$IFACE" ]] && $cmd rule add prio 27 oif "$IFACE" table "$TABLE_NAME" 2>/dev/null
+            continue
+        fi
+        # C 规则按 v6 默认方向参数化:
+        #   V6=warp: 未标 → cw3 (v6 默认走 WARP; 关键: 让决策期就选 warp 接口的合法源地址,
+        #            否则 main 选 he 源 → reroute 后源不变 → CF 拒绝非账号源 → v6 超时)
+        #   其余:    未标 → main (原生)
+        local c_dst="main"
+        [[ "$f" == "6" && "$DEFAULT_OUTBOUND_V6" == "warp" ]] && c_dst="$TABLE_NAME"
+        # v6: 原生 v6 上游接口 (he-ipv6 等) 的全局地址段 → main, 优先级压在前置 (need-3) 之前。
+        # 入站服务回包源是这些地址, 若被 C 规则抓进 WARP, CF 拒收非账号源 → 入站死。
+        # 必须在决策期就命中原口; 老版本位置一并清理。
+        if [[ "$f" == "6" ]]; then
+            local upseg a6 seg6
+            upseg=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
+            if [[ -n "$upseg" && "$upseg" != "$IFACE" ]]; then
+                for a6 in $(ip -6 addr show dev "$upseg" scope global 2>/dev/null | awk '{print $2}' | cut -d/ -f1); do
+                    seg6="$(cut -d: -f1-4 <<<"$a6")::/64"
+                    while read -r p; do
+                        [[ -n "$p" ]] && $cmd rule del prio "$p" 2>/dev/null
+                    done < <($cmd rule show | grep "from $seg6 lookup main" | grep -oE '^[0-9]+')
+                    $cmd rule add prio $((need - 4)) from "$seg6" lookup main 2>/dev/null \
+                        && ok "入站保护 (v6): from $seg6 → main (prio $((need-4)), 回包走原口)"
+                done
+            fi
+        fi
+        # 入站回程规则 (v4+v6): 回包 mark 0x4 → main — UDP 通配 socket 决策期源未定,
+        # from 段规则抓不到, 必须用 mark 兜底; 幂等
+        $cmd rule show | grep -qE "fwmark 0x$IMARK (table|lookup) main" \
+            || { $cmd rule add prio 17 fwmark 0x$IMARK/0x$IMARK lookup main 2>/dev/null \
+            && ok "入站回程 (fam$f): fwmark 0x$IMARK → main @ prio 17"; }
+        $cmd rule add prio $((need - 3)) oif "$IFACE" table "$TABLE_NAME" 2>/dev/null \
+            && $cmd rule add prio $((need - 2)) fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null \
+            && $cmd rule add prio $((need - 1)) not fwmark 0xc350 lookup "$c_dst" 2>/dev/null \
+            && ok "前置规则 (fam$f): oif/fwmark→cw3 + 未标→$c_dst @ prio $((need-3))~$((need-1)) (< $need)"
     done
 }
 
@@ -1539,7 +1636,20 @@ iface_egress() { # iface_egress <4|6> → echo "IP warp=on loc=xx" | 失败 echo
 # 分族探测: echo "OK|unavailable|fallback" + 详情
 family_probe() { # family_probe <4|6>
     if [[ "$1" == "6" && "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]]; then
-        echo "unavailable (内核 IPv6 已禁用) → fallback to native"; return 0
+        # 内核全局默认禁 v6, 但 per-interface 可例外 (he-ipv6 隧道 / 内核 WG 的 PostUp 启用)。
+        # WARP 接口已被单独启用 v6 且 cw3 表有路由 → WARP 的 v6 通道真实可用:
+        detect_iface || { echo "unavailable (无 WARP 接口)"; return 0; }
+        if ip -6 addr show "$IFACE" 2>/dev/null | grep -qE 'inet6 (2606:4700|2a09)' \
+            && ip -6 route show table "$TABLE_NAME" 2>/dev/null | grep -q default; then
+            echo "OK"; return 0
+        fi
+        # 无 WARP v6 通道时, 如实区分原生上游 (he-ipv6 等):
+        local vdv
+        vdv=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
+        if [[ -n "$vdv" ]]; then
+            echo "Native($vdv) — WARP 的 v6 通道未通, v6 出站走原生"; return 0
+        fi
+        echo "unavailable (内核 IPv6 已禁用, 且无原生 v6 上游) → v6 出站不可用"; return 0
     fi
     detect_iface || { echo "unavailable (无 WARP 接口)"; return 0; }
     local pat="inet "; [[ "$1" == "6" ]] && pat="inet6 "
@@ -1594,13 +1704,13 @@ cmd_status() {
     def4=$(ip -4 route show default 2>/dev/null | head -1)
     echo "  Native       : main ($(grep -oE 'dev [a-z0-9]+' <<<"$def4" | awk '{print $2}'))"
     echo "  WARP table   : $TABLE_NAME ($TABLE_ID)"
-    ip -4 rule show 2>/dev/null | grep -q "^$RT_ANCHOR:.*fwmark 0x$MARK lookup $TABLE_NAME" \
-        && echo "  IPv4 Policy  : OK (prio $RT_ANCHOR fwmark 0x$MARK)" \
+    ip -4 rule show 2>/dev/null | grep -qE "fwmark 0x$MARK (table|lookup) $TABLE_NAME" \
+        && echo "  IPv4 Policy  : OK (fwmark 0x$MARK → $TABLE_NAME)" \
         || echo "  IPv4 Policy  : 未部署"
     if [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]]; then
         echo "  IPv6 Policy  : n/a (内核禁 IPv6)"
     else
-        ip -6 rule show 2>/dev/null | grep -q "^$RT_ANCHOR:.*fwmark 0x$MARK lookup $TABLE_NAME" \
+        ip -6 rule show 2>/dev/null | grep -qE "fwmark 0x$MARK (table|lookup) $TABLE_NAME" \
             && echo "  IPv6 Policy  : OK" || echo "  IPv6 Policy  : 未部署"
     fi
     if grep -qE 'dev (warp|CloudflareWARP|WARP|wgcf)\b' <<<"$def4"; then
@@ -1833,8 +1943,8 @@ doctor() {
 
     echo "--- Routing ---"
     if [[ -f "$APPLIED_FLAG" ]]; then
-        ip -4 rule show | grep -q "^$RT_ANCHOR:.*fwmark 0x$MARK lookup $TABLE_NAME" \
-            && okline "ip rule prio $RT_ANCHOR fwmark 0x$MARK → $TABLE_NAME 在位" || failline "策略路由规则缺失"
+        ip -4 rule show | grep -qE "fwmark 0x$MARK (table|lookup) $TABLE_NAME" \
+            && okline "ip rule fwmark 0x$MARK → $TABLE_NAME 在位" || failline "策略路由规则缺失"
         if ip -4 route show table "$TABLE_NAME" 2>/dev/null | grep -qE 'dev (warp|WARP)'; then
             okline "表 $TABLE_NAME → WARP 接口"
         else
@@ -2461,7 +2571,8 @@ dash_data() {
         else
             D_HS="用户态 (egress 判定)"
         fi
-        local wm; wm=$(wg show "$IFACE" mtu 2>/dev/null | awk '{print $2}')
+        # wg show 无 mtu 子命令 — 读实际接口值 (conf 里的可能是遗留旧值, 如 fscarmen 的 1420)
+        local wm; wm=$(ip link show "$IFACE" 2>/dev/null | grep -oE 'mtu [0-9]+' | awk '{print $2}')
         [[ -n "$wm" ]] && D_MTU="$wm"
         parse_creds >/dev/null 2>&1 && { D_EP="$ENDPOINT"; [[ "$D_MTU" == "-" ]] && D_MTU="${WARP_MTU:-1280}"; }
     else
@@ -2487,7 +2598,8 @@ dash_data() {
     D_STK=$(stack_mode)
     D_DNS=$(detect_dns53)
     D_IPSET=$([[ -f "$APPLIED_FLAG" ]] && ipset list cw3-warp4 >/dev/null 2>&1 && echo ok || { [[ -f "$APPLIED_FLAG" ]] && echo fail || echo na; })
-    D_RULE=$([[ -f "$APPLIED_FLAG" ]] && ip -4 rule show 2>/dev/null | grep -q "^$RT_ANCHOR:.*fwmark 0x$MARK" && echo ok || { [[ -f "$APPLIED_FLAG" ]] && echo fail || echo na; })
+    # 语义检查: 0x3→cw3 规则存在即 ok (规则优先级是动态的, 固定 prio 锚点会误报 MISSING)
+    D_RULE=$([[ -f "$APPLIED_FLAG" ]] && { ip -4 rule show 2>/dev/null | grep -qE "fwmark 0x$MARK (table|lookup) cw3" && echo ok || echo fail; } || echo na)
     # 最近一次 egress 探测缓存 (doctor 写入, 1h 内有效); ipv6 值含空格/箭头, 不进 eval
     D_CTS=0
     if [[ -s "$STATE/ui.state" ]]; then
@@ -2499,10 +2611,13 @@ dash_data() {
 # 分族渲染: family_probe 语义 ${UI_ARROW} 面板语义
 dash_fam() { # <probe输出> <族>
     local v="${1%% *}"; local age=""
-    ((D_CTS > 0)) && { local dt=$(( $(date +%s) - D_CTS )); ((dt < 3600)) && age=" (${dt}s)" || age=" (过期)"; }
+    ((D_CTS > 0)) && { local dt=$(( $(date +%s) - D_CTS )); ((dt < 3600)) && age=" (缓存${dt}s, 按R刷新)" || age=" (缓存数据, 按R刷新)"; }
     case "$v" in
         OK)        printf '%s WARP'   "$(ui_dot ok)" ;;
         fallback)  printf '%s Native' "$(ui_dot warn)" ;;
+        Native\(*)
+            local dv="${v#Native(}"; dv="${dv%%)*}"
+            printf '%s Native(%s)' "$(ui_dot warn)" "$dv" ;;
         *)
             if [[ "$1" == *"禁用"* ]]; then
                 printf '%s N/A(内核禁用)' "$(ui_dot warn)"
@@ -2522,46 +2637,69 @@ dash_render() {
     ui_banner "$W"
     ui_dline "$((W + 2))"
     echo ""
-    cl "  WARP 状态"; echo ""
-    # 卡片头尾
+    cl "  WARP 状态 (Cloudflare 全球加速网络)"; echo ""
     local fill; printf -v fill '%*s' "$W" ''; fill="${fill// /$UI_H}"
     printf '  %s%s%s%s\n' "$KC" "$UI_TL" "$fill" "$KN"
-    printf '  %s 状态      %s %s\n' "$UI_V" "$(ui_dot $([[ $D_ON == 1 ]] && echo ok || echo fail))" "$([[ $D_ON == 1 ]] && printf 'ONLINE  (%s)' "$D_SRC" || printf 'OFFLINE — install/start')"
-    printf '  %s 接口      %-10s 服务      %s\n' "$UI_V" "$D_IFACE" "$D_SVC"
-    printf '  %s IPv4      %b   IPv6      %b\n' "$UI_V" "$(dash_fam "$D_P4")" "$(dash_fam "$D_P6")"
-    printf '  %s Handshake %-19s MTU       %s\n' "$UI_V" "$D_HS" "$D_MTU"
-    printf '  %s Endpoint  %s\n' "$UI_V" "${D_EP:--}"
+    if ((D_ON == 1)); then
+        printf '  %s 连接状态  %s 在线 — 已连上 Cloudflare\n' "$UI_V" "$(ui_dot ok)"
+        printf '  %s 实现方式  %s\n' "$UI_V" "$D_SRC"
+        printf '  %s 接口/服务 %-10s %s\n' "$UI_V" "$D_IFACE" "$D_SVC"
+        printf '  %s 出口 IPv4 %b  出口 IPv6 %b\n' "$UI_V" "$(dash_fam "$D_P4" 4)" "$(dash_fam "$D_P6" 6)"
+        printf '  %s 通道心跳  %-14s 越新越健康\n' "$UI_V" "$D_HS"
+        printf '  %s 单包上限  %-14s 安全值, 兼容一切网络\n' "$UI_V" "$D_MTU"
+        printf '  %s 对接服务器 %s\n' "$UI_V" "${D_EP:--}"
+    else
+        printf '  %s 连接状态  %s 未运行\n' "$UI_V" "$(ui_dot fail)"
+    fi
     printf '  %s%s%s%s\n' "$KC" "$UI_BL" "$fill" "$KN"
     echo ""
     if ((D_ON == 0)); then
-        cy "  ${UI_WARN} WARP 未运行 — 建议: [1] WARP 管理 ${UI_ARROW} [5] 安装 WARP, 或 [3] 网络诊断"
+        cy "  ${UI_WARN} WARP 未运行 — 下一步: [1] WARP 管理 → 安装/启动"
+        echo ""
     fi
-    cl "  出口策略"; echo ""
+    cl "  出口策略 (你的流量走哪里)"; echo ""
     printf '  %s%s%s%s\n' "$KC" "$UI_TL" "$fill" "$KN"
     local d4 d6
     [[ "$D_DEF4" == "WARP" ]] && d4=$(ui_dot ok) || d4=$(ui_dot na)
     [[ "$D_DEF6" == "WARP" ]] && d6=$(ui_dot ok) || d6=$(ui_dot na)
     case "$D_PROT" in
-        ok)   printf '  %s 显式出站   %s PROTECTED    出口管理   Catmi-warp\n' "$UI_V" "$(ui_dot ok)" ;;
-        fail) printf '  %s 显式出站   %s AT RISK!      出口管理   Catmi-warp\n' "$UI_V" "$(ui_dot fail)" ;;
-        *)    printf '  %s 显式出站   %s 未部署        出口管理   Catmi-warp\n' "$UI_V" "$(ui_dot na)" ;;
+        ok)   printf '  %s 保护模式  %s 已开启 (脚本正在管理出站)\n' "$UI_V" "$(ui_dot ok)" ;;
+        fail) printf '  %s 保护模式  %s 有风险! 请按 [6] 应用分流\n' "$UI_V" "$(ui_dot fail)" ;;
+        *)    printf '  %s 保护模式  %s 未部署 — 按 [6] 应用分流\n' "$UI_V" "$(ui_dot na)" ;;
     esac
-    printf '  %s 默认出口   v4 %s %-9s v6 %s %-9s\n' "$UI_V" "$d4" "$D_DEF4" "$d6" "$D_DEF6"
-    printf '  %s 栈模式     %s %-25s 例外规则  [2] 网站分流\n' "$UI_V" "$( [[ "$D_STK" == "无 (全 Native)" ]] && echo "$(ui_dot na)" || echo "$(ui_dot ok)" )" "$D_STK"
-    printf '  %s WARP 规则  %-8s Native 规则  %s\n' "$UI_V" "$D_NW" "$D_NN"
-    printf '  %s 禁用规则  %-8s Forward       %s\n' "$UI_V" "$D_ND" "$D_FWD"
-    printf '  %s PREROUTING %-8s 已应用        %s\n' "$UI_V" "$D_PRE" "$D_APPLIED"
+    printf '  %s 默认出口  v4 %s %-7s v6 %s %s\n' "$UI_V" "$d4" "$D_DEF4" "$d6" "$D_DEF6"
+    printf '  %s 栈模式    %s %s\n' "$UI_V" "$( [[ "$D_STK" == "无 (全 Native)" ]] && echo "$(ui_dot na)" || echo "$(ui_dot ok)" )" "$D_STK"
+    printf '  %s 分流规则  走WARP %s 条 / 保持原生 %s 条\n' "$UI_V" "$D_NW" "$D_NN"
+    printf '  %s 进站保护  %s (你服务器的入站不受影响)\n' "$UI_V" "$( [[ "$D_PRE" == "OFF" ]] && printf '%s 开启' "$(ui_dot ok)" || printf '%s 关闭' "$(ui_dot warn)" )"
+    case "$D_APPLIED" in
+        YES) printf '  %s 策略状态  %s 已生效 (改动已应用)\n' "$UI_V" "$(ui_dot ok)" ;;
+        NO)  printf '  %s 策略状态  %s 有改动未生效 — 按 [6] 应用\n' "$UI_V" "$(ui_dot warn)" ;;
+        *)   printf '  %s 策略状态  %s\n' "$UI_V" "$D_APPLIED" ;;
+    esac
     printf '  %s%s%s%s\n' "$KC" "$UI_BL" "$fill" "$KN"
     echo ""
-    cl "  系统"; echo ""
+    cl "  系统服务"; echo ""
     printf '  %s%s%s%s\n' "$KC" "$UI_TL" "$fill" "$KN"
-    printf '  %s DNS :53   %-12s dnsmasq   %s\n' "$UI_V" "$D_DNS" "$(systemctl is-active dnsmasq >/dev/null 2>&1 && printf '%s running' "$(ui_dot ok)" || printf '%s stopped' "$(ui_dot na)")"
-    case "$D_IPSET" in ok) printf '  %s IPSet     %s READY\n' "$UI_V" "$(ui_dot ok)" ;; fail) printf '  %s IPSet     %s MISSING\n' "$UI_V" "$(ui_dot fail)" ;; *) printf '  %s IPSet     %s 未部署\n' "$UI_V" "$(ui_dot na)" ;; esac
-    case "$D_RULE" in ok) printf '  %s Routing   %s READY (prio %s)\n' "$UI_V" "$(ui_dot ok)" "$RT_ANCHOR" ;; fail) printf '  %s Routing   %s MISSING\n' "$UI_V" "$(ui_dot fail)" ;; *) printf '  %s Routing   %s 未部署\n' "$UI_V" "$(ui_dot na)" ;; esac
+    if systemctl is-active dnsmasq >/dev/null 2>&1; then
+        printf '  %s DNS 解析  %s dnsmasq 运行中\n' "$UI_V" "$(ui_dot ok)"
+    else
+        printf '  %s DNS 解析  %s dnsmasq 未运行\n' "$UI_V" "$(ui_dot na)"
+    fi
+    case "$D_IPSET" in
+        ok)   printf '  %s IP 名单   %s 已就绪 (网站分流的数据)\n' "$UI_V" "$(ui_dot ok)" ;;
+        fail) printf '  %s IP 名单   %s 未生效 — 按 [6] 应用分流\n' "$UI_V" "$(ui_dot fail)" ;;
+        *)    printf '  %s IP 名单   %s 未部署\n' "$UI_V" "$(ui_dot na)" ;;
+    esac
+    case "$D_RULE" in
+        ok)   printf '  %s 路由规则  %s 已生效\n' "$UI_V" "$(ui_dot ok)" ;;
+        fail) printf '  %s 路由规则  %s 未生效 — 按 [6] 应用分流\n' "$UI_V" "$(ui_dot fail)" ;;
+        *)    printf '  %s 路由规则  %s 未部署\n' "$UI_V" "$(ui_dot na)" ;;
+    esac
     printf '  %s%s%s%s\n' "$KC" "$UI_BL" "$fill" "$KN"
     echo ""
-    cg "  说明: 首页为本地状态快照 (零网络请求);"
-    cg "  真实出口连通性请用 [3] 网络诊断"
+    cy "  第一次使用? 三步上手:"
+    cg "    [1] 装/查 WARP  →  [2] 添加要加速的网站  →  [6] 应用分流"
+    cg "  首页为本地快照(零请求); 实测连通性用 [3] 网络诊断"
     ui_hline "$((W + 2))"
 }
 
@@ -2598,7 +2736,7 @@ ui_guide() {
             tips+=("${UI_OK} 配置正常: ${D_STK} (v4 ${D_DEF4}/v6 ${D_DEF6})")
             tips+=("${UI_OK} 分流 ${D_NW} WARP / ${D_NN} Native, Forward ${D_FWD}")
             if [[ "$D_P4" == OK* && "$D_P6" != OK* ]]; then
-                tips+=("IPv6 不可用 (不影响 IPv4 WARP) ${UI_ARROW} 见 [4] 网络诊断")
+                tips+=("IPv6 出站走原生通道 (WARP 的 v6 未通) ${UI_ARROW} 见 [4] 网络诊断")
             fi
         fi
     elif ((D_NT > 0)); then
