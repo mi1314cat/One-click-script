@@ -1097,24 +1097,8 @@ fw_up() { # fw_up <iface>
     for _ips in cw3-warp4 cw3-warp6 cw3-native4 cw3-native6; do
         ipset list "$_ips" >/dev/null 2>&1 && ipset flush "$_ips" 2>/dev/null
     done
-    # 压制 warp-go (fscarmen) 的全接管规则: AllowedIPs 启用后它会在(重)启时注入
-    # "not fwmark 0xc350 lookup 50000" (所有无标流量→它的 WARP 表, prio 32765), 会破坏
-    # catmi 的默认方向语义与显式出站保护。实测剥除会被它重新注入 → 改用更高优先级压制:
-    #   prio 40: catmi 的 fwmark 0x3 → cw3 (先于一切)
-    #   prio 41: 非 0xc350 → main (无标/用户显式 mark 归原生; 0xc350 是 fscarmen 自用防环 mark)
-    # fscarmen 自己的 0xc350 流量不受影响; 其源地址/docker 保护规则全部保留。
-    if ! ip -4 rule show | grep -q '^40:.*fwmark 0x3 lookup cw3'; then
-        ip -4 rule add prio 40 fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null && ok "catmi 路由提前至 prio 40 (压制外部接管)"
-    fi
-    if ! ip -4 rule show | grep -q '^41:.*lookup main'; then
-        ip -4 rule add prio 41 not fwmark 0xc350 lookup main 2>/dev/null && ok "原生默认保护 prio 41 (无标/显式出站 → main)"
-    fi
-    if ! ip -6 rule show | grep -q '^40:.*fwmark 0x3 lookup cw3'; then
-        ip -6 rule add prio 40 fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null
-    fi
-    if ! ip -6 rule show | grep -q '^41:.*lookup main'; then
-        ip -6 rule add prio 41 not fwmark 0xc350 lookup main 2>/dev/null
-    fi
+    # 压制外部全接管 (动态优先级; 细节见 suppress_takeover 函数注释)
+    suppress_takeover
     ip -4 route replace default dev "$ifc" table "$TABLE_NAME" 2>/dev/null
     if [[ "$DEFAULT_OUTBOUND_V6" == "warp" ]]; then
         if ip -6 route replace default dev "$ifc" table "$TABLE_NAME" 2>/dev/null; then
@@ -1198,6 +1182,176 @@ cmd_forward() {
     FORWARD="$newval"
     ok "forward 模式 = $act (已持久化到 config/main.conf)"
     log_op "forward" "$act"
+    [[ -n "$snap" ]]
+}
+
+# 动态压制外部全接管规则: fscarmen warp-go (AllowedIPs 启用后) 在(重)启时注入
+# "not fwmark 0xc350 lookup 50000" (所有无标流量→它的 WARP 表), 且注入优先级动态变化
+# (实测一次 32765、一次 39)。策略: 读其真实优先级, 把 catmi 的 fwmark 路由与
+# "非 0xc350 → main" 压到它之前 (0xc350 是 fscarmen 自用防环 mark, 不受影响)。
+suppress_takeover() {
+    local f fk cmd
+    for f in 4 6; do
+        if [[ "$f" == "6" ]]; then cmd="ip -6"; else cmd="ip -4"; fi
+        fk=$($cmd rule show | grep 'fwmark 0xc350 lookup 50000' | grep -oE '^[0-9]+' | head -1)
+        [[ -z "$fk" ]] && continue
+        local p0=$((fk - 2)) p1=$((fk - 1))
+        $cmd rule del prio 40 fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null
+        $cmd rule del prio 41 not fwmark 0xc350 lookup main 2>/dev/null
+        $cmd rule del prio "$p0" fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null
+        $cmd rule del prio "$p1" not fwmark 0xc350 lookup main 2>/dev/null
+        $cmd rule add prio "$p0" fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null \
+            && $cmd rule add prio "$p1" not fwmark 0xc350 lookup main 2>/dev/null \
+            && ok "压制外部接管 (fam$f): prio $p0/$p1 < $fk — 路由归 catmi"
+    done
+}
+
+# Netflix 解锁检测 (title 法, 借鉴 fscarmen unlock_warp; 只读) → "full:US"|"orig:US"|""
+nf_check() { # <curl 附加参数>  full=完整解锁(非自制可看) orig=仅原创
+    local body
+    body=$( { curl $1 -ks -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -SsL --max-time 10 \
+                "https://www.netflix.com/title/81280792" 2>/dev/null; \
+              curl $1 -ks -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -SsL --max-time 10 \
+                "https://www.netflix.com/title/70143836" 2>/dev/null; } | \
+        awk 'NR==1{u=1} /og:video/{v=1}
+             { if(!r && match($0,/"requestCountry":\{"supportedLocales":\[[^]]+\],"id":"[^"]+"/)){
+                 s=substr($0,RSTART,RLENGTH); sub(/.*"id":"*/,"",s); sub(/".*/,"",s); r=s } }
+             END { if(!u || r=="") print "error"; else print (v?"full":"orig") ":" r }')
+    [[ "$body" == "error" || -z "$body" ]] && return 1
+    echo "$body"
+}
+
+nf_show() { # <方向名> <curl 附加参数>
+    local name="$1" r st rg
+    printf '  [%s] ' "$name"
+    if r=$(nf_check "$2"); then
+        st="${r%%:*}"; rg="${r##*:}"
+        if [[ "$st" == "full" ]]; then
+            ok "完整解锁 ($rg) — 全部内容可看"
+        else
+            warn "仅原创解锁 ($rg) — 非自制内容不可看"
+        fi
+    else
+        warn "不可用 (无响应或被风控)"
+    fi
+}
+
+# [A] 流媒体解锁检测 (只读, 不改任何东西)
+cmd_stream() {
+    echo "── 流媒体解锁检测 (Netflix, 真实出口实测) ──"
+    local pdev; pdev=$(ip -4 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
+    nf_show "Native 出口 (${pdev:-eth0})" "-4 ${pdev:+--interface $pdev}"
+    if detect_iface >/dev/null 2>&1; then
+        nf_show "WARP 出口 ($IFACE)" "-4 --interface $IFACE"
+    else
+        info "  [WARP 出口]  WARP 未运行, 跳过"
+    fi
+    echo ""
+    echo "  full = 该地区 Netflix 完整解锁; orig = 只能看 Netflix 自制剧。"
+    echo "  分流: add netflix.com warp 后, Netflix 流量走 [WARP 出口] 的检测结论。"
+    echo "  (出口 IP 变化后结果可能变化 — 用 newip 换 IP 后可复测)"
+}
+
+# [B] WARP Endpoint 优选 (改动: 凭据文件的 Endpoint + 重启 WARP; 不动路由/分流/账号)
+cmd_endpoint_opt() {
+    need_root; acquire_lock || return 1; init_dirs
+    parse_creds >/dev/null 2>&1 || { err "未找到 WARP 凭据"; return 1; }
+    local src=""; local f
+    for f in ${CATMI_CRED_FILE:+$CATMI_CRED_FILE} /opt/warp-go/warp.conf /etc/wireguard/wgcf.conf /etc/wireguard/warp.conf; do
+        if [[ -s "$f" ]] && grep -q 'Endpoint' "$f" 2>/dev/null; then src="$f"; break; fi
+    done
+    [[ -n "$src" ]] || { err "未找到 Endpoint 配置文件"; return 1; }
+    local curep; curep=$(sed -n 's/^Endpoint[ ]*=[ ]*//p' "$src" | head -1 | tr -d '\r')
+    echo "── WARP Endpoint 优选 ──"
+    echo "  扫描 CF WARP 入口段, 测 TCP 握手延迟, 选最快者替换。"
+    echo "  改动: 仅 $src 的 Endpoint + 重启 WARP; 不动路由/分流/账号。"
+    echo "  当前 Endpoint: ${curep:-未知}"
+    echo ""
+    # 采样: WARP 入口是 UDP(WireGuard), TCP 探测端口不可行 → 以 ICMP 延迟近似排序
+    # (同段入口 UDP 服务通常全开; 真实会话质量以重启后的 handshake/keepalive 为准)
+    local seg i ip t
+    local -a rows=()
+    echo "  扫描: 4 个常用段 × 8 个候选 (ICMP 延迟, 32 个) ..."
+    for seg in 162.159.192 162.159.193 188.114.96 188.114.97; do
+        for i in 1 17 33 65 97 129 193 225; do
+            ip="$seg.$i"
+            t=$(ping -W1 -c1 "$ip" 2>/dev/null | grep -oE 'time=[0-9.]+' | head -1 | cut -d= -f2)
+            [[ -n "$t" ]] && rows+=("$t $ip")
+        done
+    done
+    if (( ${#rows[@]} == 0 )); then
+        warn "无响应候选 — 保持现有 Endpoint"; return 1
+    fi
+    echo ""
+    echo "  最快 5 个 (ICMP):"
+    printf '%s\n' "${rows[@]}" | sort -n | head -5 | awk '{printf "    %-18s %s ms\n", $2, $1}'
+    local best best_t
+    best_t=$(printf '%s\n' "${rows[@]}" | sort -n | head -1 | awk '{print $1}')
+    local bip; bip=$(printf '%s\n' "${rows[@]}" | sort -n | head -1 | awk '{print $2}')
+    local curport="${curep##*:}"; [[ "$curport" =~ ^[0-9]+$ ]] || curport=2408
+    best="$bip:$curport"
+    echo ""
+    echo "  最优: $best (ICMP ${best_t}ms)  当前: ${curep:-未知}"
+    local curep_ip; curep_ip=$(timeout 5 dig +short "${curep%%:*}" A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+    [[ -z "$curep_ip" ]] && curep_ip="${curep%%:*}"
+    if [[ "$bip" == "$curep_ip" ]]; then
+        info "当前入口 (${curep%%:*} → $curep_ip) 已是最快, 无需修改"; return 0
+    fi
+    if [[ "${ASSUME_YES:-0}" != "1" ]]; then
+        local yn
+        printf "  应用并重启 WARP? 输入 YES 确认 (回车=只看不改): " >&2
+        read -r yn </dev/tty 2>/dev/null || yn=""
+        [[ "${yn,,}" == "yes" ]] || { echo "  已保持现有 Endpoint" >&2; return 0; }
+    fi
+    sed -i "s|^Endpoint[ ]*=.*|Endpoint = $best|" "$src" \
+        || { err "写入 Endpoint 失败"; return 1; }
+    ok "Endpoint 已写入: $best → 重启 WARP 生效"
+    FORCE_STOP=1 stop_warp; start_warp && { health_check >/dev/null 2>&1 && ok "健康检查通过" || warn "健康检查异常 (分流不受影响, 可用 doctor 复查)"; }
+    suppress_takeover
+    local eip; eip=$(timeout 8 curl -4 -s --interface "$(detect_iface >/dev/null 2>&1 && echo "$IFACE" || echo warp)" https://ifconfig.me 2>/dev/null)
+    [[ -n "$eip" ]] && info "WARP 出口: $eip"
+    log_op "endpoint" "$curep→$best"
+}
+
+# [C] 更换 WARP 出口 IP (重启会话; 分流规则/模式/网站配置全部不变; 需确认)
+cmd_newip() {
+    need_root; acquire_lock || return 1; init_dirs
+    detect_iface || { err "WARP 未运行"; return 1; }
+    local old; old=$(timeout 8 curl -4 -s --interface "$IFACE" https://ifconfig.me 2>/dev/null)
+    echo "── 更换 WARP 出口 IP ──"
+    echo "  当前 WARP 出口: ${old:-未知}"
+    echo "  影响:"
+    echo "    - WARP 会话重连, 出口 IP 将变化 (CF 随机分配, 概率抽奖)"
+    echo "    - 走 WARP 的分流连接会断开重连; native 方向流量不受影响"
+    echo "    - 分流规则 / 出口模式 / 网站配置 全部不变"
+    echo "    - 注册类网站建议走 Native (固定原生 IP); WARP 出口是共享 NAT, 风控严"
+    if [[ "${ASSUME_YES:-0}" != "1" ]]; then
+        local yn
+        printf "  输入 YES 确认 (回车=取消): " >&2
+        read -r yn </dev/tty 2>/dev/null || yn=""
+        [[ "${yn,,}" == "yes" ]] || { echo "已取消" >&2; return 1; }
+    fi
+    local snap; snap=$(snapshot "newip")
+    FORCE_STOP=1 stop_warp; start_warp || { err "WARP 重启失败"; return 1; }
+    sleep 2
+    suppress_takeover   # 重启会让外部脚本重新注入接管规则 → 重申压制
+    # 外部脚本重启时可能清空 cw3 表 → 补回 (v4 无条件; v6 仅在补栈模式且接口有 v6 时)
+    ip -4 route replace default dev "$IFACE" table "$TABLE_NAME" 2>/dev/null \
+        && info "cw3 v4 表路由已确保"
+    if [[ "$DEFAULT_OUTBOUND_V6" == "warp" ]] && ip -6 addr show dev "$IFACE" 2>/dev/null | grep -q inet6; then
+        ip -6 route replace default dev "$IFACE" table "$TABLE_NAME" 2>/dev/null \
+            && info "cw3 v6 表路由已确保"
+    fi
+    local new; new=$(timeout 8 curl -4 -s --interface "$IFACE" https://ifconfig.me 2>/dev/null)
+    if [[ -n "$new" && "$new" != "$old" ]]; then
+        ok "新出口 IP: $new (原: ${old:-无})"
+    elif [[ -n "$new" ]]; then
+        warn "出口未变化 ($new) — 可再执行一次"
+    else
+        err "获取新出口失败 (WARP 可能未连上) — 可用 doctor/start 复查"
+        return 1
+    fi
+    log_op "newip" "${old:-?}→${new:-fail}"
     [[ -n "$snap" ]]
 }
 
@@ -2497,12 +2651,82 @@ ui_add_wizard() { # <默认出口 warp|native|空=询问>
     esac
 }
 
+# [1.9] 新手一键配置: 几个问题 → 自动完成 安装+出口模式+网站+应用+测试 (每步先说明)
+ui_quicksetup() {
+    echo "  ── 新手一键配置 ──"
+    echo "  将按顺序: 检查 WARP → 设定出口模式 → 添加网站 → 应用 → 测试。"
+    echo "  每一步都会先说明要做什么; 随时可以取消; 已完成的不会重复做。"
+    echo ""
+    dash_data
+    local yn
+    # ① WARP
+    if ((D_ON == 0)); then
+        echo "  [1/5] WARP 未安装。现在安装 (自动复用已有凭据, 不重复注册)。"
+        printf "        继续? [Y/n]: " >&2
+        ui_read yn; [[ "${yn,,}" == "n" ]] && { echo "  已取消" >&2; return 1; }
+        install_warp || return 1
+    else
+        echo "  [1/5] WARP 已就绪 ($D_IFACE), 跳过安装。"
+    fi
+    # ② 出口模式
+    echo ""
+    echo "  [2/5] 普通出站默认走哪? (以后随时在 [8] 出口/补栈模式里改)"
+    echo "    [1] 原生 (推荐)     出站保持原样, 只给指定网站走 WARP — 入站最稳"
+    echo "    [2] v4 走 WARP      v4 出站走 WARP; v6 (如 he-ipv6 入站) 不动"
+    echo "    [3] 双栈全 WARP     v4+v6 都走 WARP (缺栈机器借此补齐出口)"
+    echo "    [0] 取消"
+    printf "    选择: " >&2
+    local m; ui_read m
+    case "$m" in
+        1) : ;;
+        2) echo "        → 切换默认出口: 仅 IPv4"; ASSUME_YES=1 cmd_default v4 || return 1 ;;
+        3) echo "        → 切换默认出口: 双栈";    ASSUME_YES=1 cmd_default dual || return 1 ;;
+        *) echo "  已取消" >&2; return 1 ;;
+    esac
+    # ③ 网站
+    echo ""
+    echo "  [3/5] 要走 WARP 的网站 (例: netflix.com; 每行一个, 回车结束; 跳过=只配出口模式):"
+    local d added=0
+    while :; do
+        printf "    域名 (回车=结束): " >&2
+        ui_input d; [[ -z "$d" ]] && break
+        if valid_domain "$d" && rule_add "$d" warp; then
+            ((added++))
+        else
+            echo "      无效域名, 已跳过 (示例: netflix.com)" >&2
+        fi
+    done
+    ((added > 0)) || echo "    (未添加网站 — 只配了出口模式; 以后可随时 [2] 添加)"
+    # ④ 应用
+    echo ""
+    echo "  [4/5] 应用分流 (把配置真正部署到系统网络, 这一步才生效)"
+    printf "        继续? [Y/n]: " >&2
+    ui_read yn
+    if [[ "${yn,,}" == "n" ]]; then
+        echo "  已暂停: 规则已保存, 以后用 [5] 应用分流即可" >&2; return 0
+    fi
+    apply || return 1
+    # ⑤ 验证
+    echo ""
+    echo "  [5/5] 快速验证"
+    if ((added > 0)); then
+        local first; first=$(grep -m1 '|warp|1|' "$RULES" 2>/dev/null | cut -d'|' -f1)
+        [[ -n "$first" ]] && { echo "    测试 $first 的真实出口:"; cmd_test "$first" 2>&1 | tail -8; }
+    else
+        echo "    (没有网站规则, 跳过单站测试 — 可用 [7] 健康检查全面体检)"
+    fi
+    echo ""
+    ok "新手配置完成! 以后: [2] 加网站 → [5] 应用; 出口随时 [8] 改; 疑问用 [7] 体检"
+    log_op "quicksetup" "mode=${m:-1} sites=$added"
+}
+
 # [1] 快速设置: 状态摘要 + 建议 + 日常七步
 menu_quick() {
     while true; do
         ui_init; dash_data
         echo ""
         cl "  ── 快速设置 ──"
+    echo "  小白从这里走: 每步有说明, 不会弄坏网络; 功能细节在其余菜单里。"
         echo ""
         cl "  当前状态"
         printf '  WARP       %s %s\n' "$(ui_dot $([[ $D_ON == 1 ]] && echo ok || echo fail))" "$([[ $D_ON == 1 ]] && echo 已安装 || echo 未安装)"
@@ -2519,6 +2743,10 @@ menu_quick() {
             if ((D_NT > 0)); then gt="规则已保存未应用 ${UI_ARROW} 建议 [5] 应用分流"
             else gt="建议 [2]/[3] 添加网站, 然后 [5] 应用分流"; fi
         elif ((D_NT == 0)); then gt="建议 [2] 添加网站 ${UI_ARROW} [5] 应用分流"
+        elif [[ "$D_P4" != OK* && "$D_P4" != fallback* ]]; then
+            gt="这台机器 IPv4 出站不可用 ${UI_ARROW} [8] 出口/补栈模式 可通过 WARP 补一个 IPv4 出口"
+        elif [[ "$D_P6" != OK* && "$D_P6" != fallback* && "$D_P6" != *禁用* ]]; then
+            gt="这台机器 IPv6 出站不可用 ${UI_ARROW} [8] 出口/补栈模式 可通过 WARP 补一个 IPv6 出口"
         fi
         [[ -n "$gt" ]] && printf '  %s %s\n' "$(cm "$UI_ARROW")" "$gt" || printf '  %s 配置正常, 无需操作 (可 [6] 测试网站验证)\n' "$(cm "$UI_OK")"
         echo ""
@@ -2531,6 +2759,8 @@ menu_quick() {
         cl "   [5] 应用分流             把规则真正部署到系统"
         cl "   [6] 测试网站             实测某网站的最终出口"
         cl "   [7] 一键健康检查         doctor 全面体检"
+        cl "   [8] 出口 / 补栈模式      没有 IPv4/IPv6? 通过 WARP 补一个出口"
+        cl "   [9] 新手一键配置 (推荐)  回答几个问题, 自动完成: 装→出口→网站→应用→测试"
         printf '\n   %s 返回\n\n' "$(cm "$UI_RET")"
         printf "  选择: " >&2
         local c d
@@ -2541,8 +2771,10 @@ menu_quick() {
             3) ui_add_wizard native ;;
             4) menu_sites ;;
             5) apply; ui_pause ;;
-            6) printf "  域名 [期望 warp|native 可省]: " >&2; ui_input d; cmd_test "$d"; ui_pause ;;
+            6) printf "  域名或IP [期望 warp|native 可省]: " >&2; ui_input d; cmd_test "$d"; ui_pause ;;
             7) doctor; ui_pause ;;
+            8) menu_default ;;
+            9) ui_quicksetup; ui_pause ;;
             0) return ;;
         esac
     done
@@ -2554,6 +2786,7 @@ menu_warp() {
         ui_init; dash_data
         echo ""
         cl "  ── WARP 管理 ──"
+        echo "  功能细节区: 管 WARP 服务本体 (启停/重启/换IP/重注册); 网站分流在 [1] 快速设置。"
         echo ""
         cl "  当前状态"
         if ((D_ON == 1)); then
@@ -2575,6 +2808,7 @@ menu_warp() {
         cl "   [4] 状态详情             完整 status 输出"
         cl "   [5] 安装 WARP            已装则复用; 不重注册"
         cl "   [6] 重新注册 (危险)      新建 WARP 账号, 出口 IP 会变化"
+        cl "   [7] 更换出口 IP          重启会话拿新 IP (轻量, 不动配置)"
         printf '\n   %s 返回\n\n' "$(cm "$UI_RET")"
         printf "  选择: " >&2
         local c; ui_read c
@@ -2585,6 +2819,7 @@ menu_warp() {
             4) cmd_status; ui_pause ;;
             5) install_warp; ui_pause ;;
             6) menu_register; ui_pause ;;
+            7) cmd_newip; ui_pause ;;
             0) return ;;
         esac
     done
@@ -2596,6 +2831,7 @@ menu_sites() {
         ui_init; dash_data
         echo ""
         cl "  ── 网站分流 ──"
+        echo "  功能细节区: 每条规则决定一个域名走 WARP 还是原生; 保存≠应用 (需 [5] 应用)。"
         echo ""
         if [[ "$D_DEF4" == "WARP" || "$D_DEF6" == "WARP" ]]; then
             echo "  当前默认出口: 栈模式 $(stack_mode) (v4→$D_DEF4 / v6→$D_DEF6)"
@@ -2681,6 +2917,7 @@ menu_adv() {
         ui_init; dash_data
         echo ""
         cl "  ── 高级设置 ──"
+        echo "  功能细节区: 进阶与自定义项 (默认值已是最稳配置, 改前有说明)。"
         echo ""
         printf '  Forward    %s %s   (转发流量分流; 默认 OFF, 普通出口分流无需开启)\n' "$(ui_dot na)" "$D_FWD"
         printf '  Outbound   ● 可用 (生成 xray/mihomo/sing-box 的 WARP 出站片段)\n'
@@ -2699,6 +2936,12 @@ menu_adv() {
         echo "       实测: 已打标 / 绑定接口 / 无标 三类流量的出口归属。"
         cl "   [5] 默认出口模式"
         echo "       查看/切换: ${D_STK} (v4 ${D_DEF4}/v6 ${D_DEF6}) — 含补栈模式。"
+        cl "   [6] 流媒体解锁检测"
+        echo "       实测 Native/WARP 两方向的 Netflix 解锁 (只读, 不改任何东西)。"
+        cl "   [7] WARP Endpoint 优选"
+        echo "       扫描 CF 入口段测速选最快, 改后重启 WARP (分流不受影响)。"
+        cl "   [8] 更换出口 IP"
+        echo "       重启 WARP 会话拿新出口 IP; 分流规则/模式全不变 (需确认)。"
         printf '\n   %s 返回\n\n' "$(cm "$UI_RET")"
         printf "  选择: " >&2
         local c
@@ -2721,6 +2964,9 @@ menu_adv() {
                ui_pause ;;
             4) test_priority; ui_pause ;;
             5) menu_default ;;
+            6) cmd_stream; ui_pause ;;
+            7) cmd_endpoint_opt; ui_pause ;;
+            8) cmd_newip; ui_pause ;;
             0) return ;;
         esac
     done
@@ -2736,14 +2982,15 @@ menu_default() {
         printf '  当前栈模式: %s %s\n' "$(ui_dot ok)" "$D_STK"
         printf '  IPv4 出站: %s     IPv6 出站: %s\n' "$D_DEF4" "$D_DEF6"
         echo ""
-        cl "   [1] WARP 只走 IPv4"
+        cl "   [1] WARP 只走 IPv4 (补 v4 出口)"
         echo "       v4 出站默认 WARP; v6 出站保持你机器原本的 v6 通道不动。"
-        echo "       适合: v4 想换 WARP, 但 v6 入站/出口不想被碰。"
+        echo "       适合: v4 想换 WARP 但 v6 入站/出口不想被碰;"
+        echo "             机器没有公网 IPv4, 想通过 WARP 补一个 IPv4 出口。"
         cl "   [2] WARP 只走 IPv6 (补栈模式)"
         echo "       v6 出站默认 WARP; v4 保持原生。"
         echo "       补栈: 没有 v6 上游的机器, 通过 WARP 直接获得 v6 出口;"
         echo "       已有 v6 入站 (如 he-ipv6) 的机器, 入站回包走原路不受影响。"
-        cl "   [3] 双栈 (v4+v6 全走 WARP)"
+        cl "   [3] 双栈 (v4+v6 全走 WARP, 缺哪个补哪个)"
         echo "       两个协议栈出站都默认 WARP; 缺栈机器同时获得补齐的出口。"
         cl "   [4] 恢复全 Native (出厂)"
         echo "       普通出站全回原生; warp 规则域名仍走 WARP。"
@@ -2889,6 +3136,9 @@ case "${1:-}" in
     forward)   shift; cmd_forward "${1:-}" ;;
     default)   shift; cmd_default "${1:-}" ;;
     warm)      need_root; init_dirs; warm_domains; ok "规则域名已预热 (cw3 ipset 刷新)" ;;
+    stream)    cmd_stream ;;
+    endpoint)  need_root; cmd_endpoint_opt ;;
+    newip)     need_root; cmd_newip ;;
     keepalive) need_root; init_dirs; warm_domains 2>/dev/null; account_keepalive ;;
     units)     need_root; install_units ;;
     migrate)   need_root; init_dirs; migrate_v2 ;;
@@ -2922,7 +3172,12 @@ catmi-warp3 v$VERSION — 服务器默认出口的 WARP/Native 策略分流器
 高级 (普通用户通常不需要):
   catmi-warp3 doctor outbound | test-priority   出站优先级实测 (Xray/Mihomo 保护验证)
   catmi-warp3 outbound      生成 xray/mihomo/sing-box 的 WARP 出站片段
-  catmi-warp3 default              查看默认出口 (栈模式: 仅IPv4/仅IPv6/双栈/全Native)
+  catmi-warp3 default              查看/切换出口模式 (没有 IPv4/IPv6 的机器可补栈)
+
+  流媒体 / 出口工具:
+  catmi-warp3 stream             检测 Netflix 解锁 (Native/WARP 两方向实测, 只读)
+  catmi-warp3 endpoint           WARP Endpoint 优选 (测速选最快入口, 需确认)
+  catmi-warp3 newip              一键更换 WARP 出口 IP (重启会话, 需确认)
   catmi-warp3 default v4|v6|dual|native   切换: 只v4 / 只v6(补栈) / 双栈 / 恢复出厂
   catmi-warp3 forward on|off    转发流量分流 (默认 OFF; 普通出口分流无需开启)
   catmi-warp3 warm          立即刷新网站 IP 集合 (定时任务自动做)
