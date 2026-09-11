@@ -13,6 +13,15 @@
 #    bash <(curl -fsSL .../catmiproxy.sh)            # 四内核总菜单
 #    bash <(curl -fsSL .../catmiproxy.sh) mihomo    # 直达子菜单
 #  本文件必须保持 LF(Unix) 换行符。
+# -------------------------------------------------------------
+#  修复记录:
+#    [根因] 内核状态把已安装的内核全部误报为"未安装"。
+#       原实现用 `timeout 1.5 systemctl list-unit-files` 判断安装与否。
+#       该命令在小内存 VPS 上实测耗时 1.17~1.53s, 正好压在 1.5s 超时线上,
+#       约 15% 概率被 timeout 杀死 → 输出为空 → 四个内核全报"未安装"。
+#       且检测只在进入菜单时跑一次, 掷输后整个会话都不会恢复。
+#    [修复] 改为直接 stat systemd 单位文件是否存在(1ms, 无超时, 无竞态);
+#           并把检测移入主循环, 装完内核返回主菜单即时刷新。
 # =============================================================
 
 # 仅在系统支持时启用 UTF-8 locale(保证中文按 2 列宽度对齐)
@@ -189,25 +198,40 @@ pause_return() {
 # ===========================
 #   服务状态收集
 # ===========================
-build_service_status() {
-    local SYSTEMCTL_ENABLED
-    # 超时保护: systemctl 卡死时 1.5s 内放弃, 菜单仍可用
-    SYSTEMCTL_ENABLED="$(timeout 1.5 systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1, $2}')"
-    SYSTEMCTL_ENABLED="${SYSTEMCTL_ENABLED:-}"
+# systemd 单位文件查找路径(按 systemd 标准顺序)
+UNIT_DIRS=(
+    /etc/systemd/system
+    /run/systemd/system
+    /usr/local/lib/systemd/system
+    /usr/lib/systemd/system
+    /lib/systemd/system
+)
 
+# 判断服务是否已安装 —— 只看单位文件在不在。
+# 不用 systemctl list-unit-files: 那条命令要遍历解析全部 unit, 小内存 VPS 上
+# 实测 1.2~1.5s, 极易被超时砍掉并静默退化成"全部未安装"; stat 只要 1ms。
+unit_exists() {  # $1=服务名(不含 .service)  → 0=已安装
+    local d
+    for d in "${UNIT_DIRS[@]}"; do
+        [[ -e "$d/$1.service" ]] && return 0
+    done
+    return 1
+}
+
+build_service_status() {
     local svc
     XRAY_SVC=""; MIHOMO_SVC=""; HY2_SVC=""; SB_SVC=""
     for svc in xrayls xray xray-core; do
-        echo "$SYSTEMCTL_ENABLED" | grep -qw "${svc}.service" && { XRAY_SVC="$svc"; break; }
+        unit_exists "$svc" && { XRAY_SVC="$svc"; break; }
     done
     for svc in mihomo mihomo-core clash; do
-        echo "$SYSTEMCTL_ENABLED" | grep -qw "${svc}.service" && { MIHOMO_SVC="$svc"; break; }
+        unit_exists "$svc" && { MIHOMO_SVC="$svc"; break; }
     done
     for svc in hysteria-server hysteria2 hysteria hy2; do
-        echo "$SYSTEMCTL_ENABLED" | grep -qw "${svc}.service" && { HY2_SVC="$svc"; break; }
+        unit_exists "$svc" && { HY2_SVC="$svc"; break; }
     done
     for svc in sing-box singbox sb; do
-        echo "$SYSTEMCTL_ENABLED" | grep -qw "${svc}.service" && { SB_SVC="$svc"; break; }
+        unit_exists "$svc" && { SB_SVC="$svc"; break; }
     done
 }
 
@@ -487,8 +511,8 @@ hysteria_menu() {
 # ===========================
 main_menu() {
     local choice rc
-    build_service_status
     while true; do
+        build_service_status   # 每次重绘都重新检测: 装完内核返回主菜单状态即时正确
         draw_main_menu
         read -r choice
         rc=$?
