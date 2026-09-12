@@ -3516,7 +3516,11 @@ dash_fam() { # <probe输出> <族>
 }
 
 dash_render() {
-    ui_init; dash_data
+    # 注意: 这里**不能**再调 ui_init —— 一帧里 menu_main 会依次调 dash_render 与 ui_guide,
+    # 两个都清屏的话, 仪表盘刚画完就被第二遍清屏擦掉: 用户看到的就是"面板闪一下就没了"
+    # (实测复现: 2 帧出现 4 次 ESC[2J, 第 1 屏只有仪表盘、第 2 屏只有菜单)。
+    # 清屏改由每帧开头统一做一次 (menu_main 循环第一行)。
+    dash_data
     # 框宽必须**跟着终端单调增长**: 原来 UI_COLS>=100 时反而 W=48 (比 84 列的 76 还窄),
     # 宽终端上就出现"框顶比内容短一大截"(实测 120 列时框顶 51 列 vs 内容行 76 列)的破框。
     # 封顶 76 是因为内容区最宽的行就是 76 列。
@@ -3616,8 +3620,8 @@ ui_danger() { # <标题> <说明多行文本, 用 | 分行>
 
 # 下一步建议引擎: 基于 dash_data 的状态给出人话指引 (首页与快速设置共用)
 ui_guide() {
-    ui_init
-    dash_data
+    # 同样不在这里清屏; dash_data 也复用 dash_render 已取好的结果 (原来是同一帧取两遍)
+    
     local tips=()
     if ((D_ON == 0)); then
         tips+=("WARP 未安装或未运行 ${UI_ARROW} [1] 快速设置 ${UI_ARROW} [1] 安装 / 准备 WARP")
@@ -4129,6 +4133,7 @@ menu_main() {
     need_root
     init_dirs; migrate_v2
     while true; do
+        ui_init          # 每帧唯一一次清屏 + 重新读终端宽度 (放这里, 不在 draw 函数里)
         dash_render
         ui_guide
         printf '  %s\n' "$(printf '%*s' 62 '' | tr ' ' '-')"
