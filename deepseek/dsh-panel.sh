@@ -51,6 +51,7 @@ BOLD="\033[1m"
 BOX_W=62
 
 print_info()  { echo -e "${GREEN}[Info]${PLAIN} $1"; }
+print_ok()    { echo -e "${GREEN}[OK]${PLAIN} $1"; }
 print_error() { echo -e "${RED}[Error]${PLAIN} $1"; }
 print_warn()  { echo -e "${YELLOW}[Warn]${PLAIN} $1"; }
 
@@ -183,6 +184,8 @@ PLUGIN_OUT="$PANEL_DIR/last-plugin-install.log"
 
 PORT="3080"
 WORKSPACE=""
+MEM_GUARD="off"        # 内存守护: on=超限自动重启
+MEM_LIMIT_MB="600"     # RSS 阈值(MB), 超过即自动重启 dsh web
 
 load_config() {
     mkdir -p "$PANEL_DIR"
@@ -191,6 +194,8 @@ load_config() {
         source "$CONF_FILE"
     fi
     [[ ! "$PORT" =~ ^[0-9]+$ ]] && PORT="3080"
+    [[ "$MEM_GUARD" != "on" ]] && MEM_GUARD="off"
+    [[ ! "$MEM_LIMIT_MB" =~ ^[0-9]+$ ]] && MEM_LIMIT_MB="600"
     if [[ -z "$WORKSPACE" ]]; then
         WORKSPACE="$HOME/dsh-workspace"
         save_config
@@ -202,6 +207,8 @@ save_config() {
     cat > "$CONF_FILE" <<EOF
 PORT="$PORT"
 WORKSPACE="$WORKSPACE"
+MEM_GUARD="$MEM_GUARD"
+MEM_LIMIT_MB="$MEM_LIMIT_MB"
 EOF
 }
 
@@ -231,10 +238,15 @@ nohup_pid_alive() {
     [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null
 }
 
+# 兜底: 兼容面板之外手动 nohup 启动的 dsh web (无 PID 文件也能认出)
+stray_dsh_pid() {
+    pgrep -f "dsh web --port ${PORT}([[:space:]]|\$)" 2>/dev/null | head -n1
+}
+
 svc_active() { systemctl is-active --quiet "$SVC_NAME" 2>/dev/null; }
 
 is_running() {
-    if use_systemd; then svc_active; else nohup_pid_alive; fi
+    if use_systemd; then svc_active; else nohup_pid_alive || [[ -n "$(stray_dsh_pid)" ]]; fi
 }
 
 port_listening() {
@@ -247,6 +259,17 @@ running_pid() {
         systemctl show -p MainPID --value "$SVC_NAME" 2>/dev/null
     else
         cat "$PID_FILE" 2>/dev/null
+    fi
+    # 兜底: PID 文件无效但进程实际存在 (手动 nohup)
+    if [[ -z "$(cat "$PID_FILE" 2>/dev/null)" || ! -s "$PID_FILE" ]]; then
+        :
+    fi
+    if ! use_systemd; then
+        local p
+        p=$(cat "$PID_FILE" 2>/dev/null)
+        if [[ -z "$p" ]] || ! kill -0 "$p" 2>/dev/null; then
+            stray_dsh_pid
+        fi
     fi
 }
 
@@ -297,7 +320,18 @@ do_start() {
         $SUDO systemctl restart "$SVC_NAME"
         sleep 1
         if svc_active; then
+            local tk="" i
+            for i in {1..15}; do
+                sleep 2
+                tk=$(get_web_token)
+                [[ -n "$tk" ]] && break
+            done
             print_info "DSH 已启动 (systemd, PID $(running_pid)) → http://127.0.0.1:${PORT}"
+            if [[ -n "$tk" ]]; then
+                print_info "访问地址: http://127.0.0.1:${PORT}/?token=${tk}"
+            else
+                print_warn "访问 Token 尚未生成 (首启初始化较慢), 稍后用菜单 10 或 dshp token 查看。"
+            fi
         else
             print_error "启动失败, 请查看日志: journalctl -u ${SVC_NAME} -n 30"
             return 1
@@ -311,7 +345,18 @@ do_start() {
         )
         sleep 2
         if nohup_pid_alive; then
+            local tk="" i
+            for i in {1..15}; do
+                sleep 2
+                tk=$(get_web_token)
+                [[ -n "$tk" ]] && break
+            done
             print_info "DSH 已启动 (nohup, PID $(cat "$PID_FILE")) → http://127.0.0.1:${PORT}"
+            if [[ -n "$tk" ]]; then
+                print_info "访问地址: http://127.0.0.1:${PORT}/?token=${tk}"
+            else
+                print_warn "访问 Token 尚未生成 (首启初始化较慢), 稍后用菜单 10 或 dshp token 查看。"
+            fi
         else
             print_error "启动失败, 请查看日志: 面板菜单 8) 运行日志"
             return 1
@@ -340,6 +385,8 @@ do_stop() {
             kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null
         fi
         rm -f "$PID_FILE"
+        # 轮转日志: 下次启动后 LOG_FILE 只含本次输出, token 提取不会命中旧启动
+        [[ -f "$LOG_FILE" ]] && mv -f "$LOG_FILE" "${LOG_FILE}.old" 2>/dev/null
         print_info "DSH 已停止 (nohup)。"
     fi
 }
@@ -351,10 +398,151 @@ do_restart() {
 }
 
 # ===========================
+#   访问 Token (dsh web 每次启动生成新 token, 打进启动日志)
+# ===========================
+get_web_token() {
+    local t="" since
+    if use_systemd; then
+        # 只看「本次启动」之后的日志: 重启后旧 token 行仍在 journal, 不按时间过滤会误报旧值
+        since=$(systemctl show -p ActiveEnterTimestamp --value "$SVC_NAME" 2>/dev/null)
+        t=$(journalctl -u "$SVC_NAME" --since "${since:-@0}" --no-pager 2>/dev/null | grep -oE 'token[=:][[:space:]]*[A-Za-z0-9._-]+' | tail -n1 | grep -oE '[A-Za-z0-9._-]+$')
+    else
+        [[ -f "$LOG_FILE" ]] && t=$(grep -oE 'token[=:][[:space:]]*[A-Za-z0-9._-]+' "$LOG_FILE" 2>/dev/null | tail -n1 | grep -oE '[A-Za-z0-9._-]+$')
+        # 兜底: 手动 nohup 启动的输出在工作目录 nohup.out
+        if [[ -z "$t" && -f "$WORKSPACE/nohup.out" ]]; then
+            t=$(grep -oE 'token[=:][[:space:]]*[A-Za-z0-9._-]+' "$WORKSPACE/nohup.out" 2>/dev/null | tail -n1 | grep -oE '[A-Za-z0-9._-]+$')
+        fi
+    fi
+    printf '%s' "$t"
+}
+
+show_access() {
+    if ! is_running; then
+        print_warn "DSH 未在运行, 请先启动 (菜单 2)。"
+        return 0
+    fi
+    local token
+    token=$(get_web_token)
+    echo
+    box_top "访问信息"
+    info_row "本机访问" "http://127.0.0.1:${PORT}"
+    if [[ -n "$token" ]]; then
+        info_row "完整地址" "http://127.0.0.1:${PORT}/?token=${token}"
+        echo -e "  ${CYAN}$(pad_disp "Token" 10)${PLAIN}  ${GREEN}${token}${PLAIN}"
+        echo
+        echo -e "  ${GRAY}· Token 每次启动/重启都会更换, 旧链接会失效${PLAIN}"
+        echo -e "  ${GRAY}· 远程访问: ssh -L ${PORT}:127.0.0.1:${PORT} user@服务器 后打开本机地址${PLAIN}"
+    else
+        echo -e "  ${YELLOW}未从日志中找到 Token${PLAIN} ${GRAY}(刚启动的话等 2 秒再试)${PLAIN}"
+    fi
+    box_bot
+    return 0
+}
+
+# ===========================
+#   内存守护 (dsh web 是 Node 长驻进程, 运行数日 RSS 会持续增长)
+# ===========================
+memwatch_rss_mb() {
+    local p
+    p=$(running_pid)
+    [[ -z "$p" ]] && { printf '0'; return; }
+    ps -o rss= -p "$p" 2>/dev/null | awk '{printf "%d", $1/1024}'
+}
+
+memwatch_check() {  # cron 调用: 超限自动重启
+    [[ "$MEM_GUARD" == "on" ]] || return 0
+    is_running || return 0
+    load_config
+    local rss limit
+    rss=$(memwatch_rss_mb)
+    limit="$MEM_LIMIT_MB"
+    (( rss == 0 )) && return 0
+    if (( rss >= limit )); then
+        {
+            echo "[$(date '+%F %T')] RSS ${rss}MB >= ${limit}MB, 自动重启 dsh web ..."
+        } >> "$PANEL_DIR/memwatch.log"
+        if use_systemd; then
+            $SUDO systemctl restart "$SVC_NAME" 2>/dev/null
+        else
+            local p; p=$(cat "$PID_FILE" 2>/dev/null)
+            [[ -n "$p" ]] && kill "$p" 2>/dev/null
+            sleep 2
+            (
+                cd "$WORKSPACE" 2>/dev/null || exit
+                nohup dsh web --port "$PORT" >>"$LOG_FILE" 2>&1 &
+                echo $! > "$PID_FILE"
+            )
+        fi
+        echo "[$(date '+%F %T')] 重启完成" >> "$PANEL_DIR/memwatch.log"
+    fi
+    return 0
+}
+
+memwatch_panel_path() {
+    if [[ -x /usr/local/bin/dshp ]]; then printf '%s' /usr/local/bin/dshp
+    else printf '%s' "$(readlink -f "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}")"; fi
+}
+
+memwatch_install() {
+    local self
+    self=$(memwatch_panel_path)
+    # cron 需要绝对可执行路径; dshp 不存在则先创建
+    if [[ ! -x /usr/local/bin/dshp && ( $EUID -eq 0 || -w /usr/local/bin ) ]]; then
+        cp -f "$(readlink -f "${BASH_SOURCE[0]}")" /usr/local/bin/dshp && chmod +x /usr/local/bin/dshp
+    fi
+    (crontab -l 2>/dev/null | grep -v 'dshp memwatch-check';      echo '*/5 * * * * '"$self"' memwatch-check >/dev/null 2>&1') | crontab - 2>/dev/null         && { MEM_GUARD="on"; save_config; print_ok "内存守护已开启: 每 5 分钟检查, RSS ≥ ${MEM_LIMIT_MB}MB 自动重启。"; }         || { print_error "crontab 写入失败。"; return 1; }
+    print_info "重启事件记录: $PANEL_DIR/memwatch.log"
+}
+
+memwatch_remove() {
+    (crontab -l 2>/dev/null | grep -v 'dshp memwatch-check') | crontab - 2>/dev/null
+    MEM_GUARD="off"; save_config
+    print_ok "内存守护已关闭。"
+}
+
+memwatch_menu() {
+    local choice rss
+    while true; do
+        clear
+        rss=$(memwatch_rss_mb)
+        box_top "内存守护"
+        echo -e "  当前 RSS     ${GREEN}${rss}MB${PLAIN}  ${GRAY}(阈值 ${MEM_LIMIT_MB}MB)${PLAIN}"
+        echo -e "  守护状态     $( [[ "$MEM_GUARD" == "on" ]] && echo -e "${GREEN}● 开启${PLAIN} (crontab 每5分钟)" || echo -e "${YELLOW}○ 关闭${PLAIN}" )"
+        echo -e "  说明         ${GRAY}dsh web 为 Node 长驻进程, 数日后内存缓慢增长;${PLAIN}"
+        echo -e "               ${GRAY}超限自动重启即可释放 (浏览器需重新打开带 token 的地址)${PLAIN}"
+        echo
+        echo -e "  ${YELLOW}1${PLAIN}) 开启守护 (或重设阈值)"
+        echo -e "  ${YELLOW}2${PLAIN}) 关闭守护"
+        echo -e "  ${YELLOW}3${PLAIN}) 查看重启记录"
+        echo -e "  ${YELLOW}0${PLAIN}) 返回"
+        box_bot
+        read_choice "  请选择 [0-3]: " choice
+        case "$choice" in
+            1)
+                read_choice "RSS 阈值(MB) [直接回车=${MEM_LIMIT_MB}]: " choice
+                [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 200 )) && MEM_LIMIT_MB="$choice"
+                memwatch_install ;;
+            2) memwatch_remove ;;
+            3) [[ -f "$PANEL_DIR/memwatch.log" ]] && tail -n 20 "$PANEL_DIR/memwatch.log" || print_info "暂无重启记录。";;
+            0) return 0 ;;
+            *) invalid_input ;;
+        esac
+        echo; read -r -p "回车继续..." _ 2>/dev/null || return 0
+    done
+}
+
+# ===========================
 #   安装 / 更新
 # ===========================
 install_dsh() {
     init_sudo
+    # 防呆: 已安装时不再盲目重复安装, 引导用「更新 DSH」
+    if dsh_installed; then
+        print_warn "DSH 已安装 ($(dsh_version)), 无需重复安装。"
+        echo -e "  ${GRAY}如需升级到最新版, 请用菜单 5) 更新 DSH。${PLAIN}"
+        read_choice "仍要强制重装 (重跑完整安装流程)? 直接回车=取消, y=重装: " yn
+        [[ "$yn" != y* ]] && { print_info "已取消。"; return 0; }
+    fi
     print_info "① 检查基础工具 (curl / git)..."
     if ! command -v curl >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
         if command -v apt-get >/dev/null 2>&1; then
@@ -813,7 +1001,7 @@ EOF
     if ! dsh_installed; then
         info_row "安装状态" "${RED}未安装${PLAIN}  ${GRAY}(先执行菜单 1 安装)${PLAIN}"
     elif is_running; then
-        info_row "运行状态" "${GREEN}● 运行中${PLAIN}  ${GRAY}PID ${PLAIN}${GREEN}$(running_pid)${PLAIN}"
+        info_row "运行状态" "${GREEN}● 运行中${PLAIN}  ${GRAY}PID ${PLAIN}${GREEN}$(running_pid)${PLAIN}  ${GRAY}内存 ${PLAIN}${GREEN}$(memwatch_rss_mb)MB${PLAIN}${GRAY}/上限 ${MEM_LIMIT_MB}MB${PLAIN}"
     else
         info_row "运行状态" "${YELLOW}○ 已停止${PLAIN}"
     fi
@@ -833,7 +1021,8 @@ EOF
     menu_row "2" "◆ 启动"           "7" "◆ 插件管理"
     menu_row "3" "◆ 停止"           "8" "◆ 运行日志"
     menu_row "4" "◆ 重启"           "9" "◆ 工作区设置"
-    menu_row "5" "◆ 更新 DSH"
+    menu_row "5" "◆ 更新 DSH"       "10" "◆ 查看访问 Token"
+    menu_row "11" "◆ 内存守护"
     if in_wsl && ! use_systemd; then
         menu_row "20" "◆ 开启 systemd"
     fi
@@ -867,6 +1056,8 @@ main_menu() {
             3)  do_stop; pause_return; need_refresh=1 ;;
             4)  do_restart; pause_return; need_refresh=1 ;;
             5)  update_dsh; pause_return; need_refresh=1 ;;
+            10) show_access; pause_return ;;
+            11) memwatch_menu; need_refresh=1 ;;
             6)  change_port; pause_return; need_refresh=1 ;;
             7)  plugin_menu; need_refresh=1 ;;
             8)  view_log; pause_return ;;
@@ -1048,5 +1239,32 @@ main() {
         main_menu
     fi
 }
+
+# ===========================
+#   命令行入口 (Token / 内存守护) — 先于交互面板处理
+# ===========================
+case "${1:-}" in
+    token)          load_config; init_sudo
+                    t=$(get_web_token)
+                    [[ -n "$t" ]] && { echo "http://127.0.0.1:${PORT}/?token=$t"; exit 0; }
+                    print_error "未找到 Token (服务未运行?)"; exit 1 ;;
+    memwatch-check) load_config; init_sudo; memwatch_check; exit 0 ;;
+    start)   load_config; init_sudo; do_start;  exit $? ;;
+    stop)    load_config; init_sudo; do_stop;   exit $? ;;
+    restart) load_config; init_sudo; do_restart; exit $? ;;
+    status)  load_config
+             dsh_installed || { print_error "DSH 未安装"; exit 1; }
+             if is_running; then print_ok "运行中 (PID $(running_pid), RSS $(memwatch_rss_mb)MB) → http://127.0.0.1:${PORT}"
+             else print_warn "已停止"; fi
+             exit 0 ;;
+    memwatch)       load_config; init_sudo
+                    case "${2:-status}" in
+                        on)     memwatch_install ;;
+                        off)    memwatch_remove ;;
+                        status) echo "守护: $MEM_GUARD  阈值: ${MEM_LIMIT_MB}MB  当前RSS: $(memwatch_rss_mb)MB" ;;
+                        *)      print_error "用法: memwatch on|off|status" ;;
+                    esac
+                    exit 0 ;;
+esac
 
 main
