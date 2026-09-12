@@ -814,7 +814,7 @@ install_warp() {
         box_top "安装 Warp"
         echo -e "  ${YELLOW}1${PLAIN}) 官方 warp 脚本"
         echo -e "  ${YELLOW}2${PLAIN}) warp-go"
-        echo -e "  ${YELLOW}3${PLAIN}) 勇哥 warp"
+        echo -e "  ${YELLOW}3${PLAIN}) catmi warp"
         echo -e "  ${YELLOW}0${PLAIN}) 返回主菜单"
         box_bot
         echo
@@ -849,7 +849,7 @@ install_warp() {
                 fi
                 pause_return
                 ;;
-            3) run_remote "https://raw.githubusercontent.com/yonggekkk/warp-yg/main/CFwarp.sh"; pause_return ;;
+            3) run_remote "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/warp/catmi-warp3.sh"; pause_return ;;
             *) invalid_input ;;
         esac
     done
