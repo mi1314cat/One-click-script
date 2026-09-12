@@ -111,13 +111,49 @@ pkg_install() {
 }
 
 ensure_deps() {
+    # 这份清单 = 「全新机器上 apply 到底依赖什么」。原实现漏了 curl (脚本里 38 处调用)
+    # 与 ping (v6 补栈自检 / endpoint 采样), 少任何一个都会让 apply 在**半途**失败或静默降级。
     command -v ipset >/dev/null 2>&1 || pkg_install ipset
     command -v dig >/dev/null 2>&1 || { pkg_install dnsutils; command -v dig >/dev/null 2>&1 || pkg_install bind-utils; }
     command -v python3 >/dev/null 2>&1 || pkg_install python3
     command -v iptables >/dev/null 2>&1 || pkg_install iptables
+    command -v curl >/dev/null 2>&1 || pkg_install curl
+    command -v ping >/dev/null 2>&1 || { pkg_install iputils-ping; command -v ping >/dev/null 2>&1 || pkg_install iputils; }
+    # dnsmasq 是 apply 的硬依赖 (步骤 2 无条件执行), 原实现只检查不安装 ——
+    # 没有 dnsmasq 的机器 apply 必然失败在 "dnsmasq 启动失败", 而工具明明能自己装 (实测 CCS)
+    command -v dnsmasq >/dev/null 2>&1 || pkg_install dnsmasq
+    # 硬闸门: 缺任何一个都会让 apply 半途失败, 不如在这里说清楚
     command -v ipset >/dev/null 2>&1 || { err "ipset 不可用"; return 1; }
+    command -v dnsmasq >/dev/null 2>&1 || { err "dnsmasq 不可用 (域名分流需要它写 ipset)"; return 1; }
     command -v dig >/dev/null 2>&1 || { err "dig 不可用 (dnsutils/bind-utils)"; return 1; }
+    command -v curl >/dev/null 2>&1 || { err "curl 不可用 (出口探测/健康检查依赖它)"; return 1; }
+    command -v iptables >/dev/null 2>&1 || { err "iptables 不可用"; return 1; }
+    # ip6tables 只告警不拦: 单栈 v4 机器上仍可以正常工作
+    command -v ip6tables >/dev/null 2>&1 || warn "ip6tables 不可用 — v6 面规则将无法部署 (装 iptables 包)"
+    # ping 只告警: 缺它只是少一个自检手段, 不该拦住部署
+    command -v ping >/dev/null 2>&1 || warn "ping 不可用 — v6 补栈自检与 endpoint 采样会降级"
     return 0
+}
+
+# 内核版本比较 —— WireGuard 自 5.6 才进主线。原来三处都写 `uname -r | cut -d. -f1`(只比 major),
+# 于是 5.4 被判成 "≥5.6 (内置)": armbian legacy / rockchip 正是 5.4, 上机就假绿放行。
+kernel_ge() { # kernel_ge <major> <minor> [版本串, 默认 uname -r]
+    local v="${3:-$(uname -r)}" maj min
+    maj=$(cut -d. -f1 <<<"$v"); min=$(cut -d. -f2 <<<"$v")
+    [[ "$maj" =~ ^[0-9]+$ ]] || return 1
+    [[ "$min" =~ ^[0-9]+$ ]] || min=0
+    (( maj > $1 )) || { (( maj == $1 )) && (( min >= $2 )); }
+}
+
+# ipset 是否存在 —— `ipset list <名>` 偶发失败(并发/内核忙)不等于"集合不存在",
+# 直接当判据会让 doctor 报假红 (实测 17 次 doctor 里 2 次非预期 FAIL)。重试 3 次再下结论。
+ipset_exists() {
+    local i
+    for i in 1 2 3; do
+        ipset list -n "$1" >/dev/null 2>&1 && return 0
+        sleep 0.1
+    done
+    return 1
 }
 
 # ---------- 目录与配置 ----------
@@ -165,12 +201,44 @@ EOF
 migrate_v2() {
     [[ -f "$STATE/v2-imported" ]] && return 0
     local v2rules="${CATMI_V2_HOME:-/etc/catmi/warp}/config/rules.conf"
-    if [[ -s "$v2rules" ]] && [[ "$(rule_list 2>/dev/null | wc -l)" -eq 0 ]]; then
-        grep -vE "^\s*#|^\s*$" "$v2rules" >> "$RULES" 2>/dev/null
-        touch "$STATE/v2-imported"
-        ok "V2 规则只读导入: $(rule_list | wc -l) 条 (V2 原件未动)"
-        log_op "migrate" "v2 rules imported (read-only)"
+    [[ -s "$v2rules" ]] || return 0
+    if [[ "$(rule_list 2>/dev/null | wc -l)" -ne 0 ]]; then
+        info "V2 规则导入: 跳过 (V3 已有规则, 不覆盖)"
+        return 0
     fi
+    # 逐行校验后再落盘。原实现有两个缺陷:
+    #  ① `grep ... >> "$RULES" 2>/dev/null` 不判返回码, 紧接着**无条件** touch 幂等标记:
+    #     盘满/只读/写一半时只进了一部分却打印 [OK], 标记又已写 → 剩余规则**永久不再导入**
+    #     (实测: 20k tmpfs + 114KB V2 文件 → 只进 589/4001 条; 腾空后重跑静默跳过)
+    #  ② 导入完全绕过 valid_domain/action 白名单, 非法行会进 dnsmasq 配置让 apply 失败
+    local line d a en note
+    local -a keep=(); local bad=0
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+        IFS='|' read -r d a en note <<<"$line"
+        d="${d,,}"
+        if [[ "$a" != "warp" && "$a" != "native" ]] || ! valid_domain "$d"; then
+            bad=$(( bad + 1 )); continue
+        fi
+        keep+=("$d|$a|${en:-1}|$note")
+    done < "$v2rules"
+    if (( ${#keep[@]} == 0 )); then
+        err "V2 规则导入: 0 条可用 (跳过非法行 $bad 条) — 未写标记, 修正 V2 文件后可重试"
+        return 1
+    fi
+    # 复用 rules_atomic 的 tmp+mv 语义: 写失败绝不写"已导入"标记
+    cp -f "$RULES" "$RUNTIME/rules.tmp" 2>/dev/null \
+        || { err "V2 规则导入失败: 无法创建临时文件 ($RUNTIME/rules.tmp)"; return 1; }
+    if ! printf '%s\n' "${keep[@]}" >> "$RUNTIME/rules.tmp" 2>/dev/null || ! rules_atomic; then
+        rm -f "$RUNTIME/rules.tmp" 2>/dev/null
+        err "V2 规则导入失败 (磁盘满 / 只读挂载?) — rules.conf 未改动, 未写标记"
+        return 1
+    fi
+    touch "$STATE/v2-imported" 2>/dev/null \
+        || { err "写导入标记失败 — 下次启动会重新尝试 (无副作用)"; return 1; }
+    ok "V2 规则只读导入: $(rule_list | wc -l) 条 (V2 原件未动, 跳过非法行 $bad 条)"
+    log_op "migrate" "v2 rules imported (read-only)"
     return 0
 }
 
@@ -217,6 +285,7 @@ parse_creds() {
     for f in ${CATMI_CRED_FILE:+$CATMI_CRED_FILE} /opt/warp-go/wgcf.conf /etc/wireguard/warp.conf /opt/warp-go/warp.conf /etc/wireguard/warp-account.conf; do
         if [[ -s "$f" ]] && grep -q 'PrivateKey' "$f"; then src="$f"; break; fi
     done
+    CRED_SRC="$src"   # 唯一真源: 本模块实际用来拉起 WARP 的那个凭据文件
     if [[ -n "$src" ]]; then
         strip_val() { sed -n "s/^$1[ ]*=[ ]*//p" "$2" 2>/dev/null | head -1 | tr -d '\r'; }
         PRIVKEY=$(strip_val 'PrivateKey' "$src")
@@ -334,7 +403,7 @@ diagnose() {
     detect_iface || findings+=("② 服务/接口: 当前无 WARP 接口 (active 服务: ${svc:-无})")
     # ③ WireGuard 不可用
     if ! modprobe wireguard 2>/dev/null && ! grep -qw wireguard /proc/modules 2>/dev/null \
-       && [[ "$(uname -r | cut -d. -f1)" -lt 5 ]]; then
+       && ! kernel_ge 5 6; then
         findings+=("③ WireGuard 不可用: 内核 $(uname -r) 无模块且 <5.6 → 需用户态方案 (fscarmen warp-go)")
     fi
     # ④ 网络不可达
@@ -400,7 +469,7 @@ register_warp() {
     command -v wg >/dev/null 2>&1 || pkg_install wireguard-tools
     command -v wg >/dev/null 2>&1 || { err "wireguard-tools 安装失败"; return 1; }
     if ! modprobe wireguard 2>/dev/null && ! grep -qw wireguard /proc/modules 2>/dev/null \
-       && [[ "$(uname -r | cut -d. -f1)" -lt 5 ]]; then
+       && ! kernel_ge 5 6; then
         err "内核 $(uname -r) 无 WireGuard 模块 — 建议用 fscarmen warp-go (用户态)"; return 1
     fi
     info "正在注册新 WARP 账号 (api.cloudflareclient.com)..."
@@ -433,6 +502,22 @@ PY
     if [[ -n "$W_ADDR6" && "$DEFAULT_OUTBOUND_V6" == "warp" ]] || { [[ -n "$W_ADDR6" ]] && has_v6; }; then
         addr_line+=", ${W_ADDR6}/128"
     fi
+    # 覆盖前备份 —— 原来无条件截断 /etc/wireguard/warp.conf, 旧凭据直接消失(不可恢复)。
+    # 下面 511 行的防误覆盖只在接口**正在运行**时生效; 接口没起而 conf 还在时会被静默覆盖。
+    if [[ -s /etc/wireguard/warp.conf ]]; then
+        local _cbak="$BACKUPS/warp.conf.pre-register-$(date +%Y%m%d-%H%M%S)"
+        cp -a /etc/wireguard/warp.conf "$_cbak" 2>/dev/null \
+            && info "旧 WARP 配置已备份: $_cbak" \
+            || { err "备份 /etc/wireguard/warp.conf 失败 — 中止注册 (避免旧凭据丢失)"; return 1; }
+    fi
+    # /etc/wireguard **不一定存在**: 实测 CCS 装了 wireguard-tools 却没有这个目录
+    # (旧配置被删掉了)。原代码直接 `cat > /etc/wireguard/warp.conf` —— 目录不存在时
+    # 重定向就失败、什么都不写, 接着 enable --now 也失败, 用户看到的是
+    # "接口 warp 未创建 — 进入诊断" 这种指错方向的诊断。
+    if ! mkdir -p /etc/wireguard 2>/dev/null || [[ ! -d /etc/wireguard ]]; then
+        err "无法创建 /etc/wireguard (权限 / 只读挂载?) — 中止注册"; return 1
+    fi
+    chmod 700 /etc/wireguard 2>/dev/null
     cat > /etc/wireguard/warp.conf <<EOF
 [Interface]
 PrivateKey = $priv
@@ -446,7 +531,13 @@ AllowedIPs = 0.0.0.0/0, ::/0
 Endpoint = $CF_ENDPOINT
 PersistentKeepalive = 25
 EOF
+    # 写完必须核实: 路径异常/磁盘满时重定向可能"成功"却没内容 (半套配置最难查)
+    if [[ ! -s /etc/wireguard/warp.conf ]]; then
+        err "写入 /etc/wireguard/warp.conf 失败 (空文件) — 中止, 避免留下半套配置"; return 1
+    fi
     chmod 600 /etc/wireguard/warp.conf
+    # 单元可能停在 failed 残留状态 (实测 CCS: 3 周前的失败) —— 先清干净再启用
+    systemctl reset-failed wg-quick@warp 2>/dev/null
     systemctl enable --now wg-quick@warp >/dev/null 2>&1
     sleep 1
     if ! ip -o link show warp >/dev/null 2>&1; then
@@ -472,7 +563,7 @@ install_warp() {
     need_root
     local force="${FORCE_REGISTER:-0}"
     acquire_lock || return 1
-    init_dirs; migrate_v2
+    init_dirs; migrate_v2 || warn "V2 规则导入未完成 (不影响本次安装, 详见上)"
     local st; st=$(already_installed)
     case "$st" in
         接口*)
@@ -480,6 +571,9 @@ install_warp() {
             if health_check; then
                 ok "健康检查: 通过 (握手 ${HANDSHAKE_AGE:-n/a})"
                 gen_outbound || true
+                # 复用路径原来**直接 return 0**, 从不装开机单元 —— 已有 WARP (fscarmen/wgcf/手装)
+                # 的机器跑完 install 后既无 restore 也无 keepalive: 重启后分流静默不回。
+                install_units || { err "开机单元安装失败 — 重启后**不会**自动恢复分流"; return 1; }
                 info "下一步: 'catmi-warp apply --yes' 启用域名分流"
                 return 0
             fi
@@ -495,6 +589,7 @@ install_warp() {
             if detect_iface && health_check; then
                 ok "现有环境启动成功 — 复用 (接口: $IFACE)"
                 gen_outbound || true
+                install_units || { err "开机单元安装失败 — 重启后**不会**自动恢复分流"; return 1; }
                 return 0
             fi
             warn "现有环境无法拉起/不健康 — 诊断如下:"
@@ -512,6 +607,11 @@ install_warp() {
         err "已有运行中的 WARP 接口 ($IFACE) — 先 'catmi-warp stop' 并移除旧凭据再重注册, 防止误覆盖"
         return 1
     fi
+    # 注册流程本身要用 python3 (解析 CF 响应) 和 curl —— 而 ensure_deps 原来只在 apply 里调,
+    # 于是全新机器 (Debian 精简镜像默认没有 python3) 会被下面的体检直接拦下,
+    # 明明工具自己装得动。这里先把这两件事办了。
+    command -v python3 >/dev/null 2>&1 || pkg_install python3
+    command -v curl >/dev/null 2>&1 || pkg_install curl
     command -v check_env >/dev/null 2>&1  # no-op guard
     if ! check_env >/dev/null 2>&1; then
         warn "环境体检未通过, 详见: catmi-warp check"
@@ -519,7 +619,7 @@ install_warp() {
     fi
     if register_warp; then
         gen_outbound || true
-        install_units || true
+        install_units || { err "开机单元安装失败 — 重启后**不会**自动恢复分流 (WARP 本体已就绪)"; return 1; }
         ok "安装完成 — 'catmi-warp3 status' 看出口 / 'catmi-warp3 apply --yes' 启用分流"
         log_op "install" "OK fresh register"
         return 0
@@ -675,7 +775,21 @@ socks5_status() {
 valid_domain() { [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]; }
 
 # 原子写规则文件 (§17: 临时文件放 runtime/)
-rules_atomic() { mv -f "$RUNTIME/rules.tmp" "$RULES" 2>/dev/null; }
+# 写失败必须让调用方知道 —— 原来是 `mv -f ... 2>/dev/null`, 返回值没人查,
+# 磁盘满/只读挂载时会打印 [OK] 而实际一个字都没写 (实测 EROFS 复现, exit 0)。
+rules_atomic() {
+    if ! mv -f "$RUNTIME/rules.tmp" "$RULES" 2>/dev/null; then
+        err "规则写入失败 (磁盘满 / 只读挂载?) — 改动**未生效**"
+        rm -f "$RUNTIME/rules.tmp" 2>/dev/null
+        return 1
+    fi
+    return 0
+}
+
+# 判断规则是否存在 —— 用 awk 按字段精确比较, 与下面修改/删除**同一套语义**。
+# 反面教材: 原来这里用 `grep -E "^$d\|"`(正则) 判存在、用 awk 字符串相等做修改,
+# 同一个值两套语义 → `del "zzz|youtube.com"` 会真的删掉 youtube.com。
+rule_exists() { awk -F'|' -v d="$1" '$1==d{f=1} END{exit !f}' "$RULES" 2>/dev/null; }
 
 rule_add() {
     init_dirs
@@ -690,18 +804,134 @@ rule_add() {
 rule_set_enabled() {
     init_dirs
     local d="${1,,}" e="$2"
-    grep -qE "^${d}\|" "$RULES" 2>/dev/null || { err "规则不存在: $d"; return 1; }
-    awk -F'|' -v d="$d" -v e="$e" 'BEGIN{OFS="|"} $1==d{$3=e} {print}' "$RULES" > "$RUNTIME/rules.tmp" && rules_atomic
+    valid_domain "$d" || { err "无效域名: $d"; return 1; }
+    rule_exists "$d" || { err "规则不存在: $d"; return 1; }
+    awk -F'|' -v d="$d" -v e="$e" 'BEGIN{OFS="|"} $1==d{$3=e} {print}' "$RULES" > "$RUNTIME/rules.tmp" \
+        && rules_atomic || return 1
     ok "$d → $([[ "$e" == "1" ]] && echo 启用 || echo 禁用)"
 }
 rule_del() {
     init_dirs
     local d="${1,,}"
-    grep -qE "^${d}\|" "$RULES" 2>/dev/null || { err "规则不存在: $d"; return 1; }
-    grep -vE "^${d}\|" "$RULES" > "$RUNTIME/rules.tmp" 2>/dev/null && rules_atomic
+    valid_domain "$d" || { err "无效域名: $d"; return 1; }
+    rule_exists "$d" || { err "规则不存在: $d"; return 1; }
+    # awk 按字段精确删除 (与 rule_exists 同语义); 原来用 grep -E 会被正则元字符污染
+    awk -F'|' -v d="$d" '$1!=d' "$RULES" > "$RUNTIME/rules.tmp" 2>/dev/null \
+        && rules_atomic || return 1
     ok "规则已删除: $d"
 }
 rule_list() { grep -vE '^\s*#|^\s*$' "$RULES" 2>/dev/null; }
+
+# 术语速查 —— 小白最容易被这几个词卡住, help 里原来是零解释
+cmd_terms() {
+    cat <<'TERMEOF'
+catmi-warp3 术语速查
+════════════════════════════════════════════════════════════════
+WARP         Cloudflare 的加速网络。走它 = 流量从 Cloudflare 的 IP 出去,
+             目标网站看到的是 Cloudflare 地址, 不是你的服务器地址。
+Native       原生意, 指服务器自己的出口 (eth0 网卡的真实公网 IP)。
+             走 Native = 目标网站看到你服务器的真实 IP。
+
+默认出口     没有单独指定出路的流量走哪里。`catmi-warp3 default` 查看/切换:
+               dual   双栈    → IPv4 和 IPv6 都走 WARP
+               v4     仅 IPv4 → 只有 IPv4 走 WARP (IPv6 走原生)
+               v6     仅 IPv6 → 只有 IPv6 走 WARP (没 v6 的机器靠它"补栈")
+               native 全原生 → 都不走 WARP (等于关掉分流)
+
+网站规则     给单个域名指定走 WARP 还是 Native:
+               catmi-warp3 add openai.com native    → openai 走原生
+               catmi-warp3 add google.com warp      → google 走 WARP
+               catmi-warp3 list                     → 看我加了哪些
+             ⚠ 规则方向**与默认出口相同时不产生额外效果** —— 本来就是那个方向。
+               例如默认已是 WARP 时, 再加 warp 规则等于什么都没做。
+
+保存≠应用    add / del / on / off 只改配置; 必须再执行 `apply` 才真正部署到系统。
+             改完没生效, 先想想是不是忘了 apply。
+
+出问题先看   catmi-warp3 status   → Stack mode 那行看当前模式
+             catmi-warp3 doctor   → 全身体检, 会真连一次网验证出口通不通
+             catmi-warp3 test <域名>  → 看某个域名实际从哪个出口出去
+
+Forward      转发流量分流 (默认 OFF)。**普通出口分流不需要开**,
+             只有想让"穿过本机转发的流量"也走 WARP 时才开。
+
+入站         别人连进你服务器的流量 (SSH / Nginx / 节点服务)。
+             本脚本**永不碰入站**, 不需要为此担心。
+
+NATIVE_IPS   特殊出口豁免表 (在 config/main.conf)。列进去的 IP 永远走原生,
+             比如 Xray 的链式上游。**少写一个, 那条出口就会被卷进 WARP。**
+════════════════════════════════════════════════════════════════
+TERMEOF
+}
+
+# 手动清理旧快照 —— snapshot() 现在自带保留策略(默认 50), 这个命令给用户一个
+# "现在就清一次"的入口, 也方便把历史积累的旧快照一次性收掉。
+cmd_cleanup() {
+    init_dirs
+    local keep="${1:-50}"
+    if ! { [[ "$keep" =~ ^[0-9]+$ ]] && (( keep > 0 )); }; then
+        err "用法: catmi-warp3 cleanup [保留个数, 默认 50]"; return 1
+    fi
+    local before after
+    before=$(ls -1d "$BACKUPS"/*/ 2>/dev/null | wc -l)
+    if (( before <= keep )); then
+        info "快照只有 $before 个 (上限 $keep), 无需清理"
+        return 0
+    fi
+    ls -1dt "$BACKUPS"/*/ 2>/dev/null | tail -n +$(( keep + 1 )) | while read -r _old; do
+        rm -rf "$_old" 2>/dev/null
+    done
+    after=$(ls -1d "$BACKUPS"/*/ 2>/dev/null | wc -l)
+    ok "已清理 $(( before - after )) 个旧快照 (保留最近 $after 个)"
+    info "当前占用: $(du -sh "$BACKUPS" 2>/dev/null | cut -f1)"
+}
+
+# 快照/备份查看 —— snapshot() 一直在写 $BACKUPS, 但原来**没有任何入口能看到**。
+# 出问题时用户至少要知道"系统在改动前存过什么、存在哪", 以及怎么手动退回去。
+cmd_snapshots() {
+    init_dirs
+    echo "改动前的备份 ($BACKUPS):"
+    echo
+    if [[ ! -d "$BACKUPS" ]] || [[ -z "$(ls -A "$BACKUPS" 2>/dev/null)" ]]; then
+        echo "  (还没有备份 — apply / revoke 时才会自动生成)"
+        echo
+        echo "  想要"一键回到系统默认出口"? → catmi-warp3 revoke  (暂停分流, 规则保留)"
+        return 0
+    fi
+    local d n=0
+    for d in $(ls -1t "$BACKUPS" 2>/dev/null | head -15); do
+        [[ -d "$BACKUPS/$d" ]] || continue
+        n=$((n+1))
+        printf '  %-34s %s\n' "$d" "$(stat -c %y "$BACKUPS/$d" 2>/dev/null | cut -d. -f1)"
+    done
+    echo
+    echo "  共 $(ls -1d "$BACKUPS"/*/ 2>/dev/null | wc -l) 个快照, 占用 $(du -sh "$BACKUPS" 2>/dev/null | cut -f1)"
+    echo "  自动只保留最近 50 个; 想立刻清: catmi-warp3 cleanup"
+    echo "  里面存的是改动前的 ip rule / 路由 / iptables / resolv.conf 现场, 供人工比对。"
+    echo
+    echo "  想退回系统默认出口 → catmi-warp3 revoke      (暂停分流, 网站规则保留)"
+    echo "  想彻底拆掉分流与管理层 → catmi-warp3 uninstall"
+}
+
+# 列出全部规则 (含停用) —— 小白 add 完必须能复查自己配了什么
+cmd_list() {
+    init_dirs
+    if [[ ! -s "$RULES" ]] || [[ -z "$(rule_list)" ]]; then
+        echo "还没有任何域名规则。"
+        echo "  添加: catmi-warp3 add <域名> warp     (该域名走 WARP)"
+        echo "        catmi-warp3 add <域名> native   (该域名走服务器原生出口)"
+        return 0
+    fi
+    echo "域名规则 ($RULES):"
+    printf '  %-34s %-8s %s\n' "域名" "走向" "状态"
+    while IFS='|' read -r dom act en note; do
+        [[ -z "$dom" || "$dom" == \#* ]] && continue
+        [[ "$en" == "1" ]] && st="启用" || st="停用"
+        printf '  %-34s %-8s %s%s\n' "$dom" "$act" "$st" "${note:+   ($note)}"
+    done < <(rule_list)
+    echo
+    echo "  改完记得 apply 才生效: catmi-warp3 apply"
+}
 rule_count() { # rule_count <action> → 数量
     local n=0 dom act en
     while IFS='|' read -r dom act en _; do
@@ -729,6 +959,12 @@ detect_dns53() {
     if grep -q 'dnsmasq' <<<"$p53"; then echo dnsmasq
     elif grep -q 'systemd-resolve' <<<"$p53"; then echo resolved
     elif grep -qE 'docker|containerd' <<<"$p53"; then echo docker
+    elif ! grep -q 'users:(' <<<"$p53"; then
+        # 非 root (或权限不足) 时 `ss -p` **不输出进程名** → 上面几个 grep 全部落空,
+        # 会把正在跑的 dnsmasq 误报成 other (实测)。退回用 systemd 判断谁在提供 :53。
+        if systemctl is-active --quiet dnsmasq 2>/dev/null; then echo dnsmasq
+        elif systemctl is-active --quiet systemd-resolved 2>/dev/null; then echo resolved
+        else echo other; fi
     else echo other; fi
 }
 
@@ -742,6 +978,24 @@ detect_dns_rewriters() {
 }
 
 resolv_points_local() { grep -q 'nameserver 127.0.0.1' "$RESOLV" 2>/dev/null; }
+
+# resolv.conf 的 immutable 属性 (VPS 镜像/面板常用 `chattr +i` 防 DHCP 改写 DNS)。
+# 带 i 的文件内核直接拒绝写入, 而 shell 的 `> file` 失败**不会**让脚本察觉 ——
+# 实测 CCS: state 记了 MANAGED=1、apply 报成功, 文件仍是 1.1.1.1。
+resolv_immutable() {
+    command -v lsattr >/dev/null 2>&1 || return 1
+    lsattr -d "$RESOLV" 2>/dev/null | awk 'NR==1{print $1}' | grep -q 'i'
+}
+
+# 临时解除 immutable 并记录「是我们解除的」→ revoke 时自动加回
+resolv_unlock() {
+    resolv_immutable || return 0
+    command -v chattr >/dev/null 2>&1 || return 1
+    chattr -i "$RESOLV" 2>/dev/null || return 1
+    IMMUTABLE_RESTORE=1
+    info "resolv.conf 带 immutable 属性 (VPS 加固) — 已临时解除, 还原时会自动加回"
+    return 0
+}
 
 # DNS 决策 (纯函数, selftest 可测): 入参 mode resolv_local(0/1) → echo 决策
 #   reuse     : 纯复用, 零改动
@@ -784,6 +1038,11 @@ gen_dnsmasq_conf() {
             [[ -n "$lst" ]] && echo "ipset=/$dom/$lst"
         done < <(rule_list)
     } > "$GEN_DNS_REAL"
+    # 生成物必须非空 —— 重定向失败/盘满时是空文件, dnsmasq 会"正常启动"但一条规则都没有
+    if [[ ! -s "$GEN_DNS_REAL" ]]; then
+        err "生成 dnsmasq 配置失败 ($GEN_DNS_REAL 为空) — 域名规则不会生效"
+        return 1
+    fi
     # symlink 接入 dnsmasq; 他人文件 → 拒绝; 自家遗留普通文件(如被 sed -i 炸掉的 symlink) → 收回
     if [[ -e "$GEN_DNS_LINK" && ! -L "$GEN_DNS_LINK" ]]; then
         if head -1 "$GEN_DNS_LINK" 2>/dev/null | grep -q 'catmi-warp'; then
@@ -793,7 +1052,16 @@ gen_dnsmasq_conf() {
             return 1
         fi
     fi
+    # conf-dir 必须存在 (全新机器上 dnsmasq 刚装完才有 /etc/dnsmasq.d)
+    mkdir -p "$(dirname "$GEN_DNS_LINK")" 2>/dev/null
     ln -sfn "$GEN_DNS_REAL" "$GEN_DNS_LINK"
+    # ln 失败原先是**静默**的: dnsmasq 拿不到 ipset= 行 ⇒ 域名规则一条都不生效, 而
+    # 整个 apply 会显示成功 (dnsmasq 自己跑得好好的)。这里必须回读确认。
+    if [[ ! -L "$GEN_DNS_LINK" ]] || \
+       [[ "$(readlink -f "$GEN_DNS_LINK" 2>/dev/null)" != "$(readlink -f "$GEN_DNS_REAL" 2>/dev/null)" ]]; then
+        err "接入 dnsmasq 失败: $GEN_DNS_LINK 未指向生成的配置 — 域名规则不会生效"
+        return 1
+    fi
     return 0
 }
 
@@ -805,6 +1073,40 @@ cleanup_dns_conf() {
         rm -f "$GEN_DNS_LINK"
     fi
     rm -f "$GEN_DNS_REAL"
+    return 0
+}
+
+# 拆除本模块的**全部**系统改动 —— 顺序敏感, 必须整体抽成一个函数。
+# 反面教材: 之前只抽出了一个收尾助手 dnsmasq_after_conf_removed(), 两个调用方各自
+# 排列其余步骤 → rollback_undo 把 dns_release 放在收尾**之前**, 而 dns_release 的
+# DNS 兜底条件是「dnsmasq 已停」(那时它还没停) → 兜底不触发 → 紧接着收尾把 dnsmasq
+# 停掉 → resolv.conf 仍指向 127.0.0.1 却没有服务 = 整机 DNS 死。
+# 正确顺序: 拆防火墙 → 撤 dnsmasq 配置并收尾 → **最后**还原 resolv.conf。
+teardown_all() {
+    fw_down_silent
+    cleanup_dns_conf
+    dnsmasq_after_conf_removed
+    dns_release
+}
+
+# 撤掉本模块 dnsmasq 配置后的收尾 —— rollback_undo / revoke 都必须走 teardown_all()。
+# 为什么不能直接 restart: 撤掉 conf 后 dnsmasq 退回默认配置(绑 *:53), 若 :53 已被
+# systemd-resolved (127.0.0.53:53) 占用, 重启会**永久 failed 且无人察觉**, 把整机 DNS 打死。
+# 所以必须校验: 起不来就停掉, 至少留下干净的 inactive 而不是 failed。
+# (v3 实测缺陷 — 两个调用方各写一遍正是这个 bug 能活下来的原因)
+dnsmasq_after_conf_removed() {
+    systemctl is-active dnsmasq >/dev/null 2>&1 || return 0
+    systemctl restart dnsmasq 2>/dev/null
+    if ! systemctl is-active --quiet dnsmasq 2>/dev/null; then
+        # 注意: `systemctl stop` **不会**清除失败状态 —— 实测 stop 之后
+        # ActiveState 仍是 exit-code / Result=failed, 必须 reset-failed 才干净。
+        warn "撤配置后 dnsmasq 起不来 (:53 被 systemd-resolved 占用) — 已停用并清除失败状态"
+        systemctl stop dnsmasq 2>/dev/null
+        systemctl reset-failed dnsmasq 2>/dev/null
+        if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+            warn "dnsmasq 仍在运行 (非预期)"
+        fi
+    fi
     return 0
 }
 
@@ -870,10 +1172,19 @@ dns_takeover() {
     fi
     # 接管: 移除链接本身 → 写普通文件 (bash 的 > 重定向会穿透 symlink 写目标文件,
     # 这正是 V2 的隐患; 目标内容已随 pre 备份保留, 链接形态由 state 记录)
+    resolv_unlock || { err "$RESOLV 带 immutable 属性且无法解除 (缺 chattr?) — 接管中止"; return 1; }
     if [[ -L "$RESOLV" ]]; then
         rm -f "$RESOLV"
     fi
-    { echo "# catmi-warp3 v$VERSION managed — 还原: catmi-warp3 revoke"; echo "nameserver 127.0.0.1"; } > "$RESOLV"
+    { echo "# catmi-warp3 v$VERSION managed — 还原: catmi-warp3 revoke"; echo "nameserver 127.0.0.1"; } > "$RESOLV" 2>/dev/null
+    # **必须回读确认**: immutable / 只读挂载 / 被面板托管时, 重定向会静默失败,
+    # 而后续 dnsmasq 明明在跑、apply 全绿 —— 只有 doctor 事后报"漂移"能看出来。
+    if ! resolv_points_local; then
+        err "写入 $RESOLV 失败 — 接管未生效 (immutable 属性? 只读挂载? 被面板托管?)"
+        [[ "${IMMUTABLE_RESTORE:-}" == "1" ]] && chattr +i "$RESOLV" 2>/dev/null
+        return 1
+    fi
+    [[ "${IMMUTABLE_RESTORE:-}" == "1" ]] && echo "IMMUTABLE_RESTORE=1" >> "$RESOLV_STATE"
     ok "resolv.conf → 127.0.0.1 (原件已备份; 原形态: $rtype$([[ -n "$ltarget" ]] && echo " → $ltarget"))"
     return 0
 }
@@ -905,8 +1216,21 @@ dns_release() {
         fi
         # 恢复准确性校验
         if [[ -n "$orig" && "$orig" != "unknown-premanaged" ]]; then
-            now=$(sha256sum "$RESOLV" 2>/dev/null | awk "{print $1}")
+            # 单引号! 原来写 `awk "{print $1}"`: bash 会先把 $1 展开成函数的位置参数
+            # (dns_release 无参 → 空) ⇒ awk 程序变成 `{print }` 输出**整行**,
+            # 而 orig 只是哈希 ⇒ 比较永远不相等 ⇒ 这条告警**无条件触发**。
+            # 后果不是"多一条告警", 而是真被改写时根本分不出来 (V1 当时把它当成了预期行为)。
+            now=$(sha256sum "$RESOLV" 2>/dev/null | awk '{print $1}')
             [[ "$now" == "$orig" ]] || warn "resolv.conf SHA 与接管前不一致 (可能被其他服务重写, 请人工确认)"
+        fi
+        # 接管时若解除过 immutable, 这里必须加回去 —— 否则等于我们**永久**拿掉了
+        # 用户 VPS 上的那层加固 (还原 ≠ 只还原内容)
+        if grep -q '^IMMUTABLE_RESTORE=1' "$RESOLV_STATE" 2>/dev/null; then
+            if command -v chattr >/dev/null 2>&1 && chattr +i "$RESOLV" 2>/dev/null; then
+                info "已还原 resolv.conf 的 immutable 属性 (chattr +i)"
+            else
+                warn "immutable 属性还原失败 — 手动执行: chattr +i $RESOLV"
+            fi
         fi
         rm -f "$RESOLV_STATE"
     else
@@ -922,7 +1246,11 @@ warm_domains() {
     command -v dig >/dev/null 2>&1 || pkg_install dnsutils
     local dom act en
     while IFS='|' read -r dom act en _; do
-        [[ "$en" == "1" && "$act" == "warp" ]] || continue
+        # 预热**全部**已启用规则 —— 原来写成 `act == "warp"`, 把 native 规则整个跳过:
+        # 在第一个客户端经本机 dnsmasq 解析该域名之前, 对应的 cw3-native4/6 是空的,
+        # 这段时间打到该 IP 的流量 (客户端用 DoH / 代理内核自己远程解析域名) 会走 WARP
+        # 而不是原生。dnsmasq 只会把域名填进「按当前栈生成的」那个集合, 多 dig 无副作用。
+        [[ "$en" == "1" ]] || continue
         dig +short @127.0.0.1 "$dom" A >/dev/null 2>&1
         # 注意: 本机无 v6 出口时跳过 AAAA — 用 if 而非 [[ ]]&&, 避免短路返回 1 污染函数退出码
         # 判据用 has_v6 (有没有全局 v6 地址), 不用 all.disable_ipv6 (那只是新接口默认值)
@@ -933,10 +1261,88 @@ warm_domains() {
     return 0
 }
 
+# 自愈: 已应用状态下核对 cw3 表路由与 mangle 链是否还在, 缺了就重新应用。
+# 为什么必须有: `ip route ... dev <iface>` 是**挂在设备上**的 —— WARP 接口一旦被重建
+# (wg-quick restart / wireguard-tools 升级 / 手工重启), 内核会连带删掉 cw3 表里指向
+# warp 的默认路由, 而 iptables 规则还在: 标记流量查 cw3 无路由 → 落回 main ⇒
+# **默认出口静默变回原生**, 面板上什么异常都看不到 (实测 CCS: restart wg-quick@warp 后
+# 两条 cw3 默认路由双双消失, doctor FAIL=3, 出口变回 107.172.232.54)。
+# keepalive 定时器每 10 分钟调一次, 所以最坏 10 分钟内自愈; 重启场景由 restore 单元覆盖。
+reconcile() {
+    init_dirs
+    [[ -f "$APPLIED_FLAG" ]] || return 0
+    detect_iface >/dev/null 2>&1 || return 0
+    local why=""
+    iptables -t mangle -S CATMI3-OUT >/dev/null 2>&1 || why="mangle 链丢失"
+    [[ -z "$why" ]] && ! ip -4 route show table "$TABLE_NAME" 2>/dev/null | grep -q default && why="cw3 表无 v4 默认路由"
+    if [[ -z "$why" && "$DEFAULT_OUTBOUND_V6" == "warp" ]] \
+       && ! ip -6 route show table "$TABLE_NAME" 2>/dev/null | grep -q default; then
+        why="cw3 表无 v6 默认路由"
+    fi
+    [[ -z "$why" ]] && return 0
+    warn "分流自愈: $why (WARP 接口被重建?) — 自动重新应用"
+    ASSUME_YES=1 apply || { err "自愈失败 — 请手动: catmi-warp3 apply --yes"; return 1; }
+    ok "分流自愈完成"
+    return 0
+}
+
+# 四个 ipset 的成员总数 (warm/cmd_warm 的结果核实)
+warp_set_total() {
+    local t=0 s
+    for s in cw3-warp4 cw3-warp6 cw3-native4 cw3-native6; do
+        t=$(( t + $(ipset list "$s" 2>/dev/null | grep -cE '^[0-9a-fA-F]') ))
+    done
+    echo "$t"
+}
+
+# 预热并**核实结果** —— 原来无条件打印"规则域名已预热", 而 warm_domains 无论成功失败
+# 都 return 0 (dig 的返回值被丢弃), dnsmasq 没起来时四个集合一个成员都不会填也照样报成功。
+cmd_warm() {
+    local nrule
+    nrule=$(awk -F'|' '$3=="1" && $1 !~ /^#/ && NF>1 {c++} END{print c+0}' "$RULES" 2>/dev/null)
+    if (( nrule == 0 )); then
+        info "没有已启用的规则 — 无需预热 (catmi-warp3 add <域名> warp|native 添加)"
+        return 0
+    fi
+    if ! systemctl is-active --quiet dnsmasq 2>/dev/null; then
+        err "dnsmasq 未运行 — 预热不可能生效 (先执行: catmi-warp3 apply)"
+        return 1
+    fi
+    warm_domains
+    local n; n=$(warp_set_total)
+    if (( n == 0 )); then
+        # dnsmasq **只在 cache-miss (真向上游解析) 时才写 ipset**, 命中自己缓存时不写。
+        # 所以缓存热的时候 warm 是彻底的空操作 (实测: flush 集合 + 热缓存 dig → 0 条;
+        # 清缓存后同一操作 → 2 条)。清一次缓存重试一次, warm 才真的能当自愈手段。
+        info "四个集合仍为空 (dnsmasq 缓存命中不写 ipset) — 清缓存后重试一次 ..."
+        systemctl reload dnsmasq >/dev/null 2>&1 || pkill -HUP -x dnsmasq 2>/dev/null
+        sleep 1
+        warm_domains
+        n=$(warp_set_total)
+    fi
+    if (( n > 0 )); then
+        ok "预热完成 — 四个集合共 $n 条 (warp4/warp6/native4/native6)"
+    else
+        warn "预热跑完了但四个集合仍为空 — 解析没写进 ipset, 请查: catmi-warp3 doctor"
+    fi
+    return 0
+}
+
 # ============================================================
 # 快照 / 校验 / 回滚 (§18)
 # ============================================================
 snapshot() { # snapshot <op名> → echo 快照目录
+    # 保留策略: 只留最近 KEEP_SNAPSHOTS 个 (默认 50)。
+    # 原来**没有任何清理机制** —— 每次 apply/revoke/default 都存一份完整的
+    # ip rule / 路由 / iptables / resolv.conf 现场。长期使用会无限增长:
+    # 实测 RN 上已累积 330 个目录 / 17MB, 而根分区只有 14G 且已用 68%。
+    # 在**创建新快照前**清理最旧的, 保证任何时刻都不超过上限。
+    local _keep="${KEEP_SNAPSHOTS:-50}"
+    if [[ "$_keep" =~ ^[0-9]+$ ]] && (( _keep > 0 )); then
+        ls -1dt "$BACKUPS"/*/ 2>/dev/null | tail -n +$(( _keep + 1 )) | while read -r _old; do
+            rm -rf "$_old" 2>/dev/null
+        done
+    fi
     local s="$BACKUPS/$1-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$s" 2>/dev/null
     ip -4 rule show > "$s/ip-rule4.txt" 2>/dev/null
@@ -958,19 +1364,7 @@ snapshot() { # snapshot <op名> → echo 快照目录
 # 回滚 = 精确撤销本模块改动 (不改他人配置; 快照供人工参考)
 rollback_undo() {
     info "执行回滚 (撤销本模块全部改动)..."
-    fw_down_silent
-    dns_release >/dev/null 2>&1
-    cleanup_dns_conf
-    # 撤掉本模块 conf 后 dnsmasq 退回默认配置(绑 *:53); 若 :53 已被 systemd-resolved
-    # (127.0.0.53:53) 占用, 重启会永久 failed 且无人察觉 —— 必须校验, 起不来就停掉,
-    # 至少留下一个干净的 inactive 状态而不是 failed (v3 实测缺陷, 曾把整机 DNS 打死)
-    if systemctl is-active dnsmasq >/dev/null 2>&1; then
-        systemctl restart dnsmasq 2>/dev/null
-        if ! systemctl is-active --quiet dnsmasq 2>/dev/null; then
-            warn "撤配置后 dnsmasq 起不来 (:53 被 systemd-resolved 占用) — 已停止, 不留 failed 状态"
-            systemctl stop dnsmasq 2>/dev/null
-        fi
-    fi
+    teardown_all
     rm -f "$APPLIED_FLAG"
     ok "回滚完成"
     log_op "rollback" "OK"
@@ -981,11 +1375,18 @@ STEP_FAIL=""
 run_step() {
     local name="$1"; shift
     info "▸ $name"
-    if "$@" >/dev/null 2>&1; then
+    local out
+    # 原实现是 `"$@" >/dev/null 2>&1`: 步骤内部的**告警**在成功路径上永远看不到。
+    # 实测后果: "v6 补栈自检失败, 已撤回 v6 路由"、"resolv.conf 带 immutable 属性已临时解除"
+    # 这类重要提示全被吞掉 —— apply 只打印 4 行步骤名, 用户只能靠事后 doctor 才发现问题。
+    # 现在: 成功也透出 WARN/ERR 行; 失败时把完整输出打出来 (原来失败也什么都不显示)。
+    if out=$("$@" 2>&1); then
+        [[ -n "$out" ]] && grep -E '\[WARN\]|\[ERR\]|△|✗' <<<"$out" | sed 's/^/    /'
         ok "  ✓ $name"
         return 0
     fi
     err "  ✗ $name 失败"
+    [[ -n "$out" ]] && printf '%s\n' "$out" | sed 's/^/    /'
     STEP_FAIL="$name"
     return 1
 }
@@ -1064,7 +1465,7 @@ fw_up() { # fw_up <iface>
         iptables -t mangle -A CATMI3-OUT -j MARK --set-mark "$MARK"
         iptables -t mangle -A CATMI3-OUT -j CONNMARK --save-mark --nfmask 0x3 --ctmask 0x3
         # bind-interface 保护 (v4)
-        local pd4; pd4=$(ip -4 route show default 2>/dev/null | grep -oE 'dev [a-z0-9]+' | head -1 | awk '{print $2}')
+        local pd4; pd4=$(ip -4 route show default 2>/dev/null | grep -oE 'dev [a-zA-Z0-9_.-]+' | head -1 | awk '{print $2}')
         if [[ -n "$pd4" ]] && ! ip -4 rule show | grep -q "oif $pd4 lookup main"; then
             ip -4 rule add prio 50 oif "$pd4" table main && ok "bind 保护: oif $pd4 → main (prio 50)"
         fi
@@ -1096,7 +1497,7 @@ fw_up() { # fw_up <iface>
         ip6tables -t mangle -A CATMI3-OUT -j MARK --set-mark "$MARK"
         ip6tables -t mangle -A CATMI3-OUT -m set --match-set cw3-native6 dst -j MARK --set-mark "$IMARK"
         ip6tables -t mangle -A CATMI3-OUT -j CONNMARK --save-mark --nfmask 0x3 --ctmask 0x3 2>/dev/null
-        local pd6; pd6=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
+        local pd6; pd6=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-zA-Z0-9_.-]+' | head -1 | awk '{print $2}')
         if [[ -n "$pd6" ]] && ! ip -6 rule show | grep -q "oif $pd6 lookup main"; then
             ip -6 rule add prio 50 oif "$pd6" table main 2>/dev/null && ok "bind 保护: oif $pd6 → main (v6)"
         fi
@@ -1146,8 +1547,8 @@ fw_up() { # fw_up <iface>
     ip -6 rule show | grep -q "^$RT_ANCHOR:.*fwmark 0x$MARK lookup $TABLE_NAME" || ip -6 rule add prio "$RT_ANCHOR" fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null
     # 入站连接打 connmark 0x4 (仅标记, 不改包): 回包经上面 OUTPUT 检查走 main, 保住入站源地址
     local up4 up6
-    up4=$(ip -4 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
-    up6=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
+    up4=$(ip -4 route show default 2>/dev/null | grep -oE 'dev [a-zA-Z0-9_.-]+' | head -1 | awk '{print $2}')
+    up6=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-zA-Z0-9_.-]+' | head -1 | awk '{print $2}')
     if [[ -n "$up4" ]]; then
         iptables  -t mangle -C INPUT -i "$up4" -j CONNMARK --set-xmark 0x$IMARK/0x$IMARK 2>/dev/null \
             || iptables  -t mangle -I INPUT 1 -i "$up4" -j CONNMARK --set-xmark 0x$IMARK/0x$IMARK
@@ -1181,11 +1582,19 @@ fw_up() { # fw_up <iface>
             # 连通性自检: WARP 隧道的 v6 出站真实可用才保留路由 (netstack 不支持 v6 时撤回, 兜底原生)
             local v6ok
             # 自检用 ICMP (无 DNS/connmark 时序干扰): ping CF 的 v6 DNS, 走 wg 加密通道
-            v6ok=$(ping -6 -c1 -W3 -I "$ifc" 2606:4700:4700::1111 2>/dev/null | grep -c '1 received')
-            if [[ "$v6ok" != "1" ]]; then sleep 3
-                v6ok=$(ping -6 -c1 -W3 -I "$ifc" 2606:4700:4700::1111 2>/dev/null | grep -c '1 received'); fi
-            if [[ -n "$v6ok" ]]; then
-                ok "v6 补栈连通性 OK (出口 $v6ok)"
+            # 判据必须是 `== 1`。原来写的是 `[[ -n "$v6ok" ]]`, 而 grep -c 没命中时输出 "0"
+            # (非空字符串) ⇒ 恒为真: 自检**永远报通过**, 撤回分支是死代码, 还会打印
+            # "v6 补栈连通性 OK (出口 0)" 这种自相矛盾的话 (实测确认)。
+            local v6ok=""
+            if command -v ping >/dev/null 2>&1; then
+                v6ok=$(ping -6 -c1 -W3 -I "$ifc" 2606:4700:4700::1111 2>/dev/null | grep -c '1 received')
+                [[ "$v6ok" != "1" ]] && { sleep 3
+                    v6ok=$(ping -6 -c1 -W3 -I "$ifc" 2606:4700:4700::1111 2>/dev/null | grep -c '1 received'); }
+            fi
+            if [[ "$v6ok" == "1" ]]; then
+                ok "v6 补栈连通性自检通过 (WARP v6 出站可用)"
+            elif [[ -z "$v6ok" ]]; then
+                warn "无 ping 命令, 跳过 v6 补栈自检 — 路由已保留, 请用 doctor 复核 v6 出口"
             else
                 ip -6 route del default table "$TABLE_NAME" 2>/dev/null
                 warn "v6 补栈自检失败 (WARP v6 通道不通) — 已撤回 v6 路由, v6 兜底原生出口 (doctor 会提示)"
@@ -1193,8 +1602,12 @@ fw_up() { # fw_up <iface>
         else
             warn "cw3 v6 表路由失败 — v6 兜底走原生出口 (补栈未就绪)"
         fi
-    elif [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]]; then
-        info "内核 IPv6 已禁用 → v6 分流跳过 (v4 不受影响)"
+    elif ! has_v6; then
+        # 判据必须是"本机到底有没有 v6 地址", **不能**用 all.disable_ipv6 ——
+        # 那只是新接口的默认值: RN 实测开机后 all=1 而 eth0/he-ipv6 各有全局地址,
+        # 旧写法在这种机器上会跳过建表 → native 模式下规则标了 warp 的域名
+        # 在 v6 侧静默走原生 (mark 0x3 查 cw3 表无路由 → 落回 main)。
+        info "本机无全局 IPv6 地址 → v6 分流跳过 (v4 不受影响)"
     else
         ip -6 route replace default dev "$ifc" table "$TABLE_NAME" 2>/dev/null \
             || warn "v6 表路由添加失败 — v6 将回退原生出口"
@@ -1232,9 +1645,11 @@ fw_down_silent() {
         if [[ "$f" == "6" ]]; then
             # 原生 v6 上游地址段的入站保护规则 (from 段 → main) 也一并清理
             local fd_up fd_a fd_seg
-            fd_up=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
+            fd_up=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-zA-Z0-9_.-]+' | head -1 | awk '{print $2}')
             if [[ -n "$fd_up" && "$fd_up" != "$ifc" ]]; then
-                for fd_a in $(ip -6 addr show dev "$fd_up" scope global 2>/dev/null | awk '{print $2}' | cut -d/ -f1); do
+                # awk '{print $2}' 会把 'valid_lft forever' 与接口名行也算进来, 产出
+                # 'forever::/64' / 'he-ipv6@NONE:::/64' 这种垃圾段 (不会误删, 但很脏)
+                for fd_a in $(ip -6 addr show dev "$fd_up" scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1); do
                     fd_seg="$(cut -d: -f1-4 <<<"$fd_a")::/64"
                     while read -r p; do
                         [[ -n "$p" ]] && $cmd rule del prio "$p" 2>/dev/null
@@ -1252,7 +1667,15 @@ fw_down_silent() {
     ipset destroy cw3-warp6 2>/dev/null
     ipset destroy cw3-native4 2>/dev/null
     ipset destroy cw3-native6 2>/dev/null
-    rm -f "$APPLIED_FLAG"
+    # 只有确认真的拆干净才清除"已应用"标记 —— 它是 status/doctor/dashboard 判断
+    # "是否已部署"的唯一依据 (13 处引用)。拆除失败却把标记删掉, 残留规则会立刻**隐形**。
+    if iptables -t mangle -S CATMI3-OUT >/dev/null 2>&1 \
+       || ip -4 rule show 2>/dev/null | grep -qE "fwmark 0x[0-9a-f]+ (table|lookup) $TABLE_NAME" \
+       || ipset_exists cw3-warp4; then
+        warn "拆除未彻底 (仍有 catmi 残留规则) — 保留「已应用」标记, 请重试 revoke / apply"
+    else
+        rm -f "$APPLIED_FLAG"
+    fi
 }
 
 # forward 模式开关 (§8: 显式用户操作)
@@ -1265,7 +1688,8 @@ cmd_forward() {
     local snap; snap=$(snapshot "forward-$act")
     local newval=$([[ "$act" == "on" ]] && echo 1 || echo 0)
     if [[ "$newval" == "1" ]]; then
-        echo "⚠ forward 模式会影响【转发流量】(经过本机的流量, 非本机出站) — 命中规则的转发包将走 WARP"
+        echo "  ⚠ forward 影响的是【转发流量】(穿本机的流量, 非本机出站),"
+        echo "    命中规则的转发包会走 WARP。"
         detect_iface || { err "WARP 接口不存在"; return 1; }
         # 直接加 FWD 部件 (apply 已在跑的话 OUT 部分已在)
         FORWARD=1 fw_up "$IFACE" || { err "forward 部署失败"; return 1; }
@@ -1280,7 +1704,15 @@ cmd_forward() {
         ip6tables -t nat -D POSTROUTING -m mark --mark "$MARK" -j MASQUERADE 2>/dev/null
         ok "forward 模式已关闭 (PREROUTING/MASQUERADE 已拆除)"
     fi
-    sed -i "s/^FORWARD=.*/FORWARD=$newval/" "$MAIN_CONF" 2>/dev/null
+    # sed 在键不存在时会静默什么都不做 (老版本配置可能没有 FORWARD= 行) ——
+    # 原来直接报"已持久化", 实际可能一个字都没写。键不存在就 append。
+    if ! grep -q '^FORWARD=' "$MAIN_CONF" 2>/dev/null; then
+        echo "FORWARD=$newval" >> "$MAIN_CONF" 2>/dev/null \
+            || { err "写入 config 失败 — forward 只在本次会话生效"; return 1; }
+    elif ! sed -i "s/^FORWARD=.*/FORWARD=$newval/" "$MAIN_CONF" 2>/dev/null; then
+        err "写入 config 失败 — forward 只在本次会话生效"; return 1
+    fi
+    grep -q "^FORWARD=$newval" "$MAIN_CONF" 2>/dev/null || { err "config 校验失败 (FORWARD 未写入)"; return 1; }
     FORWARD="$newval"
     ok "forward 模式 = $act (已持久化到 config/main.conf)"
     log_op "forward" "$act"
@@ -1308,7 +1740,28 @@ suppress_takeover() {
         need=""
         fk=$($cmd rule show | grep 'fwmark 0xc350 lookup 50000' | grep -oE '^[0-9]+' | head -1)
         [[ -n "$fk" ]] && need="$fk"
-        minp=$($cmd rule show | grep 'lookup main' | grep -vE 'fwmark|oif' | grep -oE '^[0-9]+' | sort -n | head -1)
+        # ⚠ 必须排除**本模块自己上一轮加的原生 v6 上游段规则** (from <seg>/64 lookup main)。
+        # 它匹配 'lookup main' 且不含 fwmark/oif, 会被算进 minp → 下一次 need 再减 4 →
+        # 每跑一次 apply 就整体下移 4 位, **无下界**。实测连续 apply: 32707→32703→32699,
+        # 约 8100 次之后会撞上 50:(入站源保护) / 17:(入站回程) 规则, 破坏入站零影响。
+        local _excl=""
+        if [[ "$f" == "6" ]]; then
+            local _up _a _seg
+            _up=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-zA-Z0-9_.-]+' | head -1 | awk '{print $2}')
+            if [[ -n "$_up" && "$_up" != "$IFACE" ]]; then
+                while read -r _a; do
+                    [[ -n "$_a" ]] || continue
+                    _seg="$(cut -d: -f1-4 <<<"$_a")::/64"
+                    _excl="${_excl:+$_excl|}$_seg"
+                done < <(ip -6 addr show dev "$_up" scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | sort -u)
+            fi
+        fi
+        if [[ -n "$_excl" ]]; then
+            minp=$($cmd rule show | grep 'lookup main' | grep -vE 'fwmark|oif' \
+                | grep -vE "from ($_excl) lookup main" | grep -oE '^[0-9]+' | sort -n | head -1)
+        else
+            minp=$($cmd rule show | grep 'lookup main' | grep -vE 'fwmark|oif' | grep -oE '^[0-9]+' | sort -n | head -1)
+        fi
         if [[ -n "$minp" && ( -z "$need" || "$minp" -lt "$need" ) ]]; then need="$minp"; fi
         # 无人需要压制时仍保留 oif 规则 (bind WARP 接口显式走 cw3)
         if [[ -z "$need" ]]; then
@@ -1326,7 +1779,7 @@ suppress_takeover() {
         # 必须在决策期就命中原口; 老版本位置一并清理。
         if [[ "$f" == "6" ]]; then
             local upseg a6 seg6
-            upseg=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
+            upseg=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-zA-Z0-9_.-]+' | head -1 | awk '{print $2}')
             if [[ -n "$upseg" && "$upseg" != "$IFACE" ]]; then
                 for a6 in $(ip -6 addr show dev "$upseg" scope global 2>/dev/null | awk '{print $2}' | cut -d/ -f1); do
                     seg6="$(cut -d: -f1-4 <<<"$a6")::/64"
@@ -1386,7 +1839,7 @@ nf_show() { # <方向名> <curl 附加参数>
 # [A] 流媒体解锁检测 (只读, 不改任何东西)
 cmd_stream() {
     echo "── 流媒体解锁检测 (Netflix, 真实出口实测) ──"
-    local pdev; pdev=$(ip -4 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
+    local pdev; pdev=$(ip -4 route show default 2>/dev/null | grep -oE 'dev [a-zA-Z0-9_.-]+' | head -1 | awk '{print $2}')
     nf_show "Native 出口 (${pdev:-eth0})" "-4 ${pdev:+--interface $pdev}"
     if detect_iface >/dev/null 2>&1; then
         nf_show "WARP 出口 ($IFACE)" "-4 --interface $IFACE"
@@ -1395,7 +1848,9 @@ cmd_stream() {
     fi
     echo ""
     echo "  full = 该地区 Netflix 完整解锁; orig = 只能看 Netflix 自制剧。"
-    echo "  分流: add netflix.com warp 后, Netflix 流量走 [WARP 出口] 的检测结论。"
+    echo "  说明: 上面两行是**分别绑 eth0(原生) 与 warp(WARP) 实测** ——"
+    echo "        看的是两个方向各自能不能解锁, 不代表流量当前走哪边。"
+    echo "        加规则前先看哪边更好; 两边相同则加规则不会改善解锁。"
     echo "  (出口 IP 变化后结果可能变化 — 用 newip 换 IP 后可复测)"
 }
 
@@ -1403,11 +1858,17 @@ cmd_stream() {
 cmd_endpoint_opt() {
     need_root; acquire_lock || return 1; init_dirs
     parse_creds >/dev/null 2>&1 || { err "未找到 WARP 凭据"; return 1; }
-    local src=""; local f
-    for f in ${CATMI_CRED_FILE:+$CATMI_CRED_FILE} /opt/warp-go/warp.conf /etc/wireguard/wgcf.conf /etc/wireguard/warp.conf; do
-        if [[ -s "$f" ]] && grep -q 'Endpoint' "$f" 2>/dev/null; then src="$f"; break; fi
-    done
-    [[ -n "$src" ]] || { err "未找到 Endpoint 配置文件"; return 1; }
+    # 只改 parse_creds **实际选中**的那个凭据文件。原来这里另有一套搜索顺序
+    # (还优先 /opt/warp-go/warp.conf), 与 parse_creds 不一致: 可能改了 A 文件而 WARP 读的是 B,
+    # 打印"已写入"却毫无效果; 而且会动 fscarmen/wgcf 自己管理的配置 (违反文件头红线)。
+    local src="$CRED_SRC"
+    [[ -n "$src" && -s "$src" ]] || { err "未找到 WARP 凭据文件 (Endpoint 无处可改)"; return 1; }
+    case "$src" in
+        "$CATMI_CRED_FILE"|/etc/wireguard/warp.conf) : ;;
+        *) err "WARP 由他方工具管理 ($src) — 按红线**不改他方配置**"
+           err "请用该工具自己的方式优选 Endpoint; 或改用本模块管理的凭据: catmi-warp3 install --force-register"
+           return 1 ;;
+    esac
     local curep; curep=$(sed -n 's/^Endpoint[ ]*=[ ]*//p' "$src" | head -1 | tr -d '\r')
     echo "── WARP Endpoint 优选 ──"
     echo "  扫描 CF WARP 入口段, 测 TCP 握手延迟, 选最快者替换。"
@@ -1450,14 +1911,39 @@ cmd_endpoint_opt() {
         read -r yn </dev/tty 2>/dev/null || yn=""
         [[ "${yn,,}" == "yes" ]] || { echo "  已保持现有 Endpoint" >&2; return 0; }
     fi
-    sed -i "s|^Endpoint[ ]*=.*|Endpoint = $best|" "$src" \
-        || { err "写入 Endpoint 失败"; return 1; }
-    ok "Endpoint 已写入: $best → 重启 WARP 生效"
-    FORCE_STOP=1 stop_warp; start_warp && { health_check >/dev/null 2>&1 && ok "健康检查通过" || warn "健康检查异常 (分流不受影响, 可用 doctor 复查)"; }
+    # 改之前先备份 —— 原来直接 sed -i, 改坏了没有任何回滚点
+    local bak="$BACKUPS/endpoint-$(date +%Y%m%d-%H%M%S).conf"
+    if ! cp -a "$src" "$bak" 2>/dev/null || [[ ! -s "$bak" ]]; then
+        err "备份 $src 失败 — 中止 (没有回滚点就不改配置)"; return 1
+    fi
+    if ! sed -i "s|^Endpoint[ ]*=.*|Endpoint = $best|" "$src" 2>/dev/null; then
+        err "写入 Endpoint 失败 (备份在 $bak)"; return 1
+    fi
+    # sed 无匹配也返回 0 —— 必须回读确认, 否则会打印"已写入"而文件根本没变 (假成功闭环)
+    local wrote; wrote=$(sed -n 's/^Endpoint[ ]*=[ ]*//p' "$src" | head -1 | tr -d '\r')
+    if [[ "$wrote" != "$best" ]]; then
+        cp -a "$bak" "$src" 2>/dev/null
+        err "写入校验失败: 文件里是 '${wrote:-无}' 而非 '$best' — 已还原 (备份 $bak)"
+        return 1
+    fi
+    ok "Endpoint 已写入: $best (备份: $bak) → 重启 WARP 生效"
+    FORCE_STOP=1 stop_warp
+    if ! start_warp; then
+        # 原来这里失败**没有任何提示**, 且函数最后一条命令是 log_op(必成功) ⇒ 整体退出 0;
+        # 而 dual 模式下 cw3 表默认 dev warp 已无可用路由 → 用户以为成功, 实际整机 WARP 方向断网。
+        err "新 Endpoint 拉不起 WARP — 正在还原旧配置"
+        cp -a "$bak" "$src" 2>/dev/null
+        FORCE_STOP=1 stop_warp; start_warp >/dev/null 2>&1 \
+            && warn "已还原旧 Endpoint 并重启 WARP (期间出口短暂中断)" \
+            || err "还原后 WARP 仍未起来 — 详查: catmi-warp3 doctor / journalctl -u wg-quick@warp"
+        return 1
+    fi
+    health_check >/dev/null 2>&1 && ok "健康检查通过" || warn "健康检查异常 (分流不受影响, 可用 doctor 复查)"
     suppress_takeover
     local eip; eip=$(timeout 8 curl -4 -s --interface "$(detect_iface >/dev/null 2>&1 && echo "$IFACE" || echo warp)" https://ifconfig.me 2>/dev/null)
     [[ -n "$eip" ]] && info "WARP 出口: $eip"
     log_op "endpoint" "$curep→$best"
+    return 0
 }
 
 # [C] 更换 WARP 出口 IP (重启会话; 分流规则/模式/网站配置全部不变; 需确认)
@@ -1518,7 +2004,7 @@ cmd_default() {
         init_dirs   # 读 config (旧 DEFAULT_OUTBOUND 键映射为双栈)
         echo "默认出口: IPv4=$( [[ "$DEFAULT_OUTBOUND_V4" == "warp" ]] && echo WARP || echo Native )  IPv6=$( [[ "$DEFAULT_OUTBOUND_V6" == "warp" ]] && echo WARP || echo Native )"
         echo "  当前栈模式: $(stack_mode)"
-        echo "  (用法: catmi-warp3 default v4|v6|dual|native  — 旧写法 default warp 等价 dual)"
+        echo "  (用法: catmi-warp3 default v4|v6|dual|native — 旧写法 warp 等价 dual)"
         return 0
     fi
     local nv4 nv6
@@ -1531,8 +2017,14 @@ cmd_default() {
     esac
     acquire_lock || return 1
     init_dirs; migrate_v2
+    # 「模式已经是这个」不等于「已经生效」: revoke 之后 main.conf 里仍写着 dual,
+    # 但分流已经拆掉 (cw3 表空、ipset 没了)。原来这里直接 return 0, 用户以为恢复了
+    # 其实什么都没发生 (实测 CCS: revoke 后 `default dual` 空转, doctor 直接 FAIL=4)。
     if [[ "$nv4" == "$DEFAULT_OUTBOUND_V4" && "$nv6" == "$DEFAULT_OUTBOUND_V6" ]]; then
-        info "默认出口已是 $(stack_mode), 无需切换"; return 0
+        if [[ -f "$APPLIED_FLAG" ]]; then
+            info "默认出口已是 $(stack_mode), 无需切换"; return 0
+        fi
+        info "默认出口模式不变 ($(stack_mode)), 但分流未生效 — 重新应用"
     fi
     local risk="影响:"
     if [[ "$nv4" != "$DEFAULT_OUTBOUND_V4" ]]; then
@@ -1583,9 +2075,20 @@ cmd_default() {
         [[ -n "$e6" ]] && info "v6 普通流量出口: $e6"
         log_op "default" "$want"
     else
-        err "应用失败, 已回滚配置"
+        err "新配置应用失败 — 配置已回滚"
         _setcfg_v DEFAULT_OUTBOUND_V4 "$ov4"; _setcfg_v DEFAULT_OUTBOUND_V6 "$ov6"
         DEFAULT_OUTBOUND_V4="$ov4"; DEFAULT_OUTBOUND_V6="$ov6"
+        # 只回滚**配置文件** ≠ 回到原状: apply 失败时走的是 rollback_undo → teardown_all,
+        # 系统里的分流规则**已经被全部拆掉**。此时配置说 dual 而实际全部走原生 ——
+        # 光打印"已回滚配置"会让用户以为原模式还在跑。
+        # 主动把原模式重新部署一次, 让系统状态与配置真正一致 (= 回到上一个好状态)。
+        warn "分流已被拆除, 正在恢复原模式 ($(stack_mode))..."
+        if ASSUME_YES=1 apply >/dev/null 2>&1; then
+            ok "已恢复到原模式: $(stack_mode) (分流正常)"
+        else
+            err "恢复原模式也失败了 —— 分流当前**未生效**, 全部走原生"
+            err "排查: catmi-warp3 doctor        修好后: catmi-warp3 apply --yes"
+        fi
         return 1
     fi
     [[ -n "$snap" ]]
@@ -1663,10 +2166,7 @@ revoke() {
     acquire_lock || return 1
     local snap; snap=$(snapshot "revoke")
     info "拆除分流..."
-    fw_down_silent
-    cleanup_dns_conf
-    systemctl is-active dnsmasq >/dev/null 2>&1 && systemctl restart dnsmasq 2>/dev/null
-    dns_release
+    teardown_all
     ok "revoke 完成 (规则文件 $RULES 保留)"
     log_op "revoke" "OK"
 }
@@ -1695,7 +2195,7 @@ family_probe() { # family_probe <4|6>
         fi
         # 无 WARP v6 通道时, 如实区分原生上游 (he-ipv6 等):
         local vdv
-        vdv=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-z0-9-]+' | head -1 | awk '{print $2}')
+        vdv=$(ip -6 route show default 2>/dev/null | grep -oE 'dev [a-zA-Z0-9_.-]+' | head -1 | awk '{print $2}')
         if [[ -n "$vdv" ]]; then
             echo "Native($vdv) — WARP 的 v6 通道未通, v6 出站走原生"; return 0
         fi
@@ -1750,19 +2250,24 @@ cmd_status() {
     fi
     echo ""
     echo "Routing"
+    # 当前出口模式 —— 之前只有 `default` 命令能看到, status 里没有。
+    # 不给这个值, 小白看到 "WARP: 3" 会以为有 3 个网站单独走 WARP,
+    # 而在双栈模式下无标流量本来就全走 WARP, 那 3 条其实是空操作。
+    local _v4s _v6s
+    [[ "$DEFAULT_OUTBOUND_V4" == "warp" ]] && _v4s=WARP || _v4s=Native
+    [[ "$DEFAULT_OUTBOUND_V6" == "warp" ]] && _v6s=WARP || _v6s=Native
+    echo "  Stack mode   : $(stack_mode)   (v4→$_v4s / v6→$_v6s)"
     local def4
     def4=$(ip -4 route show default 2>/dev/null | head -1)
-    echo "  Native       : main ($(grep -oE 'dev [a-z0-9]+' <<<"$def4" | awk '{print $2}'))"
+    echo "  Native       : main ($(grep -oE 'dev [a-zA-Z0-9_.-]+' <<<"$def4" | awk '{print $2}'))"
     echo "  WARP table   : $TABLE_NAME ($TABLE_ID)"
     ip -4 rule show 2>/dev/null | grep -qE "fwmark 0x$MARK (table|lookup) $TABLE_NAME" \
         && echo "  IPv4 Policy  : OK (fwmark 0x$MARK → $TABLE_NAME)" \
         || echo "  IPv4 Policy  : 未部署"
-    if [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]]; then
-        echo "  IPv6 Policy  : n/a (内核禁 IPv6)"
-    else
-        ip -6 rule show 2>/dev/null | grep -qE "fwmark 0x$MARK (table|lookup) $TABLE_NAME" \
-            && echo "  IPv6 Policy  : OK" || echo "  IPv6 Policy  : 未部署"
-    fi
+    # 不能用 all.disable_ipv6 判"内核禁 v6" —— 那只是新接口的默认值, per-interface 可例外。
+    # 本机实测 all=1 但 v6 策略路由**确实已部署**, 旧写法报 n/a 与同屏 "IPv6: OK" 自相矛盾。
+    ip -6 rule show 2>/dev/null | grep -qE "fwmark 0x$MARK (table|lookup) $TABLE_NAME" \
+        && echo "  IPv6 Policy  : OK" || echo "  IPv6 Policy  : 未部署"
     if grep -qE 'dev (warp|CloudflareWARP|WARP|wgcf)\b' <<<"$def4"; then
         echo "  Main default : ⚠ 已被 WARP 接管 (global 模式!)"
     else
@@ -1774,8 +2279,17 @@ cmd_status() {
     echo "  Mode         : $mode"
     systemctl is-active dnsmasq >/dev/null 2>&1 && echo "  dnsmasq      : running" || echo "  dnsmasq      : not running"
     if resolv_points_local; then
-        [[ -s "$RESOLV_STATE" ]] && echo "  resolv.conf  : 127.0.0.1 (managed by catmi-warp)" \
-            || echo "  resolv.conf  : 127.0.0.1 (非本模块所改)"
+        if [[ -s "$RESOLV_STATE" ]]; then
+            # state 里 NOTE 可能写着 premanaged (接管前就指向 127.0.0.1) ——
+            # 那种情况不能宣称"本模块所改", dns_takeover() 自己也打印"非本模块所改"
+            if grep -q '^NOTE=premanaged' "$RESOLV_STATE" 2>/dev/null; then
+                echo "  resolv.conf  : 127.0.0.1 (接管前已指向本地 DNS, 本模块未改)"
+            else
+                echo "  resolv.conf  : 127.0.0.1 (managed by catmi-warp)"
+            fi
+        else
+            echo "  resolv.conf  : 127.0.0.1 (非本模块所改)"
+        fi
     else
         [[ -s "$RESOLV_STATE" ]] && echo "  resolv.conf  : ⚠ 漂移! state 记录在管但未指向 127.0.0.1 (re-apply 修复)" \
             || echo "  resolv.conf  : $(grep -m1 nameserver "$RESOLV" 2>/dev/null | awk '{print $2}')"
@@ -1784,9 +2298,15 @@ cmd_status() {
     [[ -n "$rw" ]] && echo "  重写风险     : $rw (可能改动 resolv.conf)"
     echo ""
     echo "Rules"
-    echo "  Total        : $(rule_list | wc -l)"
+    local _dis=0 _d _a _e _
+    while IFS='|' read -r _d _a _e _; do
+        [[ -n "$_d" && "$_d" != \#* && "$_e" != "1" ]] && _dis=$((_dis+1))
+    done < <(rule_list)
+    echo "  Total        : $(rule_list | wc -l)  (含停用)"
     echo "  WARP         : $(rule_count warp)"
     echo "  Native       : $(rule_count native)"
+    # 停用条数 —— 否则 Total 与分项加不起来, 小白会以为规则丢了
+    (( _dis > 0 )) && echo "  停用         : $_dis  (catmi-warp3 on <域名> 重新启用)"
     echo ""
     echo "Forward Mode   : $([[ "$FORWARD" == "1" ]] && echo ON || echo OFF)"
     local s5; s5=$(socks5_status)
@@ -1828,6 +2348,19 @@ cmd_test() {
     fi
 
     echo "------ 真实链路测试: $dom (规则: $([[ -n "$norule" ]] && echo 无 || echo "$expect") → 期望 v4:$e4 v6:$( [[ "$v6skip" == "1" ]] && echo "跳过(补栈未生效)" || echo "$e6" ) ) ------"
+    # 澄清: 规则方向与该栈默认出口**相同**时, 这条规则不产生额外效果。
+    # 不说清楚的话, 小白会把"默认出口本来就是 WARP"误读成"我加的规则生效了" ——
+    # 实测 dual 下 google.com(有 warp 规则) 与 ifconfig.me(无规则) 的输出逐字节同构。
+    if [[ -z "$norule" ]]; then
+        local _noop=""
+        [[ "$expect" == "$DEFAULT_OUTBOUND_V4" ]] && _noop="v4"
+        [[ "$expect" == "$DEFAULT_OUTBOUND_V6" ]] && _noop="${_noop:+$_noop, }v6"
+        if [[ -n "$_noop" ]]; then
+            echo "  ⚠ 注意: 该规则在 ${_noop} 面**不产生额外效果** —— 该栈默认出口本来就是「$expect」。"
+            echo "     下面测到的走向来自默认出口, 不能用来证明这条规则生效。"
+            echo "     (要验证规则真生效: 切到相反的默认模式再测, 或测反向规则)"
+        fi
+    fi
     # ① 目标解析: IP 直测 (跳过 DNS) 或域名 (经 dnsmasq → 自动填 ipset)
     local ips4 ips6
     if [[ "$dom" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -1838,7 +2371,8 @@ cmd_test() {
         echo "① 目标为 IPv6 地址 (跳过 DNS): $ips6"
     else
         ips4=$(timeout 6 dig +short @127.0.0.1 "$dom" A 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
-        [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" != "1" ]] \
+        # 同上: 用 has_v6 而不是 all.disable_ipv6, 否则 all=1 的机器上 test 只看 v4
+        has_v6 \
             && ips6=$(timeout 6 dig +short @127.0.0.1 "$dom" AAAA 2>/dev/null | grep -E ':' | head -1)
         if [[ -z "$ips4" && -z "$ips6" ]]; then
             echo "DNS 解析       : FAILED (dnsmasq 不可达或域名无效)"
@@ -1854,7 +2388,11 @@ cmd_test() {
         [[ "$fam" == "6" && "$v6skip" == "1" ]] && continue
         [[ "$fam" == "4" && -z "$ips4" ]] && continue
         [[ "$fam" == "6" && -z "$ips6" ]] && continue
-        [[ "$fam" == "6" && "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]] && continue
+        # 本机没有全局 v6 就跳过 v6 腿 —— 判据是 has_v6, 不是 all.disable_ipv6。
+        # 原来那行会让 all=1 的机器 (RN 开机后就是这个状态) 整条 v6 腿都不测,
+        # 而屏幕上什么提示都没有, 看起来像"v6 也测过了"。
+        # 用户显式给 v6 字面量时例外: 他要的就是测这个地址。
+        if [[ "$fam" == "6" ]] && ! has_v6 && [[ "$dom" != *:* ]]; then continue; fi
         ip=$([[ "$fam" == "4" ]] && echo "$ips4" || echo "$ips6")
         echo "② 取 IP (v$fam): $ip"
         # ③ ipset — 只验证"例外方向"的集合 (默认方向无集合, 期望 MISS)
@@ -1879,7 +2417,7 @@ cmd_test() {
         if [[ -z "$line" ]]; then
             echo "IPv$fam Route  : FAILED (route get 无结果)"; all_ok=0; continue
         fi
-        dev=$(grep -oE 'dev [a-zA-Z0-9]+' <<<"$line" | awk '{print $2}')
+        dev=$(grep -oE 'dev [a-zA-Z0-9_.-]+' <<<"$line" | awk '{print $2}')
         table=$(grep -oE 'table [a-zA-Z0-9-]+' <<<"$line" | awk '{print $2}')
         [[ -z "$table" ]] && table="main"
         echo "IPv$fam Route  : dev=$dev"
@@ -1951,16 +2489,36 @@ doctor() {
     echo "--- WARP ---"
     if detect_iface; then
         okline "interface: $IFACE ($(warp_source))"
-        local hs
+        local hs age
         hs=$(wg show "$IFACE" latest-handshakes 2>/dev/null | awk '{print $2}')
-        if [[ -n "$hs" && "$hs" != "0" ]]; then
-            okline "handshake: $(( $(date +%s) - hs ))s 前"
-        elif timeout 8 curl -s -4 --interface "$IFACE" https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q 'warp=on'; then
-            okline "egress: 用户态接口正常"
+        # **无条件**做真实 egress 探测: 只看"握手指针非 0"会把"隧道已死但历史指针还在"
+        # 报成 OK (实测: 注入 4 小时旧握手 → 旧写法 [OK] + FAIL=0 + exit 0)。
+        # 握手年龄只作为补充信息, 不作为通过依据。
+        if timeout 8 curl -s -4 --interface "$IFACE" https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q 'warp=on'; then
+            if [[ -n "$hs" && "$hs" != "0" ]]; then
+                age=$(( $(date +%s) - hs ))
+                if (( age < 180 )); then
+                    okline "egress 实测通 (handshake ${age}s 前)"
+                else
+                    warnline "egress 实测通, 但 handshake 已 ${age}s 未更新 (偏旧, 留意)"
+                fi
+            else
+                okline "egress 实测通 (无握手记录, 用户态接口)"
+            fi
         else
-            failline "WARP 隧道不通 (握手无记录 + egress 失败)"
+            failline "WARP 隧道不通 (egress 实测失败)"
         fi
-        parse_creds >/dev/null 2>&1 && [[ -n "$ADDR4" ]] && okline "endpoint: $ENDPOINT (MTU ${WARP_MTU:-1280})"
+        # MSS clamp: MTU 1280 隧道不做 clamp = "小包通、满载卡" 的经典故障
+        iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q 'clamp-mss-to-pmtu' \
+            && okline "MSS clamp 规则在位" || failline "MSS clamp 规则缺失 (走 WARP 的大包会卡)"
+        systemctl is-active --quiet wg-quick@warp 2>/dev/null \
+            && okline "wg-quick@warp 服务 active" || warnline "wg-quick@warp 服务未运行 (重启后不会自动建隧道)" 
+        # 配置里的 endpoint 是**主机名**(需 DNS), 实际握手用的是 wg 已解析的对端地址 ——
+        # 两者不同, 原来只显示前者, 打不通时看不出真正在连哪。
+        local _aep
+        _aep=$(wg show "$IFACE" endpoints 2>/dev/null | awk '{print $2}' | head -1)
+        parse_creds >/dev/null 2>&1 && [[ -n "$ADDR4" ]] \
+            && okline "endpoint: $ENDPOINT (MTU ${WARP_MTU:-1280})${_aep:+ · 实际握手 → $_aep}"
     else
         failline "WARP 接口不存在 (start/install)"
     fi
@@ -1968,11 +2526,11 @@ doctor() {
     local p4 p6
     p4=$(family_probe 4); p6=$(family_probe 6)
     case "$p4" in OK) okline "IPv4: WARP OK" ;; fallback) warnline "IPv4: WARP FAILED → fallback Native" ;; *) warnline "IPv4: $p4" ;; esac
-    if [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]]; then
-        warnline "IPv6: 内核禁用 (disable_ipv6=1) → v6 全部 Native (环境限制, 非模块故障)"
-    else
-        case "$p6" in OK) okline "IPv6: WARP OK" ;; fallback) warnline "IPv6: WARP FAILED → fallback Native" ;; *) warnline "IPv6: $p6" ;; esac
-    fi
+    # **不能**用 all.disable_ipv6 判"内核禁 v6" —— 那只是"新接口的默认值",
+    # per-interface 可以例外。本机实测 all=1 但 warp 接口 =0、v6 通道真实可用
+    # (curl -6 cdn-cgi/trace → warp=on), 旧写法会把它误报成"v6 全部 Native",
+    # 且与同一次输出里 "双栈 v6→warp" 自相矛盾。直接报 family_probe 的真实结果。
+    case "$p6" in OK) okline "IPv6: WARP OK" ;; fallback) warnline "IPv6: WARP FAILED → fallback Native" ;; *) warnline "IPv6: $p6" ;; esac
 
     echo "--- DNS ---"
     local mode; mode=$(detect_dns53)
@@ -2000,8 +2558,29 @@ doctor() {
         else
             failline "表 $TABLE_NAME 无有效 WARP 路由"
         fi
-        ipset list cw3-warp4 >/dev/null 2>&1 && okline "ipset cw3-warp4 ($(ipset list cw3-warp4 2>/dev/null | grep -cE '^[0-9]+\.') 成员)" || failline "ipset cw3-warp4 缺失 (applied 但 ipset 无)"
-        ipset list cw3-warp6 >/dev/null 2>&1 && okline "ipset cw3-warp6 ($(ipset list cw3-warp6 2>/dev/null | tail -n +9 | grep -cE ':') 成员)" || warnline "ipset cw3-warp6 不存在 (单栈正常)"
+        ipset_exists cw3-warp4 && okline "ipset cw3-warp4 ($(ipset list cw3-warp4 2>/dev/null | grep -cE '^[0-9]+\.') 成员)" || failline "ipset cw3-warp4 缺失 (applied 但 ipset 无)"
+        ipset_exists cw3-warp6 && okline "ipset cw3-warp6 ($(ipset list cw3-warp6 2>/dev/null | grep -cE '^[0-9a-fA-F]') 成员)" || warnline "ipset cw3-warp6 不存在 (单栈正常)"
+        # v6 面策略路由 —— 原来 doctor 在报告里猜 v6, 却从不看 ip -6 rule / cw3 表的 v6 路由
+        if [[ "$DEFAULT_OUTBOUND_V6" == "warp" ]]; then
+            ip -6 rule show 2>/dev/null | grep -qE "fwmark 0x$MARK (table|lookup) $TABLE_NAME" \
+                && okline "ip -6 rule fwmark 0x$MARK → $TABLE_NAME 在位" || failline "v6 策略路由规则缺失 (v6=warp)"
+            ip -6 route show table "$TABLE_NAME" 2>/dev/null | grep -q default \
+                && okline "表 $TABLE_NAME 有 v6 默认路由" || failline "v6=warp 但 $TABLE_NAME 表无 v6 默认路由!"
+        fi
+        # 默认出口连通性**实测** —— 结构在位 ≠ 真能出网 (隧道死了而规则还在时, 结构检查全绿)
+        local _e4
+        _e4=$(timeout 10 curl -4 -s --max-time 8 https://ifconfig.me/ip 2>/dev/null | tr -d ' \n')
+        if [[ -n "$_e4" ]]; then
+            okline "默认出口连通性: v4 实测通 (出口 $_e4)"
+        else
+            failline "默认出口连通性: v4 实测失败 (规则在位但出不了网)"
+        fi
+        if [[ "$DEFAULT_OUTBOUND_V6" == "warp" ]]; then
+            local _e6
+            _e6=$(timeout 10 curl -6 -s --max-time 8 https://ifconfig.me/ip 2>/dev/null | tr -d ' \n')
+            [[ -n "$_e6" ]] && okline "默认出口连通性: v6 实测通 (出口 $_e6)" \
+                            || warnline "默认出口连通性: v6 实测失败 (v6=warp 但 v6 出不去)"
+        fi
     else
         warnline "分流未部署 (apply 后检查 Routing)"
     fi
@@ -2015,7 +2594,7 @@ doctor() {
         else
             failline "v4=warp 但 $TABLE_NAME 表无 v4 默认路由!"
         fi
-        ipset list cw3-native4 >/dev/null 2>&1 && okline "v4 Native 例外集合就绪 (cw3-native4)" \
+        ipset_exists cw3-native4 && okline "v4 Native 例外集合就绪 (cw3-native4)" \
             || failline "v4 Native 例外集合缺失 (warp 模式必需)"
     else
         okline "v4: Native 默认 (warp 规则为例外)"
@@ -2027,11 +2606,31 @@ doctor() {
         else
             warnline "v6 补栈未生效: cw3 v6 表无默认路由 (apply 时连通性自检失败已自动撤回) — v6 出站兜底走原生出口, 不影响服务; 若需 v6 走 WARP 需修复 warp-go 的 v6 通道"
         fi
-        ipset list cw3-native6 >/dev/null 2>&1 && okline "v6 Native 例外集合就绪 (cw3-native6)" \
+        ipset_exists cw3-native6 && okline "v6 Native 例外集合就绪 (cw3-native6)" \
             || failline "v6 Native 例外集合缺失 (warp 模式必需)"
     else
         okline "v6: Native 默认 (warp 规则为例外)"
     fi
+    # 账号保活可见性 (原来只在 journal 里, 长期放置时账号失效无人知)
+    if [[ -s "$ACCOUNT_JSON" ]]; then
+        local _kats _kalast _kacode
+        _kats=$(cat "$KA_TS" 2>/dev/null || echo 0)
+        read -r _kalast _kacode < <(cat "$STATE/ka-last" 2>/dev/null || echo "0 0")
+        # 分三种情况, 别把"新装还没到周期"报成故障 ——
+        # 原来只要 KA_TS 不存在就无条件 warnline, 实测全新安装 (CCS) 立刻出现
+        # "从未成功 (最近一次 HTTP 0)": 那个 0 是 ka-last 缺失时的兜底值, 不是真的 HTTP 码。
+        local _acct_age=$(( ( $(date +%s) - $(stat -c %Y "$ACCOUNT_JSON" 2>/dev/null || echo 0) ) / 86400 ))
+        if [[ "$_kats" =~ ^[0-9]+$ ]] && (( _kats > 0 )); then
+            local _kad=$(( ( $(date +%s) - _kats ) / 86400 ))
+            (( _kad <= 8 )) && okline "账号保活: 上次成功 ${_kad} 天前" \
+                            || warnline "账号保活: 上次成功 ${_kad} 天前 (>7 天) — 账号可能已失效, 查: catmi-warp3 keepalive"
+        elif [[ -n "$_kacode" && "$_kacode" != "0" && "$_kacode" != "200" ]]; then
+            warnline "账号保活: 上次尝试 HTTP $_kacode (失败) — 查: catmi-warp3 keepalive"
+        elif (( _acct_age > 8 )); then
+            warnline "账号保活: 账号已 ${_acct_age} 天但从未成功保活 — 定时器没装? 查: systemctl status catmi-warp3-keepalive.timer"
+        fi
+    fi
+
     # 两栈红线
     local mdef4 mdef6
     mdef4=$(ip -4 route show default 2>/dev/null | head -1)
@@ -2052,8 +2651,13 @@ doctor() {
             && okline "mangle OUTPUT → CATMI3-OUT 在位" || failline "OUTPUT 跳转缺失 (applied 但规则无)"
         iptables -t mangle -S CATMI3-OUT 2>/dev/null | grep -q "mark ! --mark" \
             && okline "mark 保护 (已标流量 RETURN) 在位" || failline "mark 保护规则缺失 — 显式出站会被覆盖!"
-        [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]] \
-            || { ip6tables -t mangle -L OUTPUT 2>/dev/null | grep -q CATMI3-OUT && okline "ip6tables OUTPUT 跳转在位" || failline "ip6tables OUTPUT 跳转缺失"; }
+        # fw_up 末尾无条件建 ip6tables OUTPUT 跳转, 所以这里有 v6 就必须核 ——
+        # 原来拿 all.disable_ipv6==1 当"没 v6"直接跳过, 于是 all=1 的机器上
+        # 这项检查**从来没跑过** (doctor 少一项却不报错: 属于漏检型假绿)。
+        if has_v6; then
+            ip6tables -t mangle -L OUTPUT 2>/dev/null | grep -q CATMI3-OUT \
+                && okline "ip6tables OUTPUT 跳转在位" || failline "ip6tables OUTPUT 跳转缺失"
+        fi
     fi
     if [[ "$FORWARD" == "1" ]]; then
         iptables -t mangle -L PREROUTING 2>/dev/null | grep -q CATMI3-FWD \
@@ -2095,12 +2699,22 @@ doctor() {
     else
         okline "共存保护: 已标 fwmark 流量 RETURN (sockopt.mark/routing-mark 不被覆盖)"
     fi
-    warnline "提醒: root 运行且无 mark/bind 的代理 direct 出站, 内核层不可区分 — 详见 docs/COMPATIBILITY.md"
+    # 这条是**恒定提示**, 不是检查结果 —— 原来用 warnline 会计入 WARN 计数,
+    # 把 Summary 从 PASS 压成 WARN, **稀释真正的告警**。改成不计数的 info。
+    # 同时去掉指向 docs/COMPATIBILITY.md 的引用: 脚本是单文件部署, 该文档并不存在。
+    info "提示 (不计入告警): root 运行且无 mark/bind 的代理 direct 出站, 内核层无法区分"
+    info "  要把它固定走原生: 给它设 routing-mark / sockopt.mark, 或加进 main.conf 的 NATIVE_IPS"
 
     echo "=========================================="
     echo "Summary: PASS=$p WARN=$w FAIL=$f → $( ((f>0)) && echo FAIL || { ((w>0)) && echo WARN || echo PASS; } )"
     # 供面板显示最近一次真实探测 (时间戳 1h 内有效)
-    { echo "ipv4=$p4"; echo "ipv6=$p6"; echo "egress_ok=$([[ $p4 == OK* ]] && echo 1 || echo 0)"; echo "ts=$(date +%s)"; } > "$STATE/ui.state" 2>/dev/null
+    # 顺带记下**真实出口 IP** —— 面板原来只显示 ● WARP / ● Native 这种推断词,
+    # 用户最想知道的"我现在出口 IP 是多少"却要翻三层菜单。这里探测一次缓存起来。
+    local _eip4 _eip6
+    _eip4=$(timeout 10 curl -4 -s --max-time 8 https://ifconfig.me/ip 2>/dev/null | tr -d ' \n')
+    _eip6=$(timeout 10 curl -6 -s --max-time 8 https://ifconfig.me/ip 2>/dev/null | tr -d ' \n')
+    { echo "ipv4=$p4"; echo "ipv6=$p6"; echo "egress_ok=$([[ $p4 == OK* ]] && echo 1 || echo 0)"
+      echo "ip4=$_eip4"; echo "ip6=$_eip6"; echo "ts=$(date +%s)"; } > "$STATE/ui.state" 2>/dev/null
     ((f == 0)) && return 0
     return 1
 }
@@ -2149,7 +2763,7 @@ test_priority() {
     local cfip devid
     cfip=$(dig +short @127.0.0.1 cloudflare.com A 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
     [[ -z "$cfip" ]] && cfip=$(dig +short cloudflare.com A 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
-    devid=$(ip -4 route show default 2>/dev/null | grep -oE 'dev [a-z0-9]+' | awk '{print $2; exit}')
+    devid=$(ip -4 route show default 2>/dev/null | grep -oE 'dev [a-zA-Z0-9_.-]+' | awk '{print $2; exit}')
     if [[ -z "$cfip" ]]; then
         failline "③④⑤ 无法取 CF 边缘 IP (DNS 不可用) — 实测跳过"
     else
@@ -2168,9 +2782,13 @@ test_priority() {
         if ipset test cw3-warp4 "$cfip" >/dev/null 2>&1; then
             local r5
             r5=$(timeout 8 curl -s --resolve "cloudflare.com:443:$cfip" https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -oE '^warp=[a-z]+$' | head -1)
+            # ⑤ 是唯一验证"默认接管真的生效"的断言: 原来只 warnline, 调用方拿到 rc=0,
+            # "分流没生效"与"正常"不可区分。已 apply 却出不去 = 真 FAIL。
             [[ "$r5" == "warp=on" ]] \
                 && okline "⑤ 无标流量 → WARP ($( [[ "$DEFAULT_OUTBOUND_V4" == "warp" ]] && echo "v4 WARP 默认" || echo "ipset 命中" )生效) ✓" \
-                || warnline "⑤ 无标流量未走 WARP ($r5) — 分流未生效或已被 V2 等接管"
+                || { [[ -f "$APPLIED_FLAG" ]] \
+                       && failline "⑤ 无标流量未走 WARP ($r5) — 分流**未生效**或已被 V2 等接管" \
+                       || warnline "⑤ 无标流量未走 WARP ($r5) — 分流未部署 (apply 后复测)"; }
         else
             warnline "⑤ $cfip 不在 cw3-warp4 (先 add cloudflare.com warp + apply 再测)"
         fi
@@ -2182,7 +2800,7 @@ test_priority() {
     done
     grep -rEls 'routing-mark' /root/catmi/mihomo/conf/*.yaml /etc/mihomo/*.yaml 2>/dev/null | grep -q . && sig="$sig mihomo(routing-mark)"
     [[ -n "$sig" ]] && okline "⑥ 代理内核显式出站信号:$sig" \
-        || warnline "⑥ xray/mihomo 未声明显式出站信号 → 其 root 直连流量内核层不可区分, 命中规则域名时会被接管 (docs/COMPATIBILITY.md)"
+        || warnline "⑥ xray/mihomo 未声明显式出站信号 → 其 root 直连流量内核层不可区分, 命中规则域名时会被接管; 要固定走原生请给它设 routing-mark / sockopt.mark, 或加进 main.conf 的 NATIVE_IPS"
     echo "======================================================"
     echo "Summary: PASS=$p WARN=$w FAIL=$f → $( ((f>0)) && echo FAIL || { ((w>0)) && echo WARN || echo PASS; } )"
     ((f == 0)) && return 0
@@ -2197,12 +2815,32 @@ check_env() {
     command -v curl >/dev/null 2>&1 && ok "✓ curl" || { err "✗ curl"; ((bad++)); }
     command -v python3 >/dev/null 2>&1 && ok "✓ python3" || { err "✗ python3 (注册解析需要)"; ((bad++)); }
     command -v wg >/dev/null 2>&1 && ok "✓ wireguard-tools" || warn "△ wireguard-tools 未装 (安装时自动)"
+    # 分流真正依赖的三个命令 —— 原来 check_env 一个都不查, 全缺也照样"✓ 体检通过"
+    # (ensure_deps 会在 apply 时自动装, 所以这里只报警不阻断)
+    command -v iptables >/dev/null 2>&1 && ok "✓ iptables" || warn "△ iptables 未装 (apply 时 ensure_deps 自动装)"
+    command -v ipset >/dev/null 2>&1 && ok "✓ ipset" || warn "△ ipset 未装 (apply 时 ensure_deps 自动装)"
+    command -v dig >/dev/null 2>&1 && ok "✓ dig" || warn "△ dig 未装 (apply 时 ensure_deps 自动装)"
     if modprobe wireguard 2>/dev/null || grep -qw wireguard /proc/modules 2>/dev/null; then
         ok "✓ 内核 WireGuard 模块"
-    elif [[ "$(uname -r | cut -d. -f1)" -ge 5 ]]; then
+    elif kernel_ge 5 6; then
         ok "✓ 内核 $(uname -r) ≥5.6 (内置)"
     else
         err "✗ 内核 $(uname -r) 无 WireGuard"; ((bad++))
+    fi
+    # 内核能力探测 —— 容器 / OpenVZ / 精简内核上装了 ipset/iptables 也未必能用,
+    # 这类问题在 apply 半途炸出来最难查, 前置到体检里 (实测可行的最小探测)
+    if command -v ipset >/dev/null 2>&1; then
+        if ipset create catmi-probe-test hash:ip -exist 2>/dev/null; then
+            ipset destroy catmi-probe-test 2>/dev/null
+            ok "✓ ipset 内核模块可用"
+        else
+            err "✗ ipset 无法创建集合 (内核缺 ip_set/xt_set 模块?)"; ((bad++))
+        fi
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -t mangle -L -n >/dev/null 2>&1 \
+            && ok "✓ iptables mangle 表可用" \
+            || { err "✗ iptables mangle 表不可用 (容器缺 NET_ADMIN / 无 nf_tables?)"; ((bad++)); }
     fi
     local st; st=$(already_installed)
     case "$st" in
@@ -2226,21 +2864,43 @@ check_env() {
 # ============================================================
 account_keepalive() {
     [[ -s "$ACCOUNT_JSON" ]] || return 0
-    local now ts id tok code
+    local now ts id tok code last_t last_c
     now=$(date +%s); ts=$(cat "$KA_TS" 2>/dev/null || echo 0)
     (( now - ts < 604800 )) && return 0
+    # 失败退避 + 结果留痕: 原来失败时每 10 分钟无限重试 (~144 次/天), 且结果只 echo 到 journal,
+    # status/doctor 都不读 ⇒ 账号真失效时用户永远看不到 (长期放置最怕的静默失效)。
+    read -r last_t last_c < <(cat "$STATE/ka-last" 2>/dev/null || echo "0 0")
+    [[ "$last_t" =~ ^[0-9]+$ ]] || last_t=0
+    if [[ -n "$last_c" && "$last_c" != "0" && "$last_c" != "200" ]] && (( now - last_t < 3600 )); then
+        return 0
+    fi
     id=$(python3 -c "import json;print(json.load(open('$ACCOUNT_JSON')).get('id',''))" 2>/dev/null)
     tok=$(python3 -c "import json;print(json.load(open('$ACCOUNT_JSON')).get('token',''))" 2>/dev/null)
     [[ -z "$id" || -z "$tok" ]] && return 0
     code=$(timeout 10 curl -s -o /dev/null -w '%{http_code}' "$CF_API_REG/$id" \
         -H 'User-Agent: okhttp/3.12.1' -H "CF-Client-Version: $CF_API_VER" \
         -H "Authorization: Bearer $tok" 2>/dev/null)
-    [[ "$code" == "200" ]] && { date +%s > "$KA_TS"; echo "keepalive: OK ($code)"; } \
-        || echo "keepalive: HTTP $code (异常)"
+    echo "$now $code" > "$STATE/ka-last" 2>/dev/null
+    if [[ "$code" == "200" ]]; then
+        date +%s > "$KA_TS"; echo "keepalive: OK ($code)"
+    else
+        echo "keepalive: HTTP $code (异常 — 已退避 1h 再试; 连续失败说明账号可能已失效)"
+    fi
 }
 
 install_units() {
     need_root
+    # ExecStart 把**安装时**的脚本路径固化进单元文件: 从 /tmp 副本安装后, 单元指向的脚本
+    # 重启时早已不存在 → 开机恢复与保活永久失败, 而用户看不到任何提示。这里前置拦掉。
+    if [[ ! -x "$SELF_PATH" ]]; then
+        err "开机单元要固化的路径不可执行: $SELF_PATH"; return 1
+    fi
+    case "$SELF_PATH" in
+        /tmp/*|/var/tmp/*|/dev/shm/*)
+            err "当前脚本在临时目录 ($SELF_PATH) — 固化成开机单元会永久失效"
+            err "先落到固定路径再装: install -m 755 \"$SELF_PATH\" /usr/local/bin/catmi-warp3"
+            return 1 ;;
+    esac
     cat > /lib/systemd/system/catmi-warp3-restore.service <<EOF
 [Unit]
 Description=catmi-warp3: re-apply WARP site-split after boot (v3)
@@ -2281,7 +2941,14 @@ Type=oneshot
 ExecStart=$SELF_PATH keepalive
 EOF
     systemctl daemon-reload
-    systemctl enable catmi-warp3-restore.service catmi-warp3-keepalive.timer >/dev/null 2>&1
+    # enable 失败 = 重启后不会自动恢复分流、保活也不跑 —— 不能报了"已安装"就完事
+    if ! systemctl enable catmi-warp3-restore.service catmi-warp3-keepalive.timer >/dev/null 2>&1; then
+        err "开机单元 enable 失败 — 重启后**不会**自动恢复分流";
+        err "排查: systemctl status catmi-warp3-restore.service"
+        return 1
+    fi
+    systemctl is-enabled --quiet catmi-warp3-restore.service 2>/dev/null \
+        || { err "catmi-warp3-restore 未处于 enabled 状态"; return 1; }
     ok "已安装: catmi-warp3-restore (开机恢复) + catmi-warp3-keepalive 定时器 (10min)"
 }
 
@@ -2290,6 +2957,7 @@ update_self() {
     local url="${1:-$DEFAULT_UPDATE_URL}"
     [[ -z "$url" ]] && { err "未配置更新源 — catmi-warp update <URL> 或设 CATMI_WARP_URL"; return 1; }
     acquire_lock || return 1
+    init_dirs   # 否则 $BACKUPS 不存在时, 下面的备份静默不发生 (回滚点都没有)
     info "拉取 $url ..."
     local tmp="$RUNTIME/catmi-warp.new"
     if ! timeout 30 curl -sL "$url" -o "$tmp" || [[ ! -s "$tmp" ]]; then
@@ -2305,14 +2973,22 @@ update_self() {
     if [[ "$old" == "$new" ]]; then
         ok "已是最新版 (${new:0:8})"; rm -f "$tmp"; return 0
     fi
-    cp -f "$self" "$BACKUPS/catmi-warp.old" 2>/dev/null
+    # 备份失败就不更新 —— 没有回滚点的自我更新等于赌命
+    if ! cp -f "$self" "$BACKUPS/catmi-warp.old" 2>/dev/null || [[ ! -s "$BACKUPS/catmi-warp.old" ]]; then
+        err "备份当前版本失败 ($BACKUPS/catmi-warp.old) — 中止更新"; rm -f "$tmp"; return 1
+    fi
     if install -m 755 "$tmp" "$self" && bash "$self" selftest >/dev/null 2>&1; then
         rm -f "$tmp"
         ok "更新完成: ${old:0:8} → ${new:0:8} (旧版: $BACKUPS/catmi-warp.old)"
         log_op "update" "OK $old → $new"
     else
-        err "新版 selftest 失败, 回滚"
-        cp -f "$BACKUPS/catmi-warp.old" "$self" 2>/dev/null && chmod 755 "$self"
+        # 原来 `cp ... && chmod` 失败会静默短路, 却照样打印"回滚" —— 坏脚本留在原位
+        if cp -f "$BACKUPS/catmi-warp.old" "$self" 2>/dev/null && chmod 755 "$self" \
+           && bash "$self" selftest >/dev/null 2>&1; then
+            err "新版 selftest 未通过 — 已回滚到旧版 (${old:0:8})"
+        else
+            err "新版 selftest 未通过 且 回滚失败! 请手工恢复: cp $BACKUPS/catmi-warp.old $self"
+        fi
         rm -f "$tmp"; log_op "update" "FAILED+rollback"
         return 1
     fi
@@ -2322,7 +2998,13 @@ uninstall_module() {
     need_root
     acquire_lock || return 1
     echo "卸载 catmi-warp3 v$VERSION 模块..."
-    revoke >/dev/null 2>&1
+    # 拆除失败就**别删自己** —— 否则现场残留 (iptables / ip rule / DNS 半死) 而修复工具已被删除,
+    # 用户既看不到残留也修不了。原写法是 `revoke >/dev/null 2>&1` 后照常往下走。
+    if ! revoke >/dev/null 2>&1; then
+        err "拆除分流失败 — 已中止卸载 (避免留下残留却没有工具可修)"
+        err "请先排查: catmi-warp3 doctor    修好后重试: catmi-warp3 uninstall"
+        return 1
+    fi
     systemctl disable --now catmi-warp3-restore.service catmi-warp3-keepalive.timer catmi-warp3-keepalive.service >/dev/null 2>&1
     rm -f /lib/systemd/system/catmi-warp3-restore.service /lib/systemd/system/catmi-warp3-keepalive.timer /lib/systemd/system/catmi-warp3-keepalive.service
     systemctl daemon-reload
@@ -2358,8 +3040,19 @@ selftest() {
     _t "echo svc api.ip.sb" 'is_echo_service "api.ip.sb"'
     _t "echo svc negative" '! is_echo_service "google.com"'
 
+    # 内核版本比较 —— 只看 major 是 V3 审计实测到的假绿 (5.4 被判成 ≥5.6, WG 是 5.6 才进主线)
+    _t "kernel_ge 6.19"          'kernel_ge 5 6 "6.19.11-x64v2-xanmod1"'
+    _t "kernel_ge 5.6 边界"      'kernel_ge 5 6 "5.6.0-generic"'
+    _t "kernel_ge 拒绝 5.5"      '! kernel_ge 5 6 "5.5.9"'
+    _t "kernel_ge 拒绝 5.4"      '! kernel_ge 5 6 "5.4.19-rockchip64"'
+    _t "kernel_ge 拒绝 4.x"      '! kernel_ge 5 6 "4.19.0"'
+    _t "kernel_ge 拒绝非版本串"  '! kernel_ge 5 6 "nonsense"'
+    _t "ipset_exists 假名必假"   '! ipset_exists cw3-selftest-nonexistent'
+
     # 临时 BASE
     BASE=$(mktemp -d)
+    # 被 kill / 超时打断时也要清理 —— 原来只在正常收尾 rm -rf, 中断就永久残留 /tmp/tmp.XXXX
+    trap 'rm -rf "$BASE" 2>/dev/null' EXIT
     RUNTIME="$BASE/runtime"; STATE="$BASE/state"; BACKUPS="$BASE/backups"
     GEN="$BASE/generated"; OUTDIR="$GEN/outbound"; LOGDIR="$BASE/logs"
     CONFDIR="$BASE/config"; RULES="$CONFDIR/rules.conf"; MAIN_CONF="$CONFDIR/main.conf"
@@ -2381,6 +3074,29 @@ selftest() {
     rule_del openai.com >/dev/null 2>&1
     _t "rule del" '[[ $(rule_list | wc -l) -eq 2 ]]'
 
+    # migrate_v2: V2 审计实测的两个缺陷 —— 非法行原样导入 / 落盘失败只导入一部分却写幂等标记。
+    # 后者会让剩余规则**永久**不再导入 (标记已写), 是最难自查的一类静默数据丢失。
+    cp -f "$RULES" "$BASE/rules.save"   # 本段会重写规则集, 后面的 dnsmasq 断言还要用上面的规则
+    mkdir -p "$BASE/v2/config"
+    printf 'good1.com|warp|1|\nbad/domain|warp|1|\nnoact.com|both|1|\ngood2.com|native|1|n\n' > "$BASE/v2/config/rules.conf"
+    : > "$RULES"
+    CATMI_V2_HOME="$BASE/v2" migrate_v2 >/dev/null 2>&1
+    _t "migrate 只导入合法行"     '[[ $(rule_list | wc -l) -eq 2 ]]'
+    _t "migrate 拦非法域名"       '! grep -q "bad/domain" "$RULES"'
+    _t "migrate 拦非法 action"    '! grep -q "noact.com" "$RULES"'
+    _t "migrate 保留 note 字段"   'grep -q "^good2.com|native|1|n$" "$RULES"'
+    _t "migrate 成功才写标记"     '[[ -f "$STATE/v2-imported" ]]'
+    _t "migrate 幂等"             'CATMI_V2_HOME="$BASE/v2" migrate_v2 >/dev/null 2>&1; [[ $(rule_list | wc -l) -eq 2 ]]'
+    # 落盘失败注入: RUNTIME 指向不存在的目录 → cp 必失败 (root 也绕不过"目录不存在")
+    rm -f "$STATE/v2-imported"; : > "$RULES"
+    local _save_rt="$RUNTIME" _migrc=0; RUNTIME="$BASE/no-such-dir"
+    CATMI_V2_HOME="$BASE/v2" migrate_v2 >/dev/null 2>&1 || _migrc=1
+    RUNTIME="$_save_rt"
+    _t "migrate 落盘失败返回非0"  '[[ $_migrc -eq 1 ]]'
+    _t "migrate 落盘失败不写标记" '[[ ! -f "$STATE/v2-imported" ]]'
+    _t "migrate 落盘失败不动规则" '[[ $(rule_list | wc -l) -eq 0 ]]'
+    cp -f "$BASE/rules.save" "$RULES"; rm -f "$STATE/v2-imported"
+
     # dnsmasq conf (enabled warp: youtube 1 条)
     gen_dnsmasq_conf >/dev/null 2>&1
     _t "dnsmasq ipset line" 'grep -q "ipset=/youtube.com/cw3-warp4,cw3-warp6" "$GEN_DNS_REAL"'
@@ -2397,25 +3113,25 @@ selftest() {
     # 双模式: gen_dnsmasq_conf 按模式选集合 (native→warp 集; warp→native 集)
     local _gsave="$_gt"
     _gt=0
-    rm -f "$TDIR/gd.conf" "$TDIR/gd.link"
+    rm -f "$BASE/gd.conf" "$BASE/gd.link"
     # gen dns 断言需要确定性规则状态 (前面的 rule_* 测试改写过 google/youtube)
     printf 'google.com|warp|1|selftest\nbaidu.com|native|1|selftest\n' > "$RULES"
     DEFAULT_OUTBOUND_V4="native" DEFAULT_OUTBOUND_V6="native" UPSTREAMS="9.9.9.9" \
-        GEN_DNS_REAL="$TDIR/gd.conf" GEN_DNS_LINK="$TDIR/gd.link" gen_dnsmasq_conf >/dev/null 2>&1
-    grep -q "ipset=/google.com/cw3-warp4,cw3-warp6" "$TDIR/gd.conf" 2>/dev/null \
+        GEN_DNS_REAL="$BASE/gd.conf" GEN_DNS_LINK="$BASE/gd.link" gen_dnsmasq_conf >/dev/null 2>&1
+    grep -q "ipset=/google.com/cw3-warp4,cw3-warp6" "$BASE/gd.conf" 2>/dev/null \
         && _t "gen dns 全native" || FAIL "gen dns 全native"
     DEFAULT_OUTBOUND_V4="warp" DEFAULT_OUTBOUND_V6="warp"
-    GEN_DNS_REAL="$TDIR/gd.conf" GEN_DNS_LINK="$TDIR/gd.link" gen_dnsmasq_conf >/dev/null 2>&1
-    grep -q "ipset=/baidu.com/cw3-native4,cw3-native6" "$TDIR/gd.conf" 2>/dev/null \
+    GEN_DNS_REAL="$BASE/gd.conf" GEN_DNS_LINK="$BASE/gd.link" gen_dnsmasq_conf >/dev/null 2>&1
+    grep -q "ipset=/baidu.com/cw3-native4,cw3-native6" "$BASE/gd.conf" 2>/dev/null \
         && _t "gen dns 双栈" || FAIL "gen dns 双栈"
-    if grep -q "cw3-warp4" "$TDIR/gd.conf" 2>/dev/null; then
+    if grep -q "cw3-warp4" "$BASE/gd.conf" 2>/dev/null; then
         FAIL "gen dns 双栈不应输出 warp 集"
     else
         _t "gen dns 双栈排除"
     fi
     DEFAULT_OUTBOUND_V4="native" DEFAULT_OUTBOUND_V6="warp"
-    GEN_DNS_REAL="$TDIR/gd.conf" GEN_DNS_LINK="$TDIR/gd.link" gen_dnsmasq_conf >/dev/null 2>&1
-    grep -q "ipset=/google.com/cw3-warp4$" "$TDIR/gd.conf" 2>/dev/null \
+    GEN_DNS_REAL="$BASE/gd.conf" GEN_DNS_LINK="$BASE/gd.link" gen_dnsmasq_conf >/dev/null 2>&1
+    grep -q "ipset=/google.com/cw3-warp4$" "$BASE/gd.conf" 2>/dev/null \
         && _t "gen dns 仅v6补栈" || FAIL "gen dns 仅v6补栈"
     DEFAULT_OUTBOUND_V4="native" DEFAULT_OUTBOUND_V6="native"
     _gt="$_gsave"
@@ -2451,7 +3167,9 @@ EOF
     if [[ -r /sys/class/net/warp/mtu ]]; then
         _t "parse mtu (live iface wins)" '[[ "$WARP_MTU" == "$(cat /sys/class/net/warp/mtu)" ]]'
     else
-        _t "parse mtu" '[[ "$WARP_MTU" == "1420" ]]'
+        # 无实际接口时无从验证"实接口优先" —— 只确认解析出了非空值。
+        # 这里**不能**断言 1420: 那是契约明令禁止的值, 固化它等于把 bug 当正确行为
+        _t "parse mtu (parsed, non-empty)" '[[ -n "$WARP_MTU" ]]'
     fi
 
     # outbound 三片段 (mock 凭据)
@@ -2478,7 +3196,9 @@ PY
     # resolv state 写读
     echo "MANAGED=1" > "$RESOLV_STATE"
     echo "BACKUP=$BACKUPS/resolv.orig" >> "$RESOLV_STATE"
-    grep -qE '^BACKUP=' "$RESOLV_STATE" && _t "resolv state roundtrip" 'true' || _t "resolv state roundtrip" 'false'
+    # 原来是 `grep -qE '^BACKUP=' && _t "..." 'true' || _t "..." 'false'` ——
+    # 断言的是**字面量** true/false, 同义反复, 没测任何生产代码。改成检查 state 结构完整。
+    _t "resolv state 有备份记录" 'grep -qE "^BACKUP=" "$RESOLV_STATE"' ''
 
     # takeover/release 全周期 (mock RESOLV, 不碰真实文件)
     RESOLV="$BASE/resolv.mock"; echo "nameserver 1.1.1.1" > "$RESOLV"
@@ -2523,6 +3243,76 @@ PY
     _t "main.conf has NATIVE_IPS" 'grep -q "^NATIVE_IPS=" "$MAIN_CONF"'
     RESOLV="/etc/resolv.conf"
 
+    # ── 状态阶段 (读真实系统状态; 只读不写) ──
+    # A3 用故障注入实证: 上面全部是**纯函数级**断言, 对 mangle 顺序 / ip rule / ipset / dnsmasq
+    # 全盲 —— 把下面这些故障注入进去, selftest 照样打印 56/56 全绿:
+    #   a) native 豁免块顺序改坏  b) ip rule 守卫改永假
+    #   c) AAAA 预热改为不做      d) dnsmasq 重试环存活校验删除
+    # 这一层专门补上"分流到底有没有真的部署对"。
+    local _rh="${CATMI_WARP_HOME:-/etc/catmi/warp3}"
+    local _rap="$_rh/state/applied"
+    if [[ -f "$_rap" ]]; then
+        # 模式必须从**真实 config 文件**读 —— selftest 前面测 gen_dnsmasq_conf 时把
+        # DEFAULT_OUTBOUND_V4/V6 改成 "native" 当 mock 且没恢复, 直接判变量会让
+        # 下面 v4/v6 的顺序断言**恒被跳过**(静默失效, 等于没写)。
+        local _rm4 _rm6
+        _rm4=$(grep -E '^DEFAULT_OUTBOUND_V4=' "$_rh/config/main.conf" 2>/dev/null | cut -d= -f2)
+        _rm6=$(grep -E '^DEFAULT_OUTBOUND_V6=' "$_rh/config/main.conf" 2>/dev/null | cut -d= -f2)
+        # ① ip rule 不允许重复优先级 (重复 → 顺序不确定 → 行为飘忽)
+        local _d4 _d6
+        _d4=$(ip -4 rule show 2>/dev/null | awk '{print $1}' | sort | uniq -d | tr '\n' ' ')
+        _d6=$(ip -6 rule show 2>/dev/null | awk '{print $1}' | sort | uniq -d | tr '\n' ' ')
+        _t "state: ip -4 rule 无重复优先级" '[[ -z "$_d4" ]]'
+        _t "state: ip -6 rule 无重复优先级" '[[ -z "$_d6" ]]'
+        # ② 已标流量保护必须最前 (显式出站不被覆盖的根基)
+        _t "state: 已标流量首条即 RETURN" 'iptables -t mangle -S CATMI3-OUT 2>/dev/null | grep "^-A" | head -1 | grep -q "mark ! --mark 0x0 -j RETURN"'
+        # ③ 入站零影响: PREROUTING 不得有本模块规则
+        _t "state: PREROUTING 无本模块规则" '! iptables -t mangle -S PREROUTING 2>/dev/null | grep -q CATMI3'
+        _t "state: v6 PREROUTING 无本模块规则" '! ip6tables -t mangle -S PREROUTING 2>/dev/null | grep -q CATMI3'
+        # ④ dnsmasq 必须在跑 (域名分流靠它填 ipset)
+        _t "state: dnsmasq 运行中" 'systemctl is-active --quiet dnsmasq'
+        # ⑤ v6 默认 warp 时: 兜底 MARK 必须排在 native6 覆盖**之前**, 顺序反了豁免就失效
+        if [[ "$_rm6" == "warp" ]]; then
+            local _m3 _mn6
+            _m3=$(ip6tables -t mangle -S CATMI3-OUT 2>/dev/null | grep -n 'MARK --set-xmark 0x3' | head -1 | cut -d: -f1)
+            _mn6=$(ip6tables -t mangle -S CATMI3-OUT 2>/dev/null | grep -n 'match-set cw3-native6 dst -j MARK' | head -1 | cut -d: -f1)
+            _t "state: v6 native6 覆盖在兜底 MARK 之后" '[[ -n "$_mn6" && -n "$_m3" && "$_mn6" -gt "$_m3" ]]'
+        fi
+        # ⑥ v4 默认 warp 时: native4 豁免必须排在兜底打标**之前** (v4 靠 RETURN 实现豁免)
+        if [[ "$_rm4" == "warp" ]]; then
+            local _r4 _k3
+            _r4=$(iptables -t mangle -S CATMI3-OUT 2>/dev/null | grep -n 'match-set cw3-native4 dst -j RETURN' | head -1 | cut -d: -f1)
+            _k3=$(iptables -t mangle -S CATMI3-OUT 2>/dev/null | grep -n 'MARK --set-xmark 0x3' | head -1 | cut -d: -f1)
+            _t "state: v4 native4 豁免在兜底打标之前" '[[ -n "$_r4" && -n "$_k3" && "$_r4" -lt "$_k3" ]]'
+        fi
+        # ⑦ cw3 表必须有默认路由 (没有 = 打了标也没处去)
+        _t "state: cw3 表有默认路由" 'ip -4 route show table cw3 2>/dev/null | grep -q default'
+        # ⑧ ipset 存在性 —— 「分流有没有数据可匹配」是核心状态, 但原来 9 条断言一条都没碰它。
+        # V2 实测: `ipset destroy cw3-warp4` 与 `ipset flush cw3-native4` 都是 65/65 全绿,
+        # 而后者是真功能故障 (native 例外集合被擦空 → 该走原生的域名实际走 WARP)。
+        local _is
+        for _is in cw3-warp4 cw3-warp6 cw3-native4 cw3-native6; do
+            _t "state: ipset $_is 存在" "ipset list $_is >/dev/null 2>&1"
+        done
+        # ⑨ 当前模式下"该有条目"的例外集合不能是空的 (只看应存在的那一侧)
+        if [[ "$_rm4" == "warp" ]] || [[ "$_rm6" == "warp" ]]; then
+            if awk -F'|' '$2=="native" && $3=="1"{c++} END{exit !(c>0)}' "$RULES" 2>/dev/null; then
+                _t "state: native 例外集合非空" \
+                   '[[ $(ipset list cw3-native4 2>/dev/null | tail -n +9 | wc -l) -gt 0 || $(ipset list cw3-native6 2>/dev/null | tail -n +9 | wc -l) -gt 0 ]]'
+            fi
+        fi
+        if [[ "$_rm4" == "native" ]] || [[ "$_rm6" == "native" ]]; then
+            if awk -F'|' '$2=="warp" && $3=="1"{c++} END{exit !(c>0)}' "$RULES" 2>/dev/null; then
+                _t "state: warp 例外集合非空" \
+                   '[[ $(ipset list cw3-warp4 2>/dev/null | tail -n +9 | wc -l) -gt 0 || $(ipset list cw3-warp6 2>/dev/null | tail -n +9 | wc -l) -gt 0 ]]'
+            fi
+        fi
+    else
+        # 状态层被跳过时必须说一声 —— 否则 56 项 vs 65 项 无法区分,
+        # "全绿"会被误读成"已部署且正确", 实际是"压根没检查"。
+        echo "  注: 分流未部署 ($_rap 不存在), 状态阶段已跳过 — 本次只跑了纯函数断言" >&2
+    fi
+
     rm -rf "$BASE"
     echo ""
     if ((failn == 0)); then ok "selftest 全部通过 ($pass 项)"; return 0; fi
@@ -2538,7 +3328,16 @@ PY
 # ============================================================
 
 # --- 终端能力 (每帧调用, 零依赖: tput 可缺省) ---
+# 清屏 —— 原脚本 0 个清屏序列(ANSI 里 2J/3J/H 全无), 每次重画都把 ~60 行面板
+# **追加**到下面: 24 行 SSH 窗口首屏只看得到下半截, 逛两三个菜单就是"面板瀑布"。
+ui_clear() {
+    # 非 tty / TERM=dumb 时不发 ANSI (降级模式仍然可读)
+    [[ -t 1 && "${TERM:-}" != "dumb" ]] || return 0
+    printf '\033[H\033[2J'
+}
+
 ui_init() {
+    ui_clear
     UI_COLS=${COLUMNS:-$(tput cols 2>/dev/null)}
     [[ "$UI_COLS" =~ ^[0-9]+$ ]] || UI_COLS=80
     ((UI_COLS < 60)) && UI_COLS=60
@@ -2662,13 +3461,30 @@ dash_data() {
     D_DEF6=$([[ "$DEFAULT_OUTBOUND_V6" == "warp" ]] && echo WARP || echo Native)
     D_STK=$(stack_mode)
     D_DNS=$(detect_dns53)
-    D_IPSET=$([[ -f "$APPLIED_FLAG" ]] && ipset list cw3-warp4 >/dev/null 2>&1 && echo ok || { [[ -f "$APPLIED_FLAG" ]] && echo fail || echo na; })
+    # 「IP 名单已就绪」不能只看集合**存不存在** —— 集合在但 0 成员时, 分流其实没有数据可匹配
+    # (实测出现过 cw3-warp4 0 条却显示绿点)。按当前模式检查"应该有条目"的那个例外集合。
+    D_IPSET=na
+    if [[ -f "$APPLIED_FLAG" ]]; then
+        D_IPSET=ok
+        ipset_exists cw3-warp4 || D_IPSET=fail
+        if [[ "$D_IPSET" == "ok" ]] \
+           && { [[ "$DEFAULT_OUTBOUND_V4" == "warp" ]] || [[ "$DEFAULT_OUTBOUND_V6" == "warp" ]]; } \
+           && awk -F'|' '$2=="native" && $3=="1"{c++} END{exit !(c>0)}' "$RULES" 2>/dev/null; then
+            # 有 native 规则 + 默认走 WARP → native 例外集合必须有成员, 否则规则匹配不到
+            # 必须 tail -n +9 跳过 ipset 的 8 行头部 (Name:/Type:/Number of entries:…),
+            # 否则 `grep -cE ':'` 恒等于 8, 守卫永远不触发, 集合 0 成员也显示"已就绪"。
+            if [[ $(ipset list cw3-native4 2>/dev/null | tail -n +9 | grep -cE '^[0-9]') -eq 0 ]] \
+               && [[ $(ipset list cw3-native6 2>/dev/null | tail -n +9 | grep -cE ':') -eq 0 ]]; then
+                D_IPSET=fail
+            fi
+        fi
+    fi
     # 语义检查: 0x3→cw3 规则存在即 ok (规则优先级是动态的, 固定 prio 锚点会误报 MISSING)
     D_RULE=$([[ -f "$APPLIED_FLAG" ]] && { ip -4 rule show 2>/dev/null | grep -qE "fwmark 0x$MARK (table|lookup) cw3" && echo ok || echo fail; } || echo na)
     # 最近一次 egress 探测缓存 (doctor 写入, 1h 内有效); ipv6 值含空格/箭头, 不进 eval
     D_CTS=0
     if [[ -s "$STATE/ui.state" ]]; then
-        eval "$(grep -E '^(ipv4|egress_ok|ts)=' "$STATE/ui.state" | sed 's/^/D_/')" 2>/dev/null
+        eval "$(grep -E '^(ipv4|egress_ok|ts|ip4|ip6)=' "$STATE/ui.state" | sed 's/^/D_/')" 2>/dev/null
         D_CTS=${D_ts:-0}
     fi
 }
@@ -2676,7 +3492,13 @@ dash_data() {
 # 分族渲染: family_probe 语义 ${UI_ARROW} 面板语义
 dash_fam() { # <probe输出> <族>
     local v="${1%% *}"; local age=""
-    ((D_CTS > 0)) && { local dt=$(( $(date +%s) - D_CTS )); ((dt < 3600)) && age=" (缓存${dt}s, 按R刷新)" || age=" (缓存数据, 按R刷新)"; }
+    # [R] 只重绘、**不重新探测** —— 原来写"按R刷新"是假的。真实探测入口是 [4]→[1] 健康检查。
+    if ((D_CTS > 0)); then
+        local dt=$(( $(date +%s) - D_CTS ))
+        ((dt < 3600)) && age=" (实测于 ${dt}s 前)" || age=" (实测超 1h, 按 [4]→[1] 复测)"
+    else
+        age=" (未实测, 按 [4]→[1] 健康检查)"
+    fi
     case "$v" in
         OK)        printf '%s WARP'   "$(ui_dot ok)" ;;
         fallback)  printf '%s Native' "$(ui_dot warn)" ;;
@@ -2695,8 +3517,11 @@ dash_fam() { # <probe输出> <族>
 
 dash_render() {
     ui_init; dash_data
-    local W
-    if ((UI_COLS >= 100)); then W=48; elif ((UI_COLS >= 84)); then W=76; else W=$((UI_COLS - 4)); fi
+    # 框宽必须**跟着终端单调增长**: 原来 UI_COLS>=100 时反而 W=48 (比 84 列的 76 还窄),
+    # 宽终端上就出现"框顶比内容短一大截"(实测 120 列时框顶 51 列 vs 内容行 76 列)的破框。
+    # 封顶 76 是因为内容区最宽的行就是 76 列。
+    local W=$((UI_COLS - 4))
+    ((W > 76)) && W=76
     ((W < 40)) && W=40
     echo ""
     ui_banner "$W"
@@ -2709,7 +3534,7 @@ dash_render() {
         printf '  %s 连接状态  %s 在线 — 已连上 Cloudflare\n' "$UI_V" "$(ui_dot ok)"
         printf '  %s 实现方式  %s\n' "$UI_V" "$D_SRC"
         printf '  %s 接口/服务 %-10s %s\n' "$UI_V" "$D_IFACE" "$D_SVC"
-        printf '  %s 出口 IPv4 %b  出口 IPv6 %b\n' "$UI_V" "$(dash_fam "$D_P4" 4)" "$(dash_fam "$D_P6" 6)"
+        printf '  %s 出口 IPv4 %b %s  出口 IPv6 %b %s\n' "$UI_V" "$(dash_fam "$D_P4" 4)" "${D_ip4:+[$D_ip4]}" "$(dash_fam "$D_P6" 6)" "${D_ip6:+[$D_ip6]}"
         printf '  %s 通道心跳  %-14s 越新越健康\n' "$UI_V" "$D_HS"
         printf '  %s 单包上限  %-14s 安全值, 兼容一切网络\n' "$UI_V" "$D_MTU"
         printf '  %s 对接服务器 %s\n' "$UI_V" "${D_EP:--}"
@@ -2729,8 +3554,8 @@ dash_render() {
     [[ "$D_DEF6" == "WARP" ]] && d6=$(ui_dot ok) || d6=$(ui_dot na)
     case "$D_PROT" in
         ok)   printf '  %s 保护模式  %s 已开启 (脚本正在管理出站)\n' "$UI_V" "$(ui_dot ok)" ;;
-        fail) printf '  %s 保护模式  %s 有风险! 请按 [6] 应用分流\n' "$UI_V" "$(ui_dot fail)" ;;
-        *)    printf '  %s 保护模式  %s 未部署 — 按 [6] 应用分流\n' "$UI_V" "$(ui_dot na)" ;;
+        fail) printf '  %s 保护模式  %s 有风险! 请按 [6]→[1] 应用分流\n' "$UI_V" "$(ui_dot fail)" ;;
+        *)    printf '  %s 保护模式  %s 未部署 — 按 [6]→[1] 应用分流\n' "$UI_V" "$(ui_dot na)" ;;
     esac
     printf '  %s 默认出口  v4 %s %-7s v6 %s %s\n' "$UI_V" "$d4" "$D_DEF4" "$d6" "$D_DEF6"
     printf '  %s 栈模式    %s %s\n' "$UI_V" "$( [[ "$D_STK" == "无 (全 Native)" ]] && echo "$(ui_dot na)" || echo "$(ui_dot ok)" )" "$D_STK"
@@ -2763,8 +3588,10 @@ dash_render() {
     printf '  %s%s%s%s\n' "$KC" "$UI_BL" "$fill" "$KN"
     echo ""
     cy "  第一次使用? 三步上手:"
-    cg "    [1] 装/查 WARP  →  [2] 添加要加速的网站  →  [6] 应用分流"
-    cg "  首页为本地快照(零请求); 实测连通性用 [3] 网络诊断"
+    # 首页的 [6] 是"系统维护", 应用分流在 [6]→[1]; [3] 是 WARP 管理, 网络诊断是 [4]。
+    # 原来写反了, 小白照着按会进错页。
+    cg "    [1] 装/查 WARP  →  [2] 添加要加速的网站  →  [6]→[1] 应用分流"
+    cg "  首页为本地快照(零请求); 实测连通性用 [4] 网络诊断"
     ui_hline "$((W + 2))"
 }
 
@@ -2969,7 +3796,16 @@ menu_quick() {
         local c d
         ui_read c
         case "$c" in
-            1) install_warp; ui_pause ;;
+            1) # 只有**首次安装**才确认: 已装的情况下 install 只是复用, 不该多问一遍;
+               # 但首次安装会**直接注册一个新的 Cloudflare 账号**, 必须让用户知道。
+               if detect_iface >/dev/null 2>&1; then
+                   install_warp
+               elif ui_danger "安装 / 准备 WARP (首次安装)" "这会:|  - **注册一个新的 Cloudflare WARP 账号** (出口 IP 由此确定)|  - 安装内核 WireGuard 配置与开机自动恢复单元|不会:|  - 不修改网站分流规则|  - 不替换 main 默认路由 (红线)|  - 不影响入站 (SSH / Nginx / 节点服务)|提示: 已装过 WARP 时不会重复注册, 那时这一步不会询问"; then
+                   install_warp
+               else
+                   echo "  已取消 (未安装 WARP)" >&2
+               fi
+               ui_pause ;;
             2) ui_add_wizard warp ;;
             3) ui_add_wizard native ;;
             4) menu_sites ;;
@@ -2989,7 +3825,7 @@ menu_warp() {
         ui_init; dash_data
         echo ""
         cl "  ── WARP 管理 ──"
-        echo "  功能细节区: 管 WARP 服务本体 (启停/重启/换IP/重注册); 网站分流在 [1] 快速设置。"
+        echo "  功能细节区: 管 WARP 本体 (启停/重启/换IP/重注册); 网站分流在 [1] 快速设置。"
         echo ""
         cl "  当前状态"
         if ((D_ON == 1)); then
@@ -3034,15 +3870,15 @@ menu_sites() {
         ui_init; dash_data
         echo ""
         cl "  ── 网站分流 ──"
-        echo "  功能细节区: 每条规则决定一个域名走 WARP 还是原生; 保存≠应用 (需 [5] 应用)。"
+        echo "  功能细节区: 每条规则定一个域名走 WARP 还是原生; 保存≠应用 (需 [5])。"
         echo ""
         if [[ "$D_DEF4" == "WARP" || "$D_DEF6" == "WARP" ]]; then
             echo "  当前默认出口: 栈模式 $(stack_mode) (v4→$D_DEF4 / v6→$D_DEF6)"
             echo "  规则含义: warp=该域名走 WARP; native=该域名走原生 (跨 v4/v6 一致)"
-            echo "  在 WARP 默认的协议栈上, warp 规则即默认方向 (无需集合); native 规则为例外。"
+            echo "  在 WARP 默认的栈上: warp 规则即默认方向(无需集合), native 才是例外。"
         else
             echo "  当前默认出口: 全 Native — 普通未指定流量走原生"
-            echo "  这里添加的是 WARP 例外: warp 规则走 WARP; native 规则已是默认, 无额外作用"
+            echo "  这里加的是 WARP 例外: warp 走 WARP; native 已是默认, 无额外作用"
         fi
         echo ""
         cl "  网站分流规则"
@@ -3150,7 +3986,11 @@ menu_adv() {
         local c
         ui_read c
         case "$c" in
-            1) printf "  forward on|off: " >&2; local v; read -r v; cmd_forward "$v"; ui_pause ;;
+            1) printf "  forward on|off: " >&2; local v; read -r v
+               if [[ "$v" == "on" ]] && ! ui_danger "开启 Forward 转发分流" "这会:|  - 写 iptables **PREROUTING** 与 **MASQUERADE** 规则|  - 转发经过本机的流量也会被分流|不会:|  - 不影响本机自身出站|  - 不删除网站规则|注意: 普通出口分流**不需要**开启此项; 入站服务不受影响但规则面变大"; then
+                   echo "  已取消" >&2; ui_pause; continue
+               fi
+               cmd_forward "$v"; ui_pause ;;
             2) parse_creds >/dev/null 2>&1 || { err "未找到 WARP 凭据"; ui_pause; continue; }
                gen_outbound
                local s5x; s5x=$(socks5_status)
@@ -3257,8 +4097,15 @@ menu_sys() {
                fi
                ui_pause ;;
             3) install_units; ui_pause ;;
+            7) cmd_snapshots; ui_pause ;;
             4) migrate_v2; ui_pause ;;
-            5) printf "  更新源 URL (回车=\$CATMI_WARP_URL): " >&2; read -r c; update_self "$c"; ui_pause ;;
+            5) printf "  更新源 URL (回车=\$CATMI_WARP_URL): " >&2; read -r c
+               if ui_danger "更新脚本" "这会:|  - 从 URL 下载新版本并**替换 /usr/local/bin/catmi-warp3 本身**|不会:|  - 不修改分流规则与模式|  - 不重启 WARP / 不动入站|保障: 新版本会先过语法校验, 失败自动回滚到当前版本"; then
+                   update_self "$c"
+               else
+                   echo "  已取消" >&2
+               fi
+               ui_pause ;;
             6) if ui_danger "卸载模块 (uninstall)" "这会:|  - 删除 /usr/local/bin/catmi-warp3 与开机单元|  - 自动拆除当前分流 (revoke)|不会:|  - 不删除 WARP 本体 (warp-go/wg 继续运行)|  - 不删除 /etc/catmi/warp3 配置与规则 (彻底清除需 rm -rf)"; then
                    uninstall_module; exit 0
                else
@@ -3293,7 +4140,7 @@ menu_main() {
         cl "   [5] 高级设置        Forward / Outbound / SOCKS5 (普通用户通常无需)"
         cl "   [6] 系统维护        应用/暂停分流 / 开机恢复 / 更新 / 卸载"
         echo ""
-        printf '   %s 刷新           %s 退出\n' "$(cm "[R]")" "$(cm "[Q]")"
+        printf '   %s 重绘   %s 术语速查   %s 退出\n' "$(cm "[R]")" "$(cm "[T]")" "$(cm "[0]/[Q]")"
         echo ""
         printf '  %s\n' "$(printf '%*s' 62 '' | tr ' ' '-')"
         cm "  Catmiup © 2026"
@@ -3309,7 +4156,10 @@ menu_main() {
             5) menu_adv ;;
             6) menu_sys ;;
             R) : ;;
-            Q) printf '  %sBye ~%s\n' "$KM" "$KN"; echo; exit 0 ;;
+            T) cmd_terms; ui_pause ;;
+            # 主面板的 0 也退出 —— 子菜单都在教"0 = 返回", 小白回首页按 0 想退出时,
+            # 原来会落进 *) 无任何提示地整屏重画, 看起来像卡死。
+            0|Q) printf '  %sBye ~%s\n' "$KM" "$KN"; echo; exit 0 ;;
         esac
     done
 }
@@ -3323,9 +4173,28 @@ case "${1:-}" in
     start)     need_root; start_warp ;;
     stop)      shift; FORCE_STOP=$([[ "${1:-}" == "--force" ]] && echo 1 || echo 0); need_root; stop_warp ;;
     restart)   need_root; stop_warp; start_warp; health_check && ok "健康检查通过" || { warn "健康检查失败:"; diagnose; } ;;
-    install)   shift; [[ "${1:-}" == "--force-register" ]] && FORCE_REGISTER=1; install_warp ;;
+    install)   shift
+               # 原来只认 --force-register, 而提示文案却教用户 "install --yes" —— --yes 根本不存在,
+               # 非交互环境必然卡在 /dev/tty 报错 (实测)。两个旗标都解析掉。
+               while [[ $# -gt 0 ]]; do
+                   case "$1" in
+                       --force-register) FORCE_REGISTER=1 ;;
+                       --yes|-y)         ASSUME_YES=1 ;;
+                       *) break ;;
+                   esac
+                   shift
+               done
+               # 首次安装会注册新的 Cloudflare 账号 —— 不允许静默发生。
+               # 已装 (只复用) 或显式 --yes / ASSUME_YES=1 时直接进行, 保持脚本化可用。
+               if detect_iface >/dev/null 2>&1 || [[ "${ASSUME_YES:-0}" == "1" ]]; then
+                   install_warp
+               elif ui_danger "安装 / 准备 WARP (首次安装)" "这会:|  - **注册一个新的 Cloudflare WARP 账号** (出口 IP 由此确定)|  - 安装内核 WireGuard 配置与开机自动恢复单元|不会:|  - 不修改网站分流规则|  - 不替换 main 默认路由 (红线)|  - 不影响入站 (SSH / Nginx / 节点服务)|非交互环境请改用: catmi-warp3 install --yes"; then
+                   install_warp
+               else
+                   err "已取消 — 首次安装会注册新的 Cloudflare 账号"; exit 1
+               fi ;;
     check)     init_dirs; check_env ;;
-    apply)     shift; ASSUME_YES=$([[ "${1:-}" == "--yes" || "${2:-}" == "--yes" ]] && echo 1 || echo 0); apply ;;
+    apply)     shift; ASSUME_YES=$([[ "${1:-}" == "--yes" || "${2:-}" == "--yes" || "${ASSUME_YES:-0}" == "1" ]] && echo 1 || echo 0); apply ;;
     revoke)    need_root; revoke ;;
     reload)    need_root; ASSUME_YES=1; apply ;;
     add)       need_root; rule_add "$2" "${3:-warp}" ;;
@@ -3338,16 +4207,20 @@ case "${1:-}" in
     outbound)  need_root; init_dirs; gen_outbound ;;
     forward)   shift; cmd_forward "${1:-}" ;;
     default)   shift; cmd_default "${1:-}" ;;
-    warm)      need_root; init_dirs; warm_domains; ok "规则域名已预热 (cw3 ipset 刷新)" ;;
+    warm)      need_root; init_dirs; cmd_warm ;;
     stream)    cmd_stream ;;
     endpoint)  need_root; cmd_endpoint_opt ;;
     newip)     need_root; cmd_newip ;;
-    keepalive) need_root; init_dirs; warm_domains 2>/dev/null; account_keepalive ;;
+    keepalive) need_root; init_dirs; reconcile; cmd_warm || warn "预热未成功 (详见上)"; account_keepalive ;;
     units)     need_root; install_units ;;
     migrate)   need_root; init_dirs; migrate_v2 ;;
     update)    shift; update_self "${1:-}" ;;
     uninstall) uninstall_module ;;
     version)   echo "catmi-warp3 v$VERSION" ;;
+    list|ls|rules) cmd_list ;;
+    snapshots|backups|undo) cmd_snapshots ;;
+    cleanup)   need_root; init_dirs; cmd_cleanup ;;
+    terms|words|术语) cmd_terms ;;
     selftest)  selftest ;;
     menu|dashboard) need_root; menu_main ;;
     "")        need_root; menu_main ;;
@@ -3375,22 +4248,23 @@ catmi-warp3 v$VERSION — 服务器默认出口的 WARP/Native 策略分流器
 高级 (普通用户通常不需要):
   catmi-warp3 doctor outbound | test-priority   出站优先级实测 (Xray/Mihomo 保护验证)
   catmi-warp3 outbound      生成 xray/mihomo/sing-box 的 WARP 出站片段
-  catmi-warp3 default              查看/切换出口模式 (没有 IPv4/IPv6 的机器可补栈)
+  catmi-warp3 default v4|v6|dual|native   查看/切换出口模式: 只v4 / 只v6(补栈) / 双栈 / 全原生
 
-  流媒体 / 出口工具:
+流媒体 / 出口工具:
   catmi-warp3 stream             检测 Netflix 解锁 (Native/WARP 两方向实测, 只读)
   catmi-warp3 endpoint           WARP Endpoint 优选 (测速选最快入口, 需确认)
   catmi-warp3 newip              一键更换 WARP 出口 IP (重启会话, 需确认)
-  catmi-warp3 default v4|v6|dual|native   切换: 只v4 / 只v6(补栈) / 双栈 / 恢复出厂
-  catmi-warp3 forward on|off    转发流量分流 (默认 OFF; 普通出口分流无需开启)
-  catmi-warp3 warm          立即刷新网站 IP 集合 (定时任务自动做)
-  catmi-warp3 keepalive     手动执行保活 (定时任务自动做)
 
 系统维护:
   catmi-warp3 check         安装前体检
   catmi-warp3 revoke        暂停分流 (规则保留, 可再次 apply 恢复)
   catmi-warp3 units         安装开机自动恢复单元
   catmi-warp3 migrate       从 V2 只读导入规则 (V2 零改动)
+  catmi-warp3 snapshots     看改动前的现场备份 (自动只留最近 50 个)
+  catmi-warp3 cleanup [N]   立刻清理旧快照 (默认保留 50 个)
+  catmi-warp3 warm          立即刷新网站 IP 集合 (定时任务每 10 分钟自动做)
+  catmi-warp3 keepalive     手动执行保活 (定时任务自动做)
+  catmi-warp3 forward on|off    转发流量分流 (默认 OFF; 普通出口分流**无需**开启)
   catmi-warp3 update [URL]  自更新 (校验+回滚)
   catmi-warp3 uninstall     卸载模块 (WARP 本体保留)
   catmi-warp3 selftest|version|--help
@@ -3399,7 +4273,10 @@ catmi-warp3 v$VERSION — 服务器默认出口的 WARP/Native 策略分流器
   保存(add) = 只写配置   应用(apply) = 部署到系统网络   测试(test) = 实际验证出口
   revoke = 暂停分流(规则保留)   uninstall = 卸载模块(规则备份保留, WARP 本体保留)
   install = 复用/安装 WARP   --force-register = 重新注册新账号(出口 IP 会变, 慎用)
+
+  看不懂 WARP / Native / 默认出口 / Forward / 补栈 这些词?
+  执行: catmi-warp3 terms         (术语速查, 每个词都用大白话解释一遍)
 EOF
         ;;
-    *) err "未知命令: $1"; bash "$0" help ;;
+    *) err "未知命令: $1"; bash "$0" help; exit 1 ;;
 esac
