@@ -981,23 +981,34 @@ show_file() {
 #   节点信息(美化版)
 # ===========================
 catmi-xx() {
-    clear
-    box_top "节点信息"
-    local file
-    for file in /root/catmi/hy2/config.yaml /root/catmi/mihomo/clash-meta.yaml /root/catmi/singbox/clash-meta.yaml; do
-        show_file "$file"
-    done
-    echo "------ /root/catmi/xray/out ------"
-    cat_out_files /root/catmi/xray/out
-    echo
-    box_top "V2Ray 文件"
-    for file in /root/catmi/singbox/v2ray.txt /root/catmi/mihomo/v2ray.txt /root/catmi/xray/v2ray.txt; do
-        show_file "$file"
-    done
-    echo
-    box_top "xhttp.json"
-    show_file /root/catmi/xray/xhttp.json
-    pause_return
+    local base=/root/catmi
+    local links=$base/all-links.txt yamls=$base/all-clients.yaml combined=$base/all-nodes.txt
+
+    # 自动收集（只扫实际存在的文件，空文件跳过）
+    : > "$links"
+    echo "# ───── 链接（share / v2ray）────────" >> "$links"
+    for f in "$base"/mihomo/out/*_share-*.txt "$base"/xray/out/*_share-*.txt \
+             "$base"/xray/out/Nv2ray.txt "$base"/xray/out/hysteria.txt; do
+        [ -f "$f" ] || continue
+        [ "$(wc -c < "$f")" -gt 2 ] || continue
+        echo; echo "# [$f]"; cat "$f"
+    done >> "$links"
+
+    : > "$yamls"
+    echo "# ───── YAML 客户端配置 ────────" >> "$yamls"
+    for f in "$base"/xray/out/*_client-*.yaml "$base"/xray/out/Nclash-meta.yaml \
+             "$base"/mihomo/out/*_client-*.yaml "$base"/mihomo/out/vless_subscribe.yaml \
+             "$base"/hy2/config.yaml; do
+        [ -f "$f" ] || continue
+        [ "$(wc -c < "$f")" -gt 2 ] || continue
+        echo; echo "# [$f]"; cat "$f"
+    done >> "$yamls"
+
+    { echo "════════ 1/2 · 分享链接 ════════"; echo; cat "$links";
+      echo; echo "════════ 2/2 · YAML 客户端 ════════"; echo; cat "$yamls"; } > "$combined"
+
+    box_top "全部节点（一次复制版）"
+    cat "$combined"
 }
 
 # ===========================
