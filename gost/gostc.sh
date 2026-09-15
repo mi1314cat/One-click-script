@@ -408,7 +408,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$GOST_BIN -L "rtcp://:$remote_port/127.0.0.1:$local_port" -F "relay+${scheme}://${domain}:$port?path=$ws_path&host=$host_para&auth=$AUTH_BASE64" $mux_param
+ExecStart=$GOST_BIN -L "rtcp://0.0.0.0:$remote_port/127.0.0.1:$local_port" -F "relay+${scheme}://${domain}:$port?path=$ws_path&host=$host_para&auth=$AUTH_BASE64" $mux_param
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
