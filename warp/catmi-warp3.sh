@@ -90,9 +90,68 @@ acquire_lock() {
     mkdir -p "$RUNTIME" 2>/dev/null
     { exec 9>>"$RUNTIME/lock"; } 2>/dev/null || return 0
     if ! flock -n 9 2>/dev/null; then
-        err "另一个 catmi-warp 实例正在执行变更操作, 请稍后再试"
+        # flock 随进程退出自动释放 ⇒ 锁还在 = 一定有个**活着的**实例 (最常见的是
+        # 卡在交互确认上的 default/newip/endpoint; 见 confirm_or_abort 注释)。
+        err "另一个 catmi-warp 实例正在执行变更操作 (flock: $RUNTIME/lock)"
+        err "查持有者: ps -eo pid,etime,args | grep -F catmi-warp3 | grep -v grep"
+        err "注意: 直接删除锁文件**不会**释放已被持有的锁 (锁在 inode 上), 只能结束那个进程"
         return 1
     fi
+    return 0
+}
+
+# ---------- 包管理 ----------
+# ---------- rt_tables 词典 (Debian 13 兼容) ----------
+# iproute2 用 /etc/iproute2/rt_tables 把**表名**映射成表号。Debian 13 (iproute2 >= 6.7)
+# 把默认配置从 /usr/lib 挪到了 /usr/share, 6.15 上 /etc/iproute2 这个目录整个不存在:
+# `>> /etc/iproute2/rt_tables` 直接 "No such file or directory" -> 表名 cw3 注册不上 ->
+# 后面所有 `ip rule ... lookup cw3` 报 invalid table ID -> apply 全线回滚 (2026-09-15 事故)。
+# iproute2 自己的查找顺序是 /etc 优先、/usr/share 兜底, 所以补一份到 /etc 即可。
+ensure_rt_tables() {
+    [[ ${EUID:-0} -eq 0 ]] || return 0
+    [[ -s /etc/iproute2/rt_tables ]] && return 0
+    mkdir -p /etc/iproute2 2>/dev/null
+    local c src=""
+    for c in /usr/share/iproute2/rt_tables /usr/lib/iproute2/rt_tables; do
+        [[ -s "$c" ]] && { src="$c"; break; }
+    done
+    if [[ -n "$src" ]]; then
+        cp -f "$src" /etc/iproute2/rt_tables 2>/dev/null
+    else
+        printf '255\tlocal\n254\tmain\n253\tdefault\n0\tunspec\n' > /etc/iproute2/rt_tables 2>/dev/null
+    fi
+    chmod 644 /etc/iproute2/rt_tables 2>/dev/null
+    [[ -s /etc/iproute2/rt_tables ]]
+}
+
+# 注册本模块的表名 -> 表号。
+#  ① 写失败必须**硬失败**: 否则留下一串 invalid table ID 和"半生效"的现场, 比直接回滚难查得多。
+#  ② 必须避开保留表号 255 local / 254 main / **253 default** / 0 unspec。
+#     stock 文件里 253 是 default 的号, 若写成 "253 cw3", default 与 cw3 会指向同一张表 ——
+#     内核最后那条 `32767: from all lookup default` 就变成查我们的 WARP 表。
+#     实测指纹: `ip rule show` 把它显示成 "lookup cw3", 且 `ip route show table default`
+#     能列出 WARP 路由 (旧版在 Debian/Ubuntu 上一直是这样, 只是没人注意)。
+#     表号只影响注册与显示 —— 运行期一律按名字引用, 所以换号不会打断已有部署。
+register_rt_table() {
+    ensure_rt_tables || { err "无法创建 /etc/iproute2/rt_tables (权限/只读挂载?)"; return 1; }
+    local cur
+    cur=$(awk -v n="$TABLE_NAME" '$2==n {print $1; exit}' /etc/iproute2/rt_tables 2>/dev/null)
+    if [[ -n "$cur" ]]; then
+        TABLE_ID="$cur"          # 已注册过: 以文件为准 (兼容历史机器上手工写的表号)
+        return 0
+    fi
+    local used tid="$TABLE_ID"
+    used=" $(awk '{print $1}' /etc/iproute2/rt_tables 2>/dev/null | tr '\n' ' ') "
+    while [[ "$used" == *" $tid "* || "$tid" == "0" || "$tid" == "253" || "$tid" == "254" || "$tid" == "255" ]]; do
+        (( tid-- ))
+        (( tid < 64 )) && { err "找不到空闲路由表号 (检查 /etc/iproute2/rt_tables)"; return 1; }
+    done
+    if ! echo "$tid $TABLE_NAME" >> /etc/iproute2/rt_tables 2>/dev/null; then
+        err "注册路由表名 $TABLE_NAME 失败 (/etc/iproute2/rt_tables 不可写?) — 分流无法部署"
+        return 1
+    fi
+    TABLE_ID="$tid"
+    info "路由表名 $TABLE_NAME 已注册 (表号 $tid)"
     return 0
 }
 
@@ -1353,7 +1412,7 @@ snapshot() { # snapshot <op名> → echo 快照目录
     ip6tables -t mangle -S > "$s/ipt-mangle6.txt" 2>/dev/null
     iptables -t nat -S > "$s/ipt-nat4.txt" 2>/dev/null
     ip6tables -t nat -S > "$s/ipt-nat6.txt" 2>/dev/null
-    grep 'catmi-warp' /etc/iproute2/rt_tables > "$s/rt_tables.txt" 2>/dev/null
+    ensure_rt_tables; grep 'catmi-warp' /etc/iproute2/rt_tables > "$s/rt_tables.txt" 2>/dev/null
     cp -f "$RESOLV" "$s/resolv.conf" 2>/dev/null
     [[ -s "$RESOLV_STATE" ]] && cp -f "$RESOLV_STATE" "$s/resolv.state" 2>/dev/null
     [[ -s "$GEN_DNS_REAL" ]] && cp -f "$GEN_DNS_REAL" "$s/dnsmasq.conf" 2>/dev/null
@@ -1445,6 +1504,20 @@ fw_up() { # fw_up <iface>
         iptables  -t mangle -A CATMI3-OUT -m owner --uid-owner "$uid" -j RETURN 2>/dev/null
         ip6tables -t mangle -A CATMI3-OUT -m owner --uid-owner "$uid" -j RETURN 2>/dev/null
     done
+    # ===== 私网豁免 (与出口模式无关, 恒定走原生) =====
+    # 红线: RFC1918 / Docker 私网 / CGNAT / ULA / link-local **永不进 WARP 分流**。
+    # 事故 (2026-09-15 MoonTV): 双栈全 WARP 下 nginx(443) -> 127.0.0.1:8074 -> docker-proxy
+    # -> DNAT 172.18.0.3:3000, 目标不是 host LOCAL, 于是被打 mark 0x3 -> 策略路由送进 warp
+    # -> Cloudflare 没有 RFC1918 回程 -> 黑盒超时, 所有内网反代网页全挂。
+    # 位置: 在**任何 MARK 之前**; 且刻意放在 per-family 分支之外 —— native 模式下若有域名
+    # 解析到私网地址, 同样不允许被送进 WARP。
+    local _net4 _net6
+    for _net4 in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10; do
+        iptables  -t mangle -A CATMI3-OUT -d "$_net4" -j RETURN
+    done
+    for _net6 in fc00::/7 fe80::/10; do
+        ip6tables -t mangle -A CATMI3-OUT -d "$_net6" -j RETURN 2>/dev/null
+    done
     # ===== per-family 默认方向 (V4/V6 各自 native|warp; 两 family 语义独立) =====
     local ep4="" ep6="" eph="${ENDPOINT%%:*}"
     if [[ -n "$eph" ]]; then
@@ -1490,7 +1563,6 @@ fw_up() { # fw_up <iface>
         [[ -n "$ep6" ]] && ip6tables -t mangle -A CATMI3-OUT -d "$ep6"/128 -j RETURN 2>/dev/null
         ip6tables -t mangle -A CATMI3-OUT -m addrtype --dst-type LOCAL     -j RETURN 2>/dev/null
         ip6tables -t mangle -A CATMI3-OUT -m addrtype --dst-type MULTICAST -j RETURN 2>/dev/null
-        ip6tables -t mangle -A CATMI3-OUT -d fe80::/64 -j RETURN 2>/dev/null
         # 兜底打标在前, native6 豁免在后并**覆盖**成 IMARK —
         # 裸 RETURN 的包 mark=0, 会被「未标 → cw3」前置规则抓回 WARP,
         # 导致 cw3-native6 的 dst 豁免形同虚设 (v3 实测缺陷)
@@ -1541,8 +1613,9 @@ fw_up() { # fw_up <iface>
         || iptables  -t mangle -A POSTROUTING -o "$ifc" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
     ip6tables -t mangle -C POSTROUTING -o "$ifc" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
         || ip6tables -t mangle -A POSTROUTING -o "$ifc" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-    grep -qE "(^|[[:space:]])$TABLE_NAME([[:space:]]|$)" /etc/iproute2/rt_tables 2>/dev/null \
-        || echo "$TABLE_ID $TABLE_NAME" >> /etc/iproute2/rt_tables
+    # 表名必须先注册进词典, 否则下面每一句 `lookup $TABLE_NAME` 都会报 invalid table ID
+    # (Debian 13 默认没有这个文件; 写失败在这里就停, 不留"半生效"现场)
+    register_rt_table || return 1
     ip -4 rule show | grep -q "^$RT_ANCHOR:.*fwmark 0x$MARK lookup $TABLE_NAME" || ip -4 rule add prio "$RT_ANCHOR" fwmark "$MARK" table "$TABLE_NAME"
     ip -6 rule show | grep -q "^$RT_ANCHOR:.*fwmark 0x$MARK lookup $TABLE_NAME" || ip -6 rule add prio "$RT_ANCHOR" fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null
     # 入站连接打 connmark 0x4 (仅标记, 不改包): 回包经上面 OUTPUT 检查走 main, 保住入站源地址
@@ -1856,7 +1929,7 @@ cmd_stream() {
 
 # [B] WARP Endpoint 优选 (改动: 凭据文件的 Endpoint + 重启 WARP; 不动路由/分流/账号)
 cmd_endpoint_opt() {
-    need_root; acquire_lock || return 1; init_dirs
+    need_root; init_dirs   # 扫描/测速都是只读, 不占锁; 真正的互斥段在下面"改之前先备份"处
     parse_creds >/dev/null 2>&1 || { err "未找到 WARP 凭据"; return 1; }
     # 只改 parse_creds **实际选中**的那个凭据文件。原来这里另有一套搜索顺序
     # (还优先 /opt/warp-go/warp.conf), 与 parse_creds 不一致: 可能改了 A 文件而 WARP 读的是 B,
@@ -1905,12 +1978,8 @@ cmd_endpoint_opt() {
     if [[ "$bip" == "$curep_ip" ]]; then
         info "当前入口 (${curep%%:*} → $curep_ip) 已是最快, 无需修改"; return 0
     fi
-    if [[ "${ASSUME_YES:-0}" != "1" ]]; then
-        local yn
-        printf "  应用并重启 WARP? 输入 YES 确认 (回车=只看不改): " >&2
-        read -r yn </dev/tty 2>/dev/null || yn=""
-        [[ "${yn,,}" == "yes" ]] || { echo "  已保持现有 Endpoint" >&2; return 0; }
-    fi
+    confirm_or_abort "应用 $best 并重启 WARP?" 0 || { echo "  已保持现有 Endpoint" >&2; return 0; }
+    acquire_lock || return 1
     # 改之前先备份 —— 原来直接 sed -i, 改坏了没有任何回滚点
     local bak="$BACKUPS/endpoint-$(date +%Y%m%d-%H%M%S).conf"
     if ! cp -a "$src" "$bak" 2>/dev/null || [[ ! -s "$bak" ]]; then
@@ -1948,7 +2017,7 @@ cmd_endpoint_opt() {
 
 # [C] 更换 WARP 出口 IP (重启会话; 分流规则/模式/网站配置全部不变; 需确认)
 cmd_newip() {
-    need_root; acquire_lock || return 1; init_dirs
+    need_root; init_dirs   # 探测/打印都是只读; 互斥段从 snapshot 开始
     detect_iface || { err "WARP 未运行"; return 1; }
     local old; old=$(timeout 8 curl -4 -s --interface "$IFACE" https://ifconfig.me 2>/dev/null)
     echo "── 更换 WARP 出口 IP ──"
@@ -1958,12 +2027,8 @@ cmd_newip() {
     echo "    - 走 WARP 的分流连接会断开重连; native 方向流量不受影响"
     echo "    - 分流规则 / 出口模式 / 网站配置 全部不变"
     echo "    - 注册类网站建议走 Native (固定原生 IP); WARP 出口是共享 NAT, 风控严"
-    if [[ "${ASSUME_YES:-0}" != "1" ]]; then
-        local yn
-        printf "  输入 YES 确认 (回车=取消): " >&2
-        read -r yn </dev/tty 2>/dev/null || yn=""
-        [[ "${yn,,}" == "yes" ]] || { echo "已取消" >&2; return 1; }
-    fi
+    confirm_or_abort "更换 WARP 出口 IP (会话重连)?" 0 || return 1
+    acquire_lock || return 1
     local snap; snap=$(snapshot "newip")
     FORCE_STOP=1 stop_warp; start_warp || { err "WARP 重启失败"; return 1; }
     sleep 2
@@ -2015,7 +2080,6 @@ cmd_default() {
         native|off)  nv4="native"; nv6="native"; want="native" ;;
         *) err "用法: catmi-warp3 default v4|v6|dual|native"; return 1 ;;
     esac
-    acquire_lock || return 1
     init_dirs; migrate_v2
     # 「模式已经是这个」不等于「已经生效」: revoke 之后 main.conf 里仍写着 dual,
     # 但分流已经拆掉 (cw3 表空、ipset 没了)。原来这里直接 return 0, 用户以为恢复了
@@ -2046,12 +2110,10 @@ cmd_default() {
     risk="$risk|不会影响:|  - Xray/Mihomo 明确 outbound (已有 fwmark 永不覆盖, 两栈同保)|  - bind 物理接口的出站 (oif→main 保护, 两栈同保)|  - SSH/Nginx/Hysteria2 等入站 (PREROUTING 默认 OFF)|  - main 默认路由 (绝不替换, 两栈红线)|  - Forward 独立 (默认 OFF)|  - WARP 本体/账号/接口 (不卸载不重注册)"
     echo "⚠ 切换默认出口: $(stack_mode) → $want"
     printf '%s\n' "$risk" | sed 's/^/    /'
-    if [[ "${ASSUME_YES:-0}" != "1" ]]; then
-        local yn
-        printf "  输入 YES 确认 (回车=取消): " >&2
-        read -r yn </dev/tty 2>/dev/null || yn=""
-        [[ "${yn,,}" == "yes" ]] || { echo "已取消" >&2; return 1; }
-    fi
+    # 确认放在**加锁之前** —— 原来先 acquire_lock 再等 /dev/tty: 无人按键时一直占着 flock,
+    # 后续任何操作都只报"另一个实例正在执行变更操作"。非 tty (面板/CI) 时按上游要求继续执行。
+    confirm_or_abort "切换默认出口 $(stack_mode) → $want。" 1 || return 1
+    acquire_lock || return 1
     local snap; snap=$(snapshot "default-$want")
     local ov4="$DEFAULT_OUTBOUND_V4" ov6="$DEFAULT_OUTBOUND_V6"
     _setcfg_v() { # <key> <val> — 替换或追加 (首次无键时兜底, 防配置与部署漂移)
@@ -3296,13 +3358,16 @@ PY
         done
         # ⑨ 当前模式下"该有条目"的例外集合不能是空的 (只看应存在的那一侧)
         if [[ "$_rm4" == "warp" ]] || [[ "$_rm6" == "warp" ]]; then
-            if awk -F'|' '$2=="native" && $3=="1"{c++} END{exit !(c>0)}' "$RULES" 2>/dev/null; then
+            # 判据必须读**真机**的规则文件: $RULES 在 selftest 里指向沙箱, 而下面断言查的是
+            # 真机 ipset —— 两套数据源混用会让"机器上没有 native 规则"的正确部署误报 FAIL
+            # (RN 2026-09-15 重建后 rules.conf 为空, 就踩到了这个假 FAIL)。
+            if awk -F'|' '$2=="native" && $3=="1"{c++} END{exit !(c>0)}' "$_rh/config/rules.conf" 2>/dev/null; then
                 _t "state: native 例外集合非空" \
                    '[[ $(ipset list cw3-native4 2>/dev/null | tail -n +9 | wc -l) -gt 0 || $(ipset list cw3-native6 2>/dev/null | tail -n +9 | wc -l) -gt 0 ]]'
             fi
         fi
         if [[ "$_rm4" == "native" ]] || [[ "$_rm6" == "native" ]]; then
-            if awk -F'|' '$2=="warp" && $3=="1"{c++} END{exit !(c>0)}' "$RULES" 2>/dev/null; then
+            if awk -F'|' '$2=="warp" && $3=="1"{c++} END{exit !(c>0)}' "$_rh/config/rules.conf" 2>/dev/null; then
                 _t "state: warp 例外集合非空" \
                    '[[ $(ipset list cw3-warp4 2>/dev/null | tail -n +9 | wc -l) -gt 0 || $(ipset list cw3-warp6 2>/dev/null | tail -n +9 | wc -l) -gt 0 ]]'
             fi
@@ -3608,6 +3673,32 @@ ui_page() { # <标题>
 }
 
 # 危险操作确认: 说明"会改什么/影响什么/可否恢复", 输入 YES 确认 (默认取消)
+# 交互确认的**统一入口**。原实现直接 `read </dev/tty`:
+#   ① 没有 tty 时 (面板 run_remote / CI / ssh 重定向) 立刻失败 -> 用户明明想执行却被"已取消";
+#   ② 有 tty 但没人按键时会**一直阻塞**, 而调用它的 default/newip/endpoint 都是**先拿了 flock** 的
+#      -> 锁一直被占着 -> 下一次运行只看到"另一个 catmi-warp 实例正在执行变更操作"
+#      (2026-09-15 事故的连锁症状: 残留 lock 的真因不是文件没删, 而是有人在等输入)。
+# 现在: --yes/ASSUME_YES=1 直接过; 无 tty 时按 $2 (默认 0=拒绝, 1=继续) 决定; 有 tty 才真的问。
+confirm_or_abort() { # <提示语> [无 tty 时: 0=拒绝(默认) 1=继续]
+    local prompt="$1" ntty="${2:-0}" yn
+    if [[ "${ASSUME_YES:-0}" == "1" ]]; then
+        info "已按 --yes / ASSUME_YES=1 跳过确认"
+        return 0
+    fi
+    if ! { true </dev/tty; } 2>/dev/null; then
+        if [[ "$ntty" == "1" ]]; then
+            info "非交互环境 (无 tty): 跳过确认直接执行 — $prompt"
+            return 0
+        fi
+        err "非交互环境 (无 tty): 这一步需要确认 — 请加 --yes 重跑 (或设 ASSUME_YES=1)"
+        return 1
+    fi
+    printf "  %s 输入 YES 确认 (回车=取消): " "$prompt" >&2
+    read -r yn </dev/tty 2>/dev/null || yn=""
+    [[ "${yn,,}" == "yes" ]] || { echo "  已取消" >&2; return 1; }
+    return 0
+}
+
 ui_danger() { # <标题> <说明多行文本, 用 | 分行>
     local title="$1" body="$2" line yn
     echo ""
