@@ -58,6 +58,8 @@ EXCLUDE_SETS=""                # 可选: 额外"绝不接管"目标 ipset 名
 NATIVE_IPS=""                  # 可选: 固定 IP 的 native 豁免 (空格分隔 v4/v6) — 永不进 WARP,
                                # 走原生出口。用途: 链式上游/hy2 上游等 MTU 敏感直连服务
                                # (QUIC 包 > WARP 隧道 MTU 1280 时会被 EMSGSIZE 卡死)
+AUTO_CHAIN_EXEMPT="1"          # 自动扫描代理内核 outbound 的上游 IP 并入原生豁免 (1=开)
+                               # 换节点/加出站后重启一次即可生效; 想只用手工 NATIVE_IPS 就设 0
 RT_ANCHOR="100"                # fwmark 规则优先级 — 实测教训: 必须极小
 
 CF_PEER_PUB="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
@@ -250,6 +252,7 @@ EOF
                 DEFAULT_OUTBOUND) [[ "$v" == "warp" ]] && { DEFAULT_OUTBOUND_V4="warp"; DEFAULT_OUTBOUND_V6="warp"; } ;;
                 EXCLUDE_SETS) EXCLUDE_SETS="$v" ;;
                 NATIVE_IPS) NATIVE_IPS="$v" ;;
+                AUTO_CHAIN_EXEMPT) AUTO_CHAIN_EXEMPT="$v" ;;
             esac
         done < <(grep -vE '^\s*#|^\s*$' "$MAIN_CONF")
     fi
@@ -919,6 +922,9 @@ Forward      转发流量分流 (默认 OFF)。**普通出口分流不需要开*
 
 NATIVE_IPS   特殊出口豁免表 (在 config/main.conf)。列进去的 IP 永远走原生,
              比如 Xray 的链式上游。**少写一个, 那条出口就会被卷进 WARP。**
+             现在默认会**自动扫描**代理内核 outbound 的上游 IP 并并入该豁免
+             (config/main.conf 里 AUTO_CHAIN_EXEMPT="0" 可关闭), 所以换节点/加出站后
+             只要重启一次 (catmi-warp3 apply --yes) 就自动生效, 不必手工维护。
 ════════════════════════════════════════════════════════════════
 TERMEOF
 }
@@ -1461,6 +1467,55 @@ has_v6() {
     ip -6 addr show scope global 2>/dev/null | grep -q 'inet6'
 }
 
+# ── 链式上游自动豁免 ──────────────────────────────────────────────────
+# 场景: 自己的代理出站 (Xray/Mihomo/sing-box 的 out-xx 指向另一台 VPS)。它们**没有**
+# mark/bind/sendThrough 声明, 按契约就跟随"默认出口" → 被打标送进 WARP → 远端看到的是
+# Cloudflare 的 IP, QUIC/TLS 握手经常直接不通 (实测: hysteria2 出站超时; 关掉本模块立刻恢复)。
+# 手工往 NATIVE_IPS 里加 IP, 每换一次节点都要改一遍 —— 所以在 apply / 开机恢复时
+# **只读扫描**各内核 outbound 的远端地址, 自动并入原生豁免集合 (永不进 WARP)。
+# 只读, 不改他方任何配置; 关闭: config/main.conf 里 AUTO_CHAIN_EXEMPT="0"
+chain_exempt_ips() { # [待扫描文件...] 不给参数则扫各内核的常见配置位置
+    [[ "${AUTO_CHAIN_EXEMPT:-1}" == "1" ]] || return 0
+    local -a files=(); local _explicit=0
+    if (( $# > 0 )); then files=("$@"); _explicit=1; fi
+    if (( _explicit == 0 )); then
+        [[ -n "${_CHAIN_CACHE:-}" ]] && { printf '%s\n' "$_CHAIN_CACHE"; return 0; }
+        local f
+        for f in /root/catmi/xray/conf/*.json /usr/local/etc/xray/*.json /etc/xray/*.json \
+                 /etc/sing-box/*.json /root/catmi/sing-box/*.json \
+                 /root/catmi/mihomo/conf/*.yaml /etc/mihomo/*.yaml /etc/hysteria/*.yaml; do
+            [[ -s "$f" ]] && files+=("$f")
+        done
+    fi
+    (( ${#files[@]} )) || return 0
+    local out
+    out=$(
+        {
+            # JSON: "address"/"server" 的取值 (Xray 的 servers/vnext/hysteria, sing-box 的 outbound)
+            # 注意: JSON 的值后面还跟着一个引号, 不能直接用 `$` 锚定裸 IP —— 先取整串再剥壳
+            grep -hoE '"(address|server)"[[:space:]]*:[[:space:]]*"[^"]+"' "${files[@]}" 2>/dev/null \
+                | sed -E 's/.*:[[:space:]]*"([^"]+)"$/\1/'
+            # YAML: server: <值>  (mihomo 的 proxies / hysteria 客户端)
+            grep -hoE '^[[:space:]]*server:[[:space:]]*[^[:space:]#]+' "${files[@]}" 2>/dev/null \
+                | awk '{print $2}'
+        } | while read -r _ip; do
+            [[ -n "$_ip" ]] || continue
+            # 只收字面 IP (域名形式的出站上游另行处理: 用 `add <域名> native`)
+            [[ "$_ip" =~ ^[0-9a-fA-F:.]+$ ]] || continue
+            # 私网/回环/链路本地/ULA 另有豁免, 不进这张表 (列表保持干净, 也免得把内网地址当上游)
+            case "$_ip" in
+                10.*|127.*|169.254.*|192.168.*|100.6[4-9].*|100.[7-9][0-9].*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) continue ;;
+                fe80:*|fc*|fd*|::1) continue ;;
+            esac
+            echo "$_ip"
+        done | sort -u | tr '\n' ' '
+    )
+    out="${out% }"
+    (( _explicit == 0 )) && _CHAIN_CACHE="$out"
+    [[ -n "$out" ]] && printf '%s\n' "$out"
+    return 0
+}
+
 fw_up() { # fw_up <iface>
     local ifc="$1"
     parse_creds >/dev/null 2>&1 || true
@@ -1636,10 +1691,15 @@ fw_up() { # fw_up <iface>
     for _ips in cw3-warp4 cw3-warp6 cw3-native4 cw3-native6; do
         ipset list "$_ips" >/dev/null 2>&1 && ipset flush "$_ips" 2>/dev/null
     done
-    # 固定 IP native 豁免 (NATIVE_IPS): 域名 native 规则走 dnsmasq 动态填 set,
-    # 固定 IP (链式上游等) 走这里静态填 — -exist 幂等, revoke 清空后 apply 重填
-    local _nip
-    for _nip in $NATIVE_IPS; do
+    # 固定 IP native 豁免 (NATIVE_IPS + 自动识别的链式上游): 域名 native 规则走 dnsmasq
+    # 动态填 set; 固定 IP 在这里静态填 — -exist 幂等, revoke 清空后 apply 重填。
+    # 自动识别见 chain_exempt_ips(): 换节点/加出站后只要重启一次 (apply) 就会重扫。
+    local _nip _ce
+    _ce=$(chain_exempt_ips)
+    for _nip in $NATIVE_IPS $_ce; do
+        # WARP 自己的 endpoint 不进豁免表 (它在链里已单独 RETURN)
+        [[ -n "$ep4" && "$_nip" == "$ep4" ]] && continue
+        [[ -n "$ep6" && "$_nip" == "$ep6" ]] && continue
         if [[ "$_nip" == *:* ]]; then
             ipset add cw3-native6 "$_nip" -exist 2>/dev/null
         else
@@ -2208,6 +2268,15 @@ apply() {
     fi
 
     # 步骤 4: 防火墙与策略路由
+    # 链式上游自动豁免: 在这里打印 —— 步骤内的 info 会被 run_step 吞掉, 看不到就白做了
+    if [[ "${AUTO_CHAIN_EXEMPT:-1}" == "1" ]]; then
+        local _ce; _ce=$(chain_exempt_ips)
+        if [[ -n "$_ce" ]]; then
+            info "自动豁免链式上游 (永不进 WARP): $_ce"
+        else
+            info "链式上游扫描: 未发现字面 IP 形式的出站上游 (代理内核配置里没有)"
+        fi
+    fi
     if ! run_step "ipset/iptables/策略路由部署" fw_up "$IFACE"; then
         rollback_undo; err "apply 中止于: $STEP_FAIL (已回滚)"; log_op "apply" "FAILED@fw"; return 1
     fi
@@ -2649,6 +2718,8 @@ doctor() {
 
     echo "--- Default Outbound ---"
     okline "栈模式: $(stack_mode) (v4→$DEFAULT_OUTBOUND_V4 / v6→$DEFAULT_OUTBOUND_V6)"
+    local _ce; _ce=$(chain_exempt_ips)
+    [[ -n "$_ce" ]] && okline "链式上游豁免 (自动识别): $_ce" || true
     # v4 面
     if [[ "$DEFAULT_OUTBOUND_V4" == "warp" ]]; then
         if ip -4 route show table "$TABLE_NAME" 2>/dev/null | grep -q default; then
@@ -3110,6 +3181,14 @@ selftest() {
     _t "kernel_ge 拒绝 4.x"      '! kernel_ge 5 6 "4.19.0"'
     _t "kernel_ge 拒绝非版本串"  '! kernel_ge 5 6 "nonsense"'
     _t "ipset_exists 假名必假"   '! ipset_exists cw3-selftest-nonexistent'
+
+    # 链式上游自动豁免: 只读扫描代理内核 outbound (Xray JSON / Mihomo YAML)
+    printf '{"outbounds":[{"settings":{"address":"203.0.113.9","port":1}},{"settings":{"address":"192.168.1.5"}}]}' > "$BASE/chain.json"
+    printf 'proxies:\n  - name: x\n    server: 198.51.100.7\n' > "$BASE/chain.yaml"
+    _t "chain_exempt: JSON 出站地址" 'chain_exempt_ips "$BASE/chain.json" | grep -q "203.0.113.9"'
+    _t "chain_exempt: YAML server"   'chain_exempt_ips "$BASE/chain.yaml" | grep -q "198.51.100.7"'
+    _t "chain_exempt: 过滤私网地址"  '! chain_exempt_ips "$BASE/chain.json" | grep -q "192.168.1.5"'
+    _t "chain_exempt: 关掉后不返回"  '! AUTO_CHAIN_EXEMPT=0 chain_exempt_ips "$BASE/chain.json" | grep -q "203.0.113.9"'
 
     # 临时 BASE
     BASE=$(mktemp -d)
