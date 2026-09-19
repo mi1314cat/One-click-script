@@ -59,7 +59,6 @@ random_website() {
         "www.oracle.com"
         "swift.org"
         "openjdk.org"
-        "adoptium.net"
         "www.mysql.com"
         "mongodb.com"
         "elastic.co"
@@ -79,15 +78,10 @@ random_website() {
         "netbsd.org"
         "openbsd.org"
         # 数据库 / 可观测性
-        "redis.io"
-        "zabbix.com"
-        "prometheus.io"
         "grafana.com"
         # 硬件 / 芯片 / 设备厂商
         "www.nvidia.com"
         "academy.nvidia.com"
-        "www.qualcomm.com"
-        "arm.com"
         "amd.com"
         "intel.com"
         "lenovo.com"
@@ -99,9 +93,7 @@ random_website() {
         "redhat.com"
         "suse.com"
         # 教育 (多为校园自有基础设施)
-        "mit.edu"
         "harvard.edu"
-        "caltech.edu"
         "suffolk.edu"
         "umcg.nl"
         "utoronto.ca"
