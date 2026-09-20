@@ -328,7 +328,7 @@ EOF
     box_bot
 
     box_top "功能菜单"
-    menu_v "1" "Mihomo     - Xray ECH / ML-KEM"      "$GREEN"
+    menu_v "1" "Mihomo     -  ECH / smux"      "$GREEN"
     menu_v "2" "Xray       - VLESS XHTTP/WS"         "$GREEN"
     menu_v "3" "Sing-box   - 多协议内核"             "$GREEN"
     menu_v "4" "Hysteria2  - QUIC 高速传输"          "$GREEN"
