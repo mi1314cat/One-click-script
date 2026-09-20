@@ -230,6 +230,20 @@ build_service_status() {
     for svc in hysteria-server hysteria2 hysteria hy2; do
         unit_exists "$svc" && { HY2_SVC="$svc"; break; }
     done
+    # 兼容 hysteria-server@.service 模板式安装 (多节点)
+    # 规则: 裸 unit 存在但未跑, 而 @ 实例在跑 → 显示聚合状态; 无裸 unit 只要模板在 → 也走聚合
+    local d hy_ins=0 hy_bare_ok=0
+    hy_ins=$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | awk '{print $1}' | grep -c '^hysteria-server@.*\.service')
+    if [[ -n "$HY2_SVC" ]]; then
+        systemctl is-active --quiet "${HY2_SVC}.service" 2>/dev/null && hy_bare_ok=1
+    else
+        for d in "${UNIT_DIRS[@]}"; do
+            if [[ -e "$d/hysteria-server@.service" ]]; then HY2_SVC="hysteria-server@"; break; fi
+        done
+    fi
+    if [[ "$hy_ins" -gt 0 ]] && (( ! hy_bare_ok )); then
+        HY2_SVC="hysteria-server@"
+    fi
     for svc in sing-box singbox sb; do
         unit_exists "$svc" && { SB_SVC="$svc"; break; }
     done
@@ -239,6 +253,13 @@ service_state() {  # 返回: 已安装+运行 / 已安装+未运行 / 未安装
     local svc="$1" is_active
     if [[ -z "$svc" ]]; then
         echo "未安装"; return
+    fi
+    # hysteria-server@ 模板聚合: 任一实例 running 即算"运行中", 附注实例数
+    if [[ "$svc" == hysteria-server@ ]]; then
+        local n
+        n=$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | awk '{print $1}' | grep -c '^hysteria-server@.*\.service')
+        (( n > 0 )) && { echo "运行中(${n}节点)"; return; }
+        echo "未运行"; return
     fi
     if systemctl is-active --quiet "${svc}.service" 2>/dev/null; then
         echo "运行中"
@@ -255,12 +276,12 @@ service_enabled() {  # 返回: 已启用 / 空
 svc_state_row() {  # $1=左服务 $2=右服务, 生成 svc_row 参数
     local left="$1" right="$2"
     if [[ -n "$left" ]]; then
-        SVC_LEFT_ARGS=("$left" "已安装" "$(service_state "$left")" "$(service_enabled "$left")")
+        SVC_LEFT_ARGS=("${left%@}" "已安装" "$(service_state "$left")" "$(service_enabled "$left")")
     else
         SVC_LEFT_ARGS=("$left" "未安装" "" "")
     fi
     if [[ -n "$right" ]]; then
-        SVC_RIGHT_ARGS=("$right" "已安装" "$(service_state "$right")" "$(service_enabled "$right")")
+        SVC_RIGHT_ARGS=("${right%@}" "已安装" "$(service_state "$right")" "$(service_enabled "$right")")
     else
         SVC_RIGHT_ARGS=("$right" "未安装" "" "")
     fi
@@ -440,14 +461,12 @@ singbox_menu() {
         box_top "Sing-box 管理"
         info2 "状态" "$(service_state "$SB_SVC")"
         box_mid
-        echo -e "  ${YELLOW}1${PLAIN}) 使用 catmi 2"
-        echo -e "  ${YELLOW}2${PLAIN}) 使用 catmising-box 6"
-        echo -e "  ${YELLOW}3${PLAIN}) 使用 catmising-box 4"
-        echo -e "  ${YELLOW}4${PLAIN}) 使用 sb (fscarmen 第三方)"
+        echo -e "  ${YELLOW}1${PLAIN}) 使用 sb (mi1314cat sing-box-core)"
+        echo -e "  ${YELLOW}2${PLAIN}) 使用 sb (fscarmen 第三方)"
         echo -e "  ${YELLOW}0${PLAIN}) 返回"
         box_bot
         echo
-        choice=$(read_choice "  请选择 [0-4]: ")
+        choice=$(read_choice "  请选择 [0-2]: ")
         rc=$?
         if (( rc > 128 )); then continue; fi
         if (( rc != 0 )); then return 0; fi
@@ -456,9 +475,7 @@ singbox_menu() {
         case $choice in
             0) return 0 ;;
             1) run_remote "https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/install.sh"; pause_return ;;
-            2) run_remote "https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/singbox.sh"; pause_return ;;
-            3) run_remote "https://github.com/mi1314cat/sing-box-core/raw/refs/heads/main/nsb.sh"; pause_return ;;
-            4) run_remote "https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh"; pause_return ;;
+            2) run_remote "https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh"; pause_return ;;
             *) invalid_input ;;
         esac
     done
