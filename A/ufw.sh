@@ -547,10 +547,11 @@ fw_allow() {
   if [[ "$backend" == "ufw" ]]; then
     ufw allow "$port/$proto" >/dev/null 2>&1
   else
+    # (审计修复) 回退态同时覆盖 IPv4 与 IPv6, 旧逻辑 IPv6 完全没有放行
     iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null || \
       iptables -I INPUT 1 -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null
-    mkdir -p /etc/iptables
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null
+    ip6tables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null || \
+      ip6tables -I INPUT 1 -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null
   fi
 }
 
@@ -563,8 +564,7 @@ fw_delete() {
     ufw delete allow "$port/$proto" >/dev/null 2>&1
   else
     iptables -D INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null
-    mkdir -p /etc/iptables
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null
+    ip6tables -D INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null 2>/dev/null
   fi
 }
 
@@ -718,16 +718,24 @@ delete_ufw() {
 takeover_mode() {
   print_info "正在接管防火墙(以本脚本为主)..."
 
-  # --- 0. 互斥: 停掉对方(nftables 面板)服务, 避免双防火墙冲突 ---
+  # --- 0. (审计修复) 不再静默停用对方面板: 需要显式 YES 确认 ---
+  #     同时运行两套防火墙并非必须互斥; 但停用任一边都可能让
+  #     fail2ban 的 banaction 指向失效的一方, 导致封禁全部无效。
   if systemctl is-active --quiet nftables-ufw-panel.service 2>/dev/null || \
      systemctl is-active --quiet nftables.service 2>/dev/null; then
-    systemctl stop nftables-ufw-panel.service 2>/dev/null || true
-    systemctl disable nftables-ufw-panel.service 2>/dev/null || true
-    systemctl stop nftables.service 2>/dev/null || true
-    systemctl disable nftables.service 2>/dev/null || true
-    print_info "已停用对方防火墙: nftables-ufw-panel / nftables (UFW 为本面板唯一主人)"
+    print_warn "检测到 nftables 面板正在运行。双方并存时, fail2ban 的 banaction 可能指向失效的一方。"
+    read -r -p " 是否停用 nftables-ufw-panel / nftables 并由 UFW 接管? (输入 YES 确认, 其他输入跳过): " sure
+    if [[ "$sure" == "YES" ]]; then
+      systemctl stop nftables-ufw-panel.service 2>/dev/null || true
+      systemctl disable nftables-ufw-panel.service 2>/dev/null || true
+      systemctl stop nftables.service 2>/dev/null || true
+      systemctl disable nftables.service 2>/dev/null || true
+      print_info "已停用 nftables 面板, UFW 为本机唯一防火墙"
+    else
+      print_info "保留 nftables 运行; 本窗口继续进行规则管理"
+    fi
   else
-    print_info "对方防火墙(nftables)未运行, 无需停用"
+    print_info "对方防火墙(nftables)未运行, 无需处理"
   fi
 
   local changed=false
@@ -749,26 +757,27 @@ takeover_mode() {
     print_info "未发现开机自动恢复规则, 跳过"
   fi
 
-  # --- 3. 开放 INPUT: 清空所有 INPUT 规则 + policy ACCEPT (IPv4+IPv6) ---
-  iptables -P INPUT ACCEPT 2>/dev/null
-  iptables -F INPUT 2>/dev/null
-  ip6tables -P INPUT ACCEPT 2>/dev/null
-  ip6tables -F INPUT 2>/dev/null
-  print_info "IPv4/IPv6 INPUT 已全部开放(policy ACCEPT)"
+  # --- 3. (审计修复) 不再 -P INPUT ACCEPT + -F INPUT 清空 INPUT:
+  #     该操作会同时失效 UFW 的 ufw-* 跳转链和 fail2ban f2b-* 封禁链,
+  #     并导致「UFW 显示 active 但实际所有入站都被放行 / Fail2ban ban 无效」。
+  # 新逻辑: 不做任何 INPUT 顶层破坏; 只必须保留 SSH 放行(在 UFW 规则中)。
+  print_info "此版本接管模式不再清空 INPUT 链(避免失效 UFW / fail2ban / 其他面板规则)"
+  print_info "如确需手动清空, 请自行运行: iptables -P INPUT ACCEPT && iptables -F INPUT (风险自担)"
 
-  # --- 4. 重新放行 SSH(防失联) ---
+  # --- 4. 重新校验 SSH 放行(不裸写 iptables; UFW Rules 为唯一来源) ---
   local ssh_ports
   ssh_ports="$(get_current_ssh_ports)"
   for port in $ssh_ports; do
-    iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
-      iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null
-    print_info "SSH 端口已放行: $port/tcp"
+    if ufw status 2>/dev/null | grep -qE "(^|[^0-9])${port}/tcp"; then
+      print_info "SSH 端口已在 UFW 规则中放行: ${port}/tcp"
+    else
+      ufw allow "${port}/tcp" >/dev/null 2>&1
+      print_info "SSH 端口已通过 UFW 放行: ${port}/tcp"
+    fi
   done
 
-  # --- 5. 保存干净状态到 rules.v4 (kejilion 下次 save 前的开机基线) ---
-  mkdir -p /etc/iptables
-  iptables-save > /etc/iptables/rules.v4 2>/dev/null
-  print_info "已保存规则 -> /etc/iptables/rules.v4 (修改即生效)"
+  # --- 5. (审计修复) 不再自动 iptables-save 覆盖 rules.v4:
+  #     旧逻辑会把「清空后」的状态持久化, 重启后无法恢复 UFW。
 
   if $changed; then
     print_ok "防火墙已接管完成, 重启后不会再被其他脚本锁死"
