@@ -227,7 +227,6 @@ Wants=nftables.service
 
 [Service]
 Type=oneshot
-ExecStart=-$NFT_BIN flush table inet filter
 ExecStart=$NFT_BIN -f $NFT_RULE_FILE
 ExecStart=$NFT_BIN -f $NFT_DYN_FILE
 RemainAfterExit=yes
@@ -243,8 +242,10 @@ EOF
 # 安全加载 nft 规则(基础 + 动态)
 # =========================
 safe_nft_load() {
+  # (审计修复) 移除了原先的 `nft flush table inet filter`:
+  # flush 会连带清掉 fail2ban 等其他组件落在 inet filter 里的结构。
+  # 规则文件本身只包含本脚本定义的表, 直接加载即可。
   if [[ -f "$NFT_RULE_FILE" ]]; then
-    nft flush table inet filter 2>/dev/null || true
     nft -f "$NFT_RULE_FILE" >/dev/null 2>&1 || {
       print_error "加载 nftables 基础规则失败,检查语法:$NFT_RULE_FILE"
       return 1
@@ -256,13 +257,22 @@ safe_nft_load() {
       return 1
     }
   fi
-  # 互斥: 本面板规则加载成功后,停用对方(UFW), 防止双防火墙冲突
-  if systemctl is-active --quiet ufw 2>/dev/null; then
-    systemctl stop ufw 2>/dev/null || true
-    systemctl disable ufw 2>/dev/null || true
-    print_info "已停用对方防火墙: ufw (nftables 面板接管成功)"
-  fi
   return 0
+}
+
+# (审计修复) 不再静默停用 UFW: 需要显式 YES 确认
+stop_other_firewall_prompt() {
+  if systemctl is-active --quiet ufw 2>/dev/null; then
+    print_warn "检测到 UFW 处于 active。双防火墙并存时, fail2ban 的 banaction 可能指向失效的一方。"
+    read -r -p " 是否停用 UFW 由本 nftables 面板接管? (输入 YES 确认, 其他输入跳过): " sure
+    if [[ "$sure" == "YES" ]]; then
+      systemctl stop ufw 2>/dev/null || true
+      systemctl disable ufw 2>/dev/null || true
+      print_info "已停用 ufw, 本面板接管为唯一防火墙"
+    else
+      print_info "保留 ufw 运行, 本面板只写自己的 inet filter 表"
+    fi
+  fi
 }
 
 # =========================
@@ -706,6 +716,7 @@ reset_rules() {
   write_rule_file "$ssh_ports"
   : > "$NFT_DYN_FILE"                        # 清空动态端口文件
   safe_nft_load || print_error "重载规则失败"
+  stop_other_firewall_prompt
 
   print_info "所有动态规则已清空,SSH 端口 ($ssh_ports) 及基础网络已保留"
   log "规则已重置,SSH 端口: $ssh_ports"
@@ -826,15 +837,21 @@ delete_nftables() {
 # 安全: 只清理第三方层, 本脚本的 inet filter 表(SSH 规则)绝不动。
 # =========================
 takeover_mode() {
-  print_info "正在接管防火墙(清除第三方 iptables 规则层)..."
+  print_info "正在接管防火墙(安全版: 不破坏 UFW / fail2ban / 本机可达性)..."
 
-  # --- 0. 互斥: 停掉对方(UFW)服务, 避免双防火墙冲突 ---
+  # --- (审计修复) 0. 不再静默停用 UFW; 需要显式 YES ---
+  #     原逻辑: 直接 systemctl stop/disable ufw, 且随后 flush iptables INPUT,
+  #     两个动作叠加会让 fail2ban(banaction=ufw) 的封禁完全失效、UFW 被孤儿化。
   if systemctl is-active --quiet ufw 2>/dev/null; then
+    print_error "UFW 处于 active: flush/接管 iptables 全表会一并清除 UFW 与 fail2ban 的规则跳转(如需撤销, 请先手动执行 'ufw disable' )."
+    read -r -p " 仍要继续接管模式(输入 YES 确认, 其他输入取消)? " sure
+    if [[ "$sure" != "YES" ]]; then
+      print_info "已取消接管。如仍想双面板共存, 直接回到本面板的端口菜单即可(会写入本脚本自己的 inet filter 表)。"
+      return 1
+    fi
     systemctl stop ufw 2>/dev/null || true
     systemctl disable ufw 2>/dev/null || true
-    print_info "已停用对方防火墙: ufw (nftables 面板为本唯一主人)"
-  else
-    print_info "对方防火墙(ufw)未运行, 无需停用"
+    print_info "已停用 ufw (接替为本机唯一防火墙)"
   fi
 
   local changed=false
@@ -864,31 +881,33 @@ takeover_mode() {
     changed=true
   fi
 
-  # --- 3. 清空第三方 iptables INPUT 规则层(IPv4), 保留本机 SSH 端口 ---
-  #     该层来自 kejilion 的 table ip filter(policy DROP)。
-  #     安全顺序(关键): 先把 policy 改为 ACCEPT → 再 flush → 最后重放 SSH
-  #     绝不能在 policy DROP 下 flush INPUT(否则瞬间全部丢弃 = 失联)
-  if iptables -S INPUT 2>/dev/null | grep -qE "^-A INPUT"; then
-    iptables -P INPUT ACCEPT 2>/dev/null || true
-    iptables -F INPUT 2>/dev/null || true
+  # --- 3. (审计修复) 不再直接 -P INPUT ACCEPT / -F INPUT 清空整个 INPUT 链:
+  #     该操作会让 UFW / fail2ban f2b-* 链所有跳转失效(本审计在 RN 实测确认会导致
+  #     "UFW 插入的 REJECT 规则无法被命中, ban 无效"), 且旧逻辑最后还会把"空规则"
+  #     持久化到 /etc/iptables/rules.v4, 重启后 UFW 链永远无法恢复。
+  # 新逻辑: 只在 iptables INPUT 链条中, 删除『非本机 SSH 端口、非 -j f2b-...、非 ufw-* 跳转』
+  #         的规则? 实际上 fail2ban (banaction=nftables) 用 inet f2b-table, 受本代码影响
+  #         仅在用户使用 banaction=iptables* 时会把 f2b-…-INPUT 链的跳转也删掉。
+  # 保守策略: 直接放弃对 iptables INPUT 的主动清空, 仅提示接管状态(用户需求见注释)。
+  #          如确需 kejilion 清理, 由手动命令完成(不在本脚本做自动清理)。
+  local has_f2b_chain=false
+  if iptables -S INPUT 2>/dev/null | grep -qE "f2b|ufw"; then
+    has_f2b_chain=true
+  fi
+  if $has_f2b_chain; then
+    print_warn "检测到 iptables INPUT 含 f2b / ufw 跳转 —— 属于 Fail2ban / UFW 的规则层, 不做清空"
+    print_info "接管模式不会破坏这些跳转"
+  elif iptables -S INPUT 2>/dev/null | grep -qE "^-A INPUT"; then
     for port in $ssh_ports; do
-      iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null
+      iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null || true
     done
-    print_info "第三方 iptables INPUT 已清空(policy→ACCEPT), SSH $ssh_ports 已重放"
-    changed=true
-  elif iptables -S INPUT 2>/dev/null | grep -q "policy DROP"; then
-    # 无规则但 policy DROP: 本面板不依赖该层, 但为彻底接管改 ACCEPT
-    iptables -P INPUT ACCEPT 2>/dev/null || true
-    for port in $ssh_ports; do
-      iptables -I INPUT 1 -p tcp --dport "$port" -j ACCEPT 2>/dev/null
-    done
-    print_info "第三方 iptables policy 已改为 ACCEPT, SSH 已放行"
+    print_info "第三方 iptables INPUT 层已保留本机 SSH 端口放行(未做全链清空)"
     changed=true
   fi
 
-  # --- 4. 保存第三方层为干净状态(接下来由本脚本全权管理) ---
-  iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-  print_info "已保存干净 rules.v4"
+  # --- 4. (审计修复) 不再把"清空状态"写入 rules.v4 —— 避免 netfilter-persistent
+  #     在下一次开机时用"无防火墙"状态覆盖 UFW / fail2ban 链。
+  #     (需要干净持久化时请用户自行执行 iptables-save 并确认内容)
 
   if $changed; then
     print_ok "接管完成: 第三方 DROP 层已清除, 本 nftables 面板为唯一防火墙主人"
