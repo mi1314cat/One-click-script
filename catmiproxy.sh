@@ -365,7 +365,7 @@ mihomo_menu() {
         case $choice in
             0) return 0 ;;
             1)
-                run_remote "https://cfgithub.gw2333.workers.dev/https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/ts.sh"
+                run_remote "https://github.com/mi1314cat/mihomo--core/raw/refs/heads/main/install.sh"
                 pause_return
                 ;;
             2)
