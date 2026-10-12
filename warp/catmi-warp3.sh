@@ -47,6 +47,11 @@ IMARK="4"                      # fwmark 0x4 = 入站回程标记: 入站连接(h
                                # 源=入站接口地址 — 防止 UDP 通配 socket 回包被 C 规则抓进 WARP 源漂移
 TABLE_NAME="cw3"               # 表名 (253) — 与 V2 的 catmi-warp(250) 正交
 TABLE_ID="253"
+INBOUND_TABLE="cw3-in"         # 表名 — **入站回包专用**, 与 cw3 正交
+INBOUND_TABLE_ID="100"         # 期望表号; 与已有表冲突时自动下移 (见 register_rt_table_as)
+INBOUND_REPLY_PORTS=""          # 入站回包源地址保护的端口清单。空 = 自动发现本机所有
+                                # **通配绑定**的 UDP 监听端口; "off" = 整个功能关闭;
+                                # 其余按字面使用 (支持 100-200 区间)。详见 inbound_reply_guard
 UPSTREAMS="1.1.1.1 8.8.8.8"
 FORWARD="0"                    # forward 模式: 0=OFF(默认) 1=ON
 DEFAULT_OUTBOUND="native"      # [兼容] 旧版单键: 读入旧配置时映射为 V4=V6 同值
@@ -134,26 +139,32 @@ ensure_rt_tables() {
 #     实测指纹: `ip rule show` 把它显示成 "lookup cw3", 且 `ip route show table default`
 #     能列出 WARP 路由 (旧版在 Debian/Ubuntu 上一直是这样, 只是没人注意)。
 #     表号只影响注册与显示 —— 运行期一律按名字引用, 所以换号不会打断已有部署。
-register_rt_table() {
-    ensure_rt_tables || { err "无法创建 /etc/iproute2/rt_tables (权限/只读挂载?)"; return 1; }
-    local cur
-    cur=$(awk -v n="$TABLE_NAME" '$2==n {print $1; exit}' /etc/iproute2/rt_tables 2>/dev/null)
-    if [[ -n "$cur" ]]; then
-        TABLE_ID="$cur"          # 已注册过: 以文件为准 (兼容历史机器上手工写的表号)
-        return 0
-    fi
-    local used tid="$TABLE_ID"
+# 通用版: 把"注册一个表名"这件事本身抽出来, 供第二张表 (入站回包专用 cw3-in) 复用。
+# 失败时**不 echo 任何东西** —— 调用方靠"输出为空"判定失败, 不能和表号 0 混淆。
+register_rt_table_as() { # <表名> <期望表号> → stdout: 实际表号
+    local name="$1" tid="$2" cur used
+    ensure_rt_tables || return 1
+    cur=$(awk -v n="$name" '$2==n {print $1; exit}' /etc/iproute2/rt_tables 2>/dev/null)
+    [[ -n "$cur" ]] && { echo "$cur"; return 0; }   # 已注册过: 以文件为准
     used=" $(awk '{print $1}' /etc/iproute2/rt_tables 2>/dev/null | tr '\n' ' ') "
     while [[ "$used" == *" $tid "* || "$tid" == "0" || "$tid" == "253" || "$tid" == "254" || "$tid" == "255" ]]; do
         (( tid-- ))
         (( tid < 64 )) && { err "找不到空闲路由表号 (检查 /etc/iproute2/rt_tables)"; return 1; }
     done
-    if ! echo "$tid $TABLE_NAME" >> /etc/iproute2/rt_tables 2>/dev/null; then
-        err "注册路由表名 $TABLE_NAME 失败 (/etc/iproute2/rt_tables 不可写?) — 分流无法部署"
+    echo "$tid $name" >> /etc/iproute2/rt_tables 2>/dev/null \
+        || { err "注册路由表名 $name 失败 (/etc/iproute2/rt_tables 不可写?)"; return 1; }
+    info "路由表名 $name 已注册 (表号 $tid)"
+    echo "$tid"
+}
+
+register_rt_table() {
+    ensure_rt_tables || { err "无法创建 /etc/iproute2/rt_tables (权限/只读挂载?)"; return 1; }
+    local tid
+    tid=$(register_rt_table_as "$TABLE_NAME" "$TABLE_ID") || {
+        [[ "$TABLE_NAME" == "cw3" ]] && err "注册路由表名 $TABLE_NAME 失败 — 分流无法部署"
         return 1
-    fi
+    }
     TABLE_ID="$tid"
-    info "路由表名 $TABLE_NAME 已注册 (表号 $tid)"
     return 0
 }
 
@@ -232,6 +243,11 @@ SKIP_UIDS="$SKIP_UIDS"
 EXCLUDE_SETS="$EXCLUDE_SETS"
 DEFAULT_OUTBOUND_V4=$DEFAULT_OUTBOUND_V4
 DEFAULT_OUTBOUND_V6=$DEFAULT_OUTBOUND_V6
+# 入站回包源地址保护 (v6)。空 = 自动发现本机通配绑定的 UDP 监听端口;
+# "off" = 关闭; 其余按字面使用 (支持 100-200 区间)。
+# 典型需要排除的: WireGuard 类隧道 (amneziawg-go/wg-go) —— 它们从**同一个**
+# 监听 socket 主动发包, sport 命中会把它的外层流量也从 WARP 改走原生。
+INBOUND_REPLY_PORTS=$INBOUND_REPLY_PORTS
 EOF
     fi
     # 加载用户配置覆盖默认 (只取认得的 KEY; 剥值首尾引号 — 否则
@@ -244,6 +260,7 @@ EOF
                 MARK) MARK="$v" ;;
                 TABLE_NAME) TABLE_NAME="$v" ;;
                 TABLE_ID) TABLE_ID="$v" ;;
+                INBOUND_REPLY_PORTS) INBOUND_REPLY_PORTS="$v" ;;
                 UPSTREAMS) UPSTREAMS="$v" ;;
                 FORWARD) FORWARD="$v" ;;
                 SKIP_UIDS) SKIP_UIDS="$v" ;;
@@ -919,6 +936,17 @@ Forward      转发流量分流 (默认 OFF)。**普通出口分流不需要开*
 
 入站         别人连进你服务器的流量 (SSH / Nginx / 节点服务)。
              本脚本**永不碰入站**, 不需要为此担心。
+
+入站回包保护  v6=warp 时自动给「通配绑定的 UDP 监听端口」加一条 sport 路由规则,
+             让回包在**路由决策期**就拿到本机原生 IPv6 源地址。
+             为什么需要: hysteria2 开混淆 (salamander/gecko) 时 sing-box 会把
+             监听 socket 包一层, 导致 quic-go 拿不到 IPV6_RECVPKTINFO, 回包不再
+             由内核钉住源地址 → 而未打标的 v6 会被分流规则送进 WARP → 源地址变成
+             WARP 的 → 客户端直接丢包 → 走 IPv6 握手超时, 走 IPv4 却完全正常。
+             自检: catmi-warp3 doctor 的 "入站回包保护" 一行。
+             调整: main.conf 的 INBOUND_REPLY_PORTS (空=自动 / off=关 / 显式端口列表)。
+             ⚠ WireGuard 类隧道 (amneziawg-go / wg-go) 从同一个监听 socket 主动发包,
+               会被这条规则改走原生出口 —— 把它的端口写进 INBOUND_REPLY_PORTS 排除。
 
 NATIVE_IPS   特殊出口豁免表 (在 config/main.conf)。列进去的 IP 永远走原生,
              比如 Xray 的链式上游。**少写一个, 那条出口就会被卷进 WARP。**
@@ -1789,6 +1817,11 @@ fw_down_silent() {
                     done < <($cmd rule show | grep -F "from $fd_seg lookup main" | grep -oE '^[0-9]+')
                 done
             fi
+            # 入站回包保护 (sport → 独立表 cw3-in): 按表名清理, 不受端口变化影响
+            while read -r p; do
+                [[ -n "$p" ]] && $cmd rule del prio "$p" 2>/dev/null
+            done < <($cmd rule show | grep -F "lookup $INBOUND_TABLE" | grep -oE '^[0-9]+')
+            ip -6 route flush table "$INBOUND_TABLE" 2>/dev/null
         fi
     done
     # warp 默认模式部件: bind 保护规则 + native 例外集合
@@ -1804,6 +1837,7 @@ fw_down_silent() {
     # "是否已部署"的唯一依据 (13 处引用)。拆除失败却把标记删掉, 残留规则会立刻**隐形**。
     if iptables -t mangle -S CATMI3-OUT >/dev/null 2>&1 \
        || ip -4 rule show 2>/dev/null | grep -qE "fwmark 0x[0-9a-f]+ (table|lookup) $TABLE_NAME" \
+       || ip -6 rule show 2>/dev/null | grep -qF "lookup $INBOUND_TABLE" \
        || ipset_exists cw3-warp4; then
         warn "拆除未彻底 (仍有 catmi 残留规则) — 保留「已应用」标记, 请重试 revoke / apply"
     else
@@ -1850,6 +1884,139 @@ cmd_forward() {
     ok "forward 模式 = $act (已持久化到 config/main.conf)"
     log_op "forward" "$act"
     [[ -n "$snap" ]]
+}
+
+# 发现本机「通配绑定」的 UDP 监听端口 (只取 IPv6 面)。
+#
+# 为什么需要它 —— 一个结构性缺口, 不是"保护装漏了":
+#   通配绑定 (listen "::" 的双栈 socket / listen "0.0.0.0" 的 v4 wildcard) 在**回包时
+#   不指定源地址**: 源地址要等内核做路由决策才定。而 suppress_takeover 的 C 规则在
+#   V6=warp 时把"未打标"流量送进 cw3 (dev warp) ⇒ 源地址被选成 **WARP 的地址** ⇒
+#   客户端 QUIC 只认自己发过去的那个地址, 源不对直接丢包 ⇒ 握手永远完不成。
+#   脚本原有的两道保护都救不了:
+#     ① `from <段> lookup main` (need-4): 规则要匹配源地址, 而这个包**正因为源地址
+#        还没确定才来查路由** —— 死循环, 必然落进 C 规则。
+#     ② `fwmark 0x4 -> main` (IMARK): 需要回包能命中原 conntrack 条目; 而回包源地址
+#        一旦跑偏, tuple 就不是那条了 ⇒ connmark 永远匹配不上 (自锁)。
+#   ⇒ 必须在**决策期**就用一个当时**已知**的判据把回包引到原生表。
+#
+# 判据为什么可以用 sport (源端口):
+#   本地主动出站的 socket 用的是**临时源端口**, 内核保证不与监听端口重叠;
+#   而回包的源端口必然等于被连的那个监听端口。
+#   所以 "sport 命中本机某个 UDP 监听端口" ⟺ "这是入站连接的回包"。这是决策期
+#   唯一稳定可用的判据 (表里没网卡的"连接方向"概念)。
+#
+# 哪些协议会中招 (实测 sing-box 同进程对照 + 源码核对):
+#   hysteria2 开 obfs  → sing-quic 把 socket 包成 SalamanderPacketConn/GeckoPacketConn,
+#                        只实现 ReadFrom/WriteTo ⇒ quic-go 的 wrapConn() 对
+#                        OOBCapablePacketConn 断言失败 ⇒ 退回 basicConn ⇒ 不再开
+#                        IPV6_RECVPKTINFO ⇒ 回包不再由内核用 IPV6_PKTINFO 钉住源地址。
+#   不开 obfs 的 QUIC (tuic 等) → socket 原样交给 quic-go, pktinfo 全程保留, 免疫。
+#   TCP 类 → accept 出来的连接本地地址已固定, 天然免疫。
+#   ⇒ 所以这不是"某个协议坏了", 而是"开了混淆的 QUIC/UDP 入站"这一类。
+discover_wildcard_udp_ports() { # → stdout: 空格分隔端口 (通配绑定的 UDP 监听端口)
+    local fam="${1:-6}" out
+    [[ "$fam" == "6" ]] || return 0
+    # ss 的通配渲染有两种: '*' = 双栈通配 (getsockname 回 v4-mapped), '[::]' = v6-only 通配。
+    # 具体地址 (如 [2001:...]:25926) 已被 socket 自己钉住源地址, 不需要本保护, 排除。
+    out=$(ss -H -lun6 2>/dev/null | awk '
+        $4 ~ /^\*:/ || $4 ~ /^\[::\]:/ || $4 ~ /^\[::ffff:0\.0\.0\.0\]:/ \
+            || $4 ~ /^\[0:0:0:0:0:0:0:0\]:/ || $4 ~ /^\[::0\]:/ {
+            p = $4; sub(/^.*:/, "", p); print p
+        }' | sort -n | uniq | tr '\n' ' ')
+    echo "${out% }"
+}
+
+# 入站回包源地址保护 (v6): sport <通配 UDP 监听端口> → 独立表 cw3-in。
+#
+# 为什么必须用**独立表**而不是朴素的 `lookup main`:
+#   suppress_takeover 的 need 计算 = "最小 prio 的、不含 fwmark|oif 的 `lookup main` 规则"。
+#   我们加 `prio X sport … lookup main` → 下次 apply 时 need 变成 X → C 规则装到 X-1
+#   → **反超**我们 → 保护静默失效 (报告 §5.1 实测)。独立表字面不含 'lookup main',
+#   need 不受影响 (已实测 need 保持 32766)。
+#
+# 优先级 need-5: 必须落在 need-1 (C 规则) **之前**才能抢在 cw3 之前生效;
+# 放在 need-4 (from 段规则) 之后无妨 —— 两者最终都去原生, 谁先命中都一样。
+inbound_reply_guard() { # <need>
+    local need="$1" cmd="ip -6" tid ports upseg defline p
+    # 先无条件清理旧的: 保证幂等, 也保证端口变化后不留残影 (否则换端口=旧端口仍被劫持)
+    while read -r p; do
+        [[ -n "$p" ]] && $cmd rule del prio "$p" 2>/dev/null
+    done < <($cmd rule show | grep -F "lookup $INBOUND_TABLE" | grep -oE '^[0-9]+')
+    $cmd route flush table "$INBOUND_TABLE" 2>/dev/null
+
+    case "${INBOUND_REPLY_PORTS,,}" in
+        off) info "入站回包保护: 已按配置关闭 (INBOUND_REPLY_PORTS=off)"; return 0 ;;
+    esac
+    # 只在 v6 默认走 WARP 时才有风险: native 模式下 C 规则本就是 → main, 回包天然正确
+    [[ "$DEFAULT_OUTBOUND_V6" == "warp" ]] || return 0
+    # 机器没有原生 v6 上游 (纯"补栈"机) 时不存在"该用哪个原生源"的问题
+    upseg=$($cmd route show default 2>/dev/null | grep -oE 'dev [a-zA-Z0-9_.-]+' | head -1 | awk '{print $2}')
+    [[ -n "$upseg" && "$upseg" != "$IFACE" ]] || return 0
+
+    if [[ -n "$INBOUND_REPLY_PORTS" && "${INBOUND_REPLY_PORTS,,}" != "off" ]]; then
+        ports="$INBOUND_REPLY_PORTS"
+    else
+        ports=$(discover_wildcard_udp_ports 6)
+    fi
+    [[ -n "$ports" ]] || return 0
+
+    # 表里放**原生 v6 上游的默认路由**。
+    # ⚠ 不要直接搬运 `ip route show` 的文本: iproute2 把 dev 以**前缀**形式打印并做了
+    # 去重压缩, 所以 `ip -6 route show default dev he-ipv6` 的输出**不含 dev 片段** →
+    # 照抄会得到 "带 onlink 却没有 dev" 的非法规格, 内核报
+    # "Nexthop device required for onlink"。这里按字段重建。
+    local defline gw mt spec rerr=""
+    defline=$($cmd route show default dev "$upseg" 2>/dev/null | head -1)
+    if [[ -z "$defline" ]]; then
+        warn "入站回包保护: 读不到 $upseg 的默认路由 — 已跳过 (该接口的 UDP 回包可能源地址漂移)"
+        return 0
+    fi
+    gw=$(awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1); exit}' <<<"$defline")
+    mt=$(awk '{for(i=1;i<=NF;i++) if($i=="metric") print $(i+1); exit}' <<<"$defline")
+    # point-to-point 线路没有 via, `default dev X` 本身就成立
+    if [[ -n "$gw" ]]; then spec="default via $gw dev $upseg"; else spec="default dev $upseg"; fi
+    [[ -n "$mt" ]] && spec="$spec metric $mt"
+    [[ "$defline" == *" onlink"* ]] && spec="$spec onlink"
+    tid=$(register_rt_table_as "$INBOUND_TABLE" "$INBOUND_TABLE_ID")
+    [[ -n "$tid" ]] || { warn "入站回包保护: 表 $INBOUND_TABLE 注册失败 — 已跳过"; return 0; }
+    rerr=$($cmd route replace table "$INBOUND_TABLE" $spec 2>&1 >/dev/null) \
+        || { warn "入站回包保护: 表 $INBOUND_TABLE 写默认路由失败 (${rerr:-未知错误}) — 已跳过"; return 0; }
+
+    # ip rule 的 sport 选择器**一次只能给一个端口** (多个值报 "Failed to parse rule type",
+    # RN 实测), 所以逐端口建规则。同优先级多条规则是允许的, 且它们指向同一张表,
+    # 命中顺序无所谓。
+    local added=0 failed=""
+    for p in $ports; do
+        if $cmd rule add prio $((need - 5)) sport "$p" lookup "$INBOUND_TABLE" 2>/dev/null; then
+            (( added++ ))
+        else
+            failed="$failed $p"
+        fi
+    done
+    if (( added > 0 )); then
+        ok "入站回包保护 (v6): $added 个通配 UDP 监听端口的源地址钉回原生 → $INBOUND_TABLE @ prio $((need-5))"
+        info "  端口: $ports"
+        [[ "$added" == "$(wc -w <<<"$ports")" ]] || warn "  未能安装的端口:$failed (内核不支持? 规则过多?)"
+        # 隧道/中继类服务提醒: amneziawg-go / wg-go / frp / rathole 这类程序可能从
+        # **同一个**监听 socket 主动发包, sport 命中会把它们的主动出站也从 WARP 改走
+        # 原生。只在真的检出时才提醒 —— 否则每次 apply 都刷无意义的 WARN。
+        local _tun
+        _tun=$(ss -H -lunp6 2>/dev/null | awk -v pl=" $ports " '
+            {
+                p = $4; sub(/^.*:/, "", p)
+                if (p ~ /^[0-9]+$/) last = p        # ss 少数版本把 users: 换行输出 → 记着上一个端口
+                if (!match($0, /users:\(\("[a-zA-Z0-9_.-]+"/)) next
+                n = tolower(substr($0, RSTART+9, RLENGTH-10))
+                if (index(pl, " " last " ") == 0) next
+                if (n ~ /wireguard|wg-go|amneziawg|openvpn|tailscale|frp|rathole|gost|zerotier|tinc/) print n
+            }' | sort -u | tr '\n' ' ')
+        [[ -n "$_tun" ]] && warn "  受保护端口里有隧道类服务 ($_tun) —— 它们若从同一 socket 主动发包,"
+        [[ -n "$_tun" ]] && warn "  外层流量会改走原生; 需要保留 WARP 就把这些端口写进 main.conf 的 INBOUND_REPLY_PORTS"
+    else
+        warn "入站回包保护: 规则一条都没装上 — 通配 UDP 回包仍可能被 WARP 夺走源地址"
+    fi
+    return 0
 }
 
 # 动态压制外部全接管 + 前置路由规则:
@@ -1936,6 +2103,8 @@ suppress_takeover() {
             && $cmd rule add prio $((need - 2)) fwmark "$MARK" table "$TABLE_NAME" 2>/dev/null \
             && $cmd rule add prio $((need - 1)) not fwmark 0xc350 lookup "$c_dst" 2>/dev/null \
             && ok "前置规则 (fam$f): oif/fwmark→cw3 + 未标→$c_dst @ prio $((need-3))~$((need-1)) (< $need)"
+        # 入站回包源地址保护 (仅 v6 面; v4 的 C 规则本来就是 → main, 回包天然正确)
+        [[ "$f" == "6" ]] && inbound_reply_guard "$need"
     done
 }
 
@@ -2697,6 +2866,26 @@ doctor() {
                 && okline "ip -6 rule fwmark 0x$MARK → $TABLE_NAME 在位" || failline "v6 策略路由规则缺失 (v6=warp)"
             ip -6 route show table "$TABLE_NAME" 2>/dev/null | grep -q default \
                 && okline "表 $TABLE_NAME 有 v6 默认路由" || failline "v6=warp 但 $TABLE_NAME 表无 v6 默认路由!"
+            # 入站回包源地址保护 —— 这一项缺失是**静默**失效: 没有任何报错, 只是走 IPv6
+            # 的 QUIC/UDP 节点 (hysteria2 开混淆等) 握手超时, 而同节点走 IPv4 一切正常。
+            # 不体检就永远查不到, 所以这里必须给出结论而不是"检查中"。
+            if [[ "$DEFAULT_OUTBOUND_V6" == "warp" ]]; then
+                local _wp _inst
+                _wp=$(discover_wildcard_udp_ports 6)
+                if [[ -z "$_wp" ]]; then
+                    okline "入站回包保护: 无通配 UDP 监听端口 (回包源地址天然固定)"
+                else
+                    _inst=$(ip -6 rule show 2>/dev/null | grep -cF "lookup $INBOUND_TABLE")
+                    if (( _inst > 0 )); then
+                        okline "入站回包保护: $_inst 个 sport 规则 → $INBOUND_TABLE"
+                        info "  通配 UDP 监听端口: $_wp"
+                    else
+                        failline "入站回包保护缺失: 通配 UDP 监听 ($_wp) 的回包会被 WARP 夺走源地址 —"
+                        info "  症状: 走 IPv6 的 QUIC/UDP 节点 (hysteria2 开混淆等) 握手超时, 走 IPv4 正常"
+                        info "  修复: catmi-warp3 apply   (或 main.conf 设 INBOUND_REPLY_PORTS=off 显式关闭)"
+                    fi
+                fi
+            fi
         fi
         # 默认出口连通性**实测** —— 结构在位 ≠ 真能出网 (隧道死了而规则还在时, 结构检查全绿)
         local _e4
