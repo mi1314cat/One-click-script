@@ -2872,7 +2872,12 @@ doctor() {
             if [[ "$DEFAULT_OUTBOUND_V6" == "warp" ]]; then
                 local _wp _inst
                 _wp=$(discover_wildcard_udp_ports 6)
-                if [[ -z "$_wp" ]]; then
+                # 显式 opt-out 不该被判 FAIL —— 那是用户自己做的取舍, 报 WARN 即可
+                # (否则关掉这项保护的人每次体检都被红色刷屏, 真正的告警反而被稀释)
+                if [[ "${INBOUND_REPLY_PORTS,,}" == "off" ]]; then
+                    warnline "入站回包保护: 已按 INBOUND_REPLY_PORTS=off 关闭 — 通配 UDP 回包无源地址保护"
+                    info "  若节点走 IPv6 握手超时: 删掉 main.conf 里这行再 catmi-warp3 apply --yes"
+                elif [[ -z "$_wp" ]]; then
                     okline "入站回包保护: 无通配 UDP 监听端口 (回包源地址天然固定)"
                 else
                     _inst=$(ip -6 rule show 2>/dev/null | grep -cF "lookup $INBOUND_TABLE")
