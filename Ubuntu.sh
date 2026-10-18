@@ -252,9 +252,10 @@ check_catsafety() {
         json=$(catSafety json 2>/dev/null)
         if [[ "$json" == *'"enabled":true'* ]]; then
             backend=$(printf '%s' "$json" | sed -n 's/.*"backend":"\([^"]*\)".*/\1/p')
-            cs_running="${GREEN}已启用(${backend})${PLAIN}"
+            # svc_entry 靠 "运行中" 三个字上绿点，不能只写"已启用"
+            cs_running="${GREEN}运行中${PLAIN} (${backend})"
         else
-            cs_running="${YELLOW}未启用${PLAIN}"
+            cs_running="${YELLOW}未运行${PLAIN}"
         fi
         if systemctl is-active --quiet catSafety-guard.timer 2>/dev/null; then
             cs_enabled="${GREEN}已启用${PLAIN}"
@@ -488,6 +489,11 @@ svc_entry() {  # $1=名称 $2=安装状态 $3=运行状态 $4=自启状态(可�
     SVC_ENTRY="${n} ${dot} ${state}${mark}"
 }
 
+svc_single() {  # 单列服务行
+    svc_entry "$1" "$2" "$3" "${4:-}"
+    echo -e "  ${SVC_ENTRY}"
+}
+
 svc_row() {  # 双列服务: $1-4 左列(名称/安装/运行/自启)  $5-8 右列
     local e1 e2
     svc_entry "$1" "$2" "$3" "${4:-}"; e1="$SVC_ENTRY"
@@ -541,8 +547,7 @@ EOF
             "catSafety" "$cs_installed"              "$cs_running"              "$cs_enabled"
     svc_row "Nginx" "$nginx_installed" "$nginx_running" "" \
             "Caddy"     "$caddy_installed"            "$caddy_running"           ""
-    svc_row "Fail2ban" "$fail2ban_installed" "$fail2ban_running" "" \
-            "" "" "" ""
+    svc_single "Fail2ban" "$fail2ban_installed" "$fail2ban_running" ""
     box_bot
 
     box_top "功能菜单"
