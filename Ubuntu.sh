@@ -51,6 +51,13 @@ invalid_input() {
 }
 
 # 操作结束后的统一返回等待
+confirm_action() {  # <提示> → 0=确认
+    local a
+    echo -ne "${YELLOW}${1} [y/N]: ${PLAIN}"
+    read -r a || return 1
+    [[ "$a" =~ ^[yY] ]]
+}
+
 pause_return() {
     echo
     echo -ne "${GRAY}按回车返回菜单...${PLAIN}"
@@ -236,7 +243,33 @@ detect_ips() {
 }
 
 # ===========================
-#   UFW / nftables 检测
+#   catSafety 检测（统一防火墙/安全工具）
+# ===========================
+check_catsafety() {
+    if command -v catSafety >/dev/null 2>&1; then
+        cs_installed="${GREEN}已安装${PLAIN}"
+        local json backend
+        json=$(catSafety json 2>/dev/null)
+        if [[ "$json" == *'"enabled":true'* ]]; then
+            backend=$(printf '%s' "$json" | sed -n 's/.*"backend":"\([^"]*\)".*/\1/p')
+            cs_running="${GREEN}已启用(${backend})${PLAIN}"
+        else
+            cs_running="${YELLOW}未启用${PLAIN}"
+        fi
+        if systemctl is-active --quiet catSafety-guard.timer 2>/dev/null; then
+            cs_enabled="${GREEN}已启用${PLAIN}"
+        else
+            cs_enabled="${YELLOW}未启用${PLAIN}"
+        fi
+    else
+        cs_installed="${RED}未安装${PLAIN}"
+        cs_running="${RED}未运行${PLAIN}"
+        cs_enabled="${YELLOW}-${PLAIN}"
+    fi
+}
+
+# ===========================
+#   UFW / nftables 检测（旧，保留兼容）
 # ===========================
 check_ufw() {
     if command -v ufw >/dev/null 2>&1 || command -v iptables >/dev/null 2>&1; then
@@ -379,8 +412,7 @@ refresh_services() {
         stopped) caddy_installed="${GREEN}已安装(Docker)${PLAIN}"; caddy_running="${RED}未运行${PLAIN}" ;;
     esac
 
-    check_ufw
-    check_nft
+    check_catsafety
 
     xray_svc=$(detect_xray_service)
     if [[ -n "$xray_svc" ]]; then
@@ -506,11 +538,11 @@ EOF
     info2 "硬盘"   "${DISK_USED} / ${DISK_TOTAL} (${DISK_PERCENT})" "连接" "TCP ${TCP_CONN} | UDP ${UDP_CONN}"
     box_mid "服务状态"
     svc_row "Docker" "$docker_installed" "$docker_running" "" \
-            "UFW"       "$ufw_installed"             "$ufw_running"             "$ufw_enabled"
+            "catSafety" "$cs_installed"              "$cs_running"              "$cs_enabled"
     svc_row "Nginx" "$nginx_installed" "$nginx_running" "" \
-            "nftables"  "$nft_installed"             "$nft_running"             "$nft_enabled"
-    svc_row "Caddy" "$caddy_installed" "$caddy_running" "" \
-            "Fail2ban"  "$fail2ban_installed"        "$fail2ban_running"        ""
+            "Caddy"     "$caddy_installed"            "$caddy_running"           ""
+    svc_row "Fail2ban" "$fail2ban_installed" "$fail2ban_running" "" \
+            "" "" "" ""
     box_bot
 
     box_top "功能菜单"
@@ -519,7 +551,7 @@ EOF
     box_mid
     menu3 "01" "安装基础依赖"   "$CYAN"    "02" "内核管理"       "$GREEN"   "03" "Kejilion工具箱" "$CYAN"
     menu3 "04" "warp"           "$GREEN"   "05" "申请 SSL 证书"  "$MAGENTA" "06" "Web 服务"      "$MAGENTA"
-    menu3 "07" "防火墙"          "$MAGENTA" "08" "安装 Argo"     "$CYAN"    "09" "安装 Gost"    "$CYAN"
+    menu3 "07" "防火墙/安全"      "$MAGENTA" "08" "安装 Argo"     "$CYAN"    "09" "安装 Gost"    "$CYAN"
     menu3 "10" "VPS 实用工具"   "$CYAN"    "99" "节点信息"       "$YELLOW"
     box_mid
     echo -e "  ${YELLOW}[0]${PLAIN} ${RED}退出面板${PLAIN}"
@@ -879,18 +911,43 @@ view_log() {
 # ===========================
 #   防火墙 / 安全工具(循环版, 0 返回主菜单)
 # ===========================
+catsafety_ensure() {
+    if command -v catSafety >/dev/null 2>&1; then return 0; fi
+    print_info "未安装 catSafety，正在安装..."
+    run_remote "https://github.com/mi1314cat/catSafety/raw/refs/heads/main/install.sh"
+    if command -v catSafety >/dev/null 2>&1; then
+        print_info "catSafety 安装完成"
+        return 0
+    fi
+    print_error "catSafety 安装失败，请检查网络后重试"
+    return 1
+}
+
 fail_menu() {
     local choice rc
     while true; do
         clear
         box_top "防火墙 / 安全工具"
-        echo -e "  ${YELLOW}1${PLAIN}) 安装 UFW"
-        echo -e "  ${YELLOW}2${PLAIN}) 安装 nftables"
-        echo -e "  ${YELLOW}3${PLAIN}) 安装 Fail2ban"
+        if command -v catSafety >/dev/null 2>&1; then
+            local be en sshs
+            be=$(catSafety json 2>/dev/null | sed -n 's/.*"backend":"\([^"]*\)".*/\1/p')
+            en=$(catSafety enabled >/dev/null 2>&1 && echo 已启用 || echo 未启用)
+            sshs=$(catSafety json 2>/dev/null | sed -n 's/.*"ssh_ports":\[\([^]]*\)\].*/\1/p')
+            info2 "catSafety" "$en" "后端" "${be:-?}"
+            info2 "SSH 端口" "${sshs:-?}" "守护" "$(systemctl is-active catSafety-guard.timer 2>/dev/null || echo 未安装)"
+        else
+            info2 "catSafety" "未安装（进入菜单 1 可安装）"
+        fi
+        box_mid
+        echo -e "  ${YELLOW}1${PLAIN}) 安装 / 进入 catSafety 面板（防火墙 · SSH 守护 · Fail2ban）"
+        echo -e "  ${YELLOW}2${PLAIN}) 查看防火墙状态"
+        echo -e "  ${YELLOW}3${PLAIN}) SSH 保护状态"
+        echo -e "  ${YELLOW}4${PLAIN}) 一键接管（导入现有规则 + 三项目端口）"
+        echo -e "  ${YELLOW}5${PLAIN}) 紧急放行（PANIC，失联时用）"
         echo -e "  ${YELLOW}0${PLAIN}) 返回主菜单"
         box_bot
         echo
-        read_choice "  请输入选项 [0-3]: " choice
+        read_choice "  请输入选项 [0-5]: " choice
         rc=$?
         if (( rc > 128 )); then continue; fi
         if (( rc != 0 )); then return 0; fi
@@ -898,9 +955,28 @@ fail_menu() {
 
         case $choice in
             0) return 0 ;;
-            1) run_remote "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/ufw.sh"; pause_return ;;
-            2) run_remote "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/nftables.sh"; pause_return ;;
-            3) run_remote "https://github.com/mi1314cat/One-click-script/raw/refs/heads/main/A/fail2ban.sh"; pause_return ;;
+            1)
+                catsafety_ensure || { pause_return; continue; }
+                catSafety menu
+                pause_return ;;
+            2)
+                catsafety_ensure || { pause_return; continue; }
+                catSafety status
+                pause_return ;;
+            3)
+                catsafety_ensure || { pause_return; continue; }
+                catSafety ssh status
+                pause_return ;;
+            4)
+                catsafety_ensure || { pause_return; continue; }
+                catSafety takeover
+                pause_return ;;
+            5)
+                catsafety_ensure || { pause_return; continue; }
+                if confirm_action "确认 PANIC（会停用防火墙，保证 SSH 可进）?"; then
+                    catSafety panic
+                fi
+                pause_return ;;
             *) invalid_input ;;
         esac
     done
