@@ -605,7 +605,25 @@ run_sb() {
     return $rc
 }
 
-# ---------- 主流程 ----------
+# ---------- 节点命名: 旗帜 + 内核默认值(X/M/SB) + 协议形态 ----------
+# 用户约定: 默认值就是内核标识; 自定义时三个内核用同一个前缀 (如 RN/HK)。
+#   自定义 "RN"  → 🇺🇸 RN-vless… / 🇺🇸 RN-AnyTLS… / 🇺🇸 RN-anytls…
+#   不自定义     → 🇺🇸 X-… / 🇺🇸 M-… / 🇺🇸 SB-…
+ca_apply_names() {
+    local p="${CATMI_PREFIX:-}"
+    p="${p//[[:space:]]/}"
+    if [[ -n "$p" ]]; then
+        export XRAY_SERVER_NAME="$p"
+        export M_TAG_PREFIX="${p}-"
+        export SB_SERVER_NAME="$p"
+    else
+        export XRAY_SERVER_NAME="X"
+        export M_TAG_PREFIX="M-"
+        export SB_SERVER_NAME="SB"
+    fi
+    printf '  节点名前缀: %s (X=%s, M=%s, SB=%s)\n' \
+        "${p:-默认}" "$XRAY_SERVER_NAME" "$M_TAG_PREFIX" "$SB_SERVER_NAME"
+}
 
 ca_main() {
     title "三内核全协议"
@@ -735,6 +753,7 @@ all_wizard() {
     box_bot
     echo
 
+    local pfx
     printf "  ${CYAN}1) 范围${PLAIN} [1=全部 2=仅X 3=仅M 4=仅SB] (默认 1): "
     read -r scope || return 0
     case "${scope:-1}" in
@@ -742,12 +761,16 @@ all_wizard() {
     esac
     ONLY=",$(printf '%s' "$ONLY" | tr '[:upper:]' '[:lower:]' | tr -s ' ,' ',')"
 
+    printf "  ${CYAN}2) 节点名前缀${PLAIN} (回车=按内核默认 X/M/SB, 自定义如 RN/HK): "
+    read -r pfx || return 0
+    CATMI_PREFIX="${pfx// /}"
+
     def_dom=$(ca_guess_domain)
-    printf "  ${CYAN}2) 域名${PLAIN} (回车=%s): " "${def_dom:-不设置}"
+    printf "  ${CYAN}3) 域名${PLAIN} (回车=%s): " "${def_dom:-不设置}"
     read -r dom || return 0
     DOMAIN="${dom:-$def_dom}"
 
-    printf "  ${CYAN}3) 证书${PLAIN} [1=自动检测 2=手动给路径 3=自签(仅 M/SB)] (默认 1): "
+    printf "  ${CYAN}4) 证书${PLAIN} [1=自动检测 2=手动给路径 3=自签(仅 M/SB)] (默认 1): "
     read -r cert_mode || return 0
     CRT=""; KEY=""; SB_CERT_MODE="real"; M_CERT_MODE="real"
     case "${cert_mode:-1}" in
@@ -759,20 +782,21 @@ all_wizard() {
         3) SB_CERT_MODE="self"; M_CERT_MODE="self" ;;
     esac
 
-    printf "  ${CYAN}4) 生成 CDN 档${PLAIN}? [y/N] (默认 N, 第一次建议 N): "
+    printf "  ${CYAN}5) 生成 CDN 档${PLAIN}? [y/N] (默认 N, 第一次建议 N): "
     read -r cdn || return 0
     [[ "${cdn:-n}" == [yY]* ]] && NO_CDN=0 || NO_CDN=1
 
-    printf "  ${CYAN}5) 预演只报告${PLAIN}? [y/N] (默认 N): "
+    printf "  ${CYAN}6) 预演只报告${PLAIN}? [y/N] (默认 N): "
     read -r dry || return 0
     [[ "${dry:-n}" == [yY]* ]] && DRY=1 || DRY=0
 
-    printf "  ${CYAN}6) 已有节点也重建${PLAIN}? [y/N] (默认 N, 会新增一轮节点): "
+    printf "  ${CYAN}7) 已有节点也重建${PLAIN}? [y/N] (默认 N, 会新增一轮节点): "
     read -r force || return 0
     [[ "${force:-n}" == [yY]* ]] && FORCE=1 || FORCE=0
     echo
-    printf "  ${CYAN}将执行${PLAIN}: 范围=%s  域名=%s  证书=%s  CDN=%s  模式=%s\n" \
-        "${ONLY//,/ }" "${DOMAIN:-未设}" "${crt:-自动检测}" "$([[ $NO_CDN == 1 ]] && echo 跳过 || echo 生成)" \
+    printf "  ${CYAN}将执行${PLAIN}: 范围=%s  前缀=%s  域名=%s  证书=%s  CDN=%s  模式=%s\n" \
+        "${ONLY//,/ }" "${CATMI_PREFIX:-默认 X/M/SB}" "${DOMAIN:-未设}" "${crt:-自动检测}" \
+        "$([[ $NO_CDN == 1 ]] && echo 跳过 || echo 生成)" \
         "$([[ $DRY == 1 ]] && echo 预演 || echo 执行)$([[ $FORCE == 1 ]] && echo ", 覆盖重建")"
     printf "  ${GRAY}回车开始 / n 取消${PLAIN}: "
     read -r confirm || return 0
@@ -1017,10 +1041,26 @@ share_menu() {
 # 公共分享服务的 record 允许任意 provider; 这里用 provider=catmi + type=file
 # 存一份 JSON: {"version":1,"links":{"xray":...,"mihomo":...,"sing-box":...}}
 # 客户端拿到这一条, 就能自动分发给三个项目的客户端。
+# 每次生成总链接前先**新发三条**一次性链接 —— 用户明确要求分享次数=1
+# (防节点泄露)。旧链接被上一次导入用掉后就该失效, 不能复用。
+# 次数可用 CATMI_SHARE_USES 覆盖 (0=不限)。
+ca_bundle_mint() {
+    local uses="${CATMI_SHARE_USES:-1}"
+    [[ "$uses" =~ ^[0-9]+$ ]] || uses=1
+    # X: 自动模式 + 显式次数/永久
+    SHARE_AUTO=1 SHARE_AUTO_MAX_USES="$uses" SHARE_AUTO_TTL_HOURS=0 \
+        timeout 150 bash /root/conf/share.sh create --all >/dev/null 2>&1 || true
+    # M: share.sh auto <tag> <次数> <小时>
+    timeout 150 bash /root/catmi/mihomo/src/share/share.sh auto all "$uses" 0 >/dev/null 2>&1 || true
+    # SB: create-all <次数> <小时>
+    timeout 150 bash /root/catmi/sing-box/conf/share.sh create-all "$uses" 0 >/dev/null 2>&1 || true
+}
+
 ca_bundle_create() {
     local tok port host x m sb
     tok=$(share_admin_token); port=$(share_port); host=$(public_host)
     [[ -n "$tok" ]] || { warn "找不到分享服务 admin token, 不生成总链接"; return 1; }
+    [[ "${CATMI_BUNDLE_REUSE:-0}" == "1" ]] || ca_bundle_mint
     x=$(share_best xray)   && x="http://${host}:${port}/share/${x%%$'\t'*}"
     m=$(share_best mihomo) && m="http://${host}:${port}/share/${m%%$'\t'*}"
     sb=$(share_best sing-box) && sb="http://${host}:${port}/share/${sb%%$'\t'*}"
@@ -1063,16 +1103,18 @@ cl_x_import()  { command -v xbd >/dev/null 2>&1 || { err "X 客户端未安装 (
 cl_m_import()  {
     local c="${MIHOMO_CLIENT_ROOT:-/root/catmi/mihomo-client}/src/client.sh"
     [[ -r "$c" ]] || { err "M 客户端未安装 ($c)"; return 1; }
-    # 名字交给调度器, 其余交互一律走默认 (EOF) —— 用户只粘贴一次链接
-    CLIENT_SUB_NAME="${2:-catmi}" timeout 240 bash "$c" sub "$1" </dev/null
+    # 名字交给调度器, 其余交互一律走默认 (EOF) —— 用户只粘贴一次链接。
+    # 默认组名/前缀 = M (与服务器节点名 M-… 幂等, 不会叠成 M-M-…)
+    CLIENT_SUB_NAME="${2:-M}" timeout 240 bash "$c" sub "$1" </dev/null
 }
 cl_sb_import() {
     command -v sb-client >/dev/null 2>&1 || { err "SB 客户端未安装 (sb-client)"; return 1; }
-    SB_SUBS_PREFIX="${2:-catmi}" timeout 180 sb-client add "$1" </dev/null
+    # 默认前缀 SB-: 服务端节点名已是 SB-…, to_sb.py 会幂等跳过
+    SB_SUBS_PREFIX="${2:-SB-}" timeout 180 sb-client add "$1" </dev/null
 }
 
 cl_import_bundle() {  # <bundle-url> [前缀]
-    local url="$1" prefix="${2:-catmi}" tmp
+    local url="$1" prefix="${2:-}" tmp
     tmp=$(mktemp /tmp/catmi-bundle.XXXXXX) || return 1
     say "拉取总链接 ..."
     if ! curl -fsSL --max-time 15 "$url" -o "$tmp"; then
@@ -1094,10 +1136,11 @@ PYX
         say "→ X 客户端"; cl_x_import "$CA_X" && ok "X 客户端导入完成" || { err "X 客户端导入失败"; fail=$((fail+1)); }
     fi
     if [[ -n "${CA_M:-}" ]]; then
-        say "→ Mihomo 客户端"; cl_m_import "$CA_M" "$prefix" && ok "M 客户端导入完成" || { err "M 客户端导入失败"; fail=$((fail+1)); }
+        say "→ Mihomo 客户端"; cl_m_import "$CA_M" "${prefix:-M}" && ok "M 客户端导入完成" || { err "M 客户端导入失败"; fail=$((fail+1)); }
     fi
     if [[ -n "${CA_SB:-}" ]]; then
-        say "→ Sing-box 客户端"; cl_sb_import "$CA_SB" "$prefix" && ok "SB 客户端导入完成" || { err "SB 客户端导入失败"; fail=$((fail+1)); }
+        local sbf; if [[ -n "$prefix" ]]; then sbf="${prefix}-"; else sbf="SB-"; fi
+        say "→ Sing-box 客户端"; cl_sb_import "$CA_SB" "$sbf" && ok "SB 客户端导入完成" || { err "SB 客户端导入失败"; fail=$((fail+1)); }
     fi
     (( fail == 0 )) && ok "三个客户端都已导入" || warn "有 $fail 个客户端导入失败（上面有原因）"
     return $(( fail > 0 ))
@@ -1128,8 +1171,8 @@ cl_client_menu() {
                 local u p
                 printf "  总链接: "; read -r u || return 0
                 [[ -n "$u" ]] || { invalid_input; continue; }
-                printf "  SB 节点前缀 (回车=catmi): "; read -r p || p=""
-                cl_import_bundle "$u" "${p:-catmi}"
+                printf "  自定义名称前缀 (回车=按内核默认 X/M/SB): "; read -r p || p=""
+                cl_import_bundle "$u" "${p// /}"
                 pause_return ;;
             2)
                 local x m sb
@@ -1138,7 +1181,7 @@ cl_client_menu() {
                 printf "  SB 链接 (回车跳过): "; read -r sb || sb=""
                 [[ -n "$x" ]] && { say "→ X"; cl_x_import "$x" || err "X 导入失败"; }
                 [[ -n "$m" ]] && { say "→ M"; cl_m_import "$m" || err "M 导入失败"; }
-                [[ -n "$sb" ]] && { say "→ SB"; cl_sb_import "$sb" catmi || err "SB 导入失败"; }
+                [[ -n "$sb" ]] && { say "→ SB"; cl_sb_import "$sb" "SB-" || err "SB 导入失败"; }
                 pause_return ;;
             3)
                 run_project "$REPO_X" install.sh client
