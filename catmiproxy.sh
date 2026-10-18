@@ -39,6 +39,14 @@ if locale -a 2>/dev/null | grep -qi 'C.utf8'; then
     export LC_ALL=C.UTF-8
 fi
 
+# 交互保障: 有些面板/包装脚本会把 stdin 关掉或重定向, 菜单会立刻 EOF 退出,
+# 看起来像"点了没反应"。脚本以**文件**方式运行时, 直接改从 /dev/tty 读;
+# 管道方式 (curl ... | bash) 不能动 fd0 —— 那会把 bash 正在读的脚本流截断,
+# 所以只对"脚本是普通文件"这一种安全情形生效。
+if [[ ! -t 0 && -f "${BASH_SOURCE[0]:-}" && -r /dev/tty ]]; then
+    exec </dev/tty 2>/dev/null || true
+fi
+
 # ===========================
 #   Color & Style
 # ===========================
@@ -169,10 +177,17 @@ menu_v() {  # 竖排单列菜单: [编号] 标题 (标题用分类色)
 #   输入
 # ===========================
 read_choice() {
+    # ★ 提示必须打到 stderr，答案从 stdout 输出 —— 因为调用方一律写成
+    #   choice=$(read_choice "..."): 如果提示和答案都走 stdout，提示会被
+    #   命令替换吃掉 (终端上根本看不到"请选择")，而 choice 变成提示文字，
+    #   于是任何输入都匹配不上 case → 菜单只重画、永远出不去。
+    #   真机实测: 公共分享服务菜单就是这样"卡住、无法选择"的。
     local prompt="$1" c
-    printf "%s" "$prompt"
+    printf "%s" "$prompt" >&2
     read -r c
-    return $?
+    local rc=$?
+    printf '%s' "$c"
+    return $rc
 }
 
 invalid_input() { print_error "无效选择"; sleep 1; }
